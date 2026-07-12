@@ -1,0 +1,5664 @@
+# Specification: Scaleway SFS Subdirectory CSI Driver
+
+## 1. Purpose
+
+This specification defines a new open source Kubernetes CSI driver for Scaleway
+File Storage.
+
+The driver must expose many Kubernetes RWX PersistentVolumeClaims as isolated
+subdirectories inside a small pool of existing Scaleway File Storage file
+systems.
+
+The target model is:
+
+```text
+Kubernetes PVC
+  -> CSI logical volume
+  -> one subdirectory inside one Scaleway File Storage parent
+  -> pod sees a normal RWX volume
+```
+
+The project must be a standalone public GitHub repository. It must not depend on
+private URLab code, private naming, private deployment conventions, or private
+container registries.
+
+The public project can mention in its README that it was created by URLab and
+released under the MIT license. The driver name, package names, Helm chart, CRDs
+if any, Kubernetes labels, and examples must remain neutral and reusable by the
+community.
+
+## 2. Problem Statement
+
+Scaleway File Storage provides managed RWX storage for Kapsule and Instances.
+The official Scaleway File Storage CSI driver maps a Kubernetes PVC to a
+Scaleway File Storage file system.
+
+That default model is not sufficient for platforms that create many user-level
+RWX volumes. Scaleway limits the number of File Storage file systems that can be
+attached to an Instance. A platform can therefore hit the node-level attach
+limit long before it exhausts storage capacity.
+
+The desired behavior is different:
+
+- keep only a small number of physical Scaleway File Storage file systems
+  attached to nodes;
+- create many Kubernetes PVCs;
+- map each PVC to a dedicated subdirectory of one parent file system;
+- keep Kubernetes and application code unaware of this implementation detail.
+
+This is the same general storage pattern as "NFS subdir provisioning", but the
+driver must target Scaleway File Storage through its supported API and mount
+model. It must not depend on undocumented NFS endpoints.
+
+Scaleway documents Kubernetes `subPath` usage for splitting one File Storage
+file system into multiple application directories. This project turns that
+manual pod-level pattern into a CSI-level abstraction so applications can keep
+using normal PVCs without adding provider-specific `subPath` logic.
+
+## 3. Non-Goals
+
+The first production-ready version must stay focused. Do not include the
+following features in v1:
+
+- automatic creation of parent Scaleway File Storage file systems;
+- automatic cost-based pool scaling;
+- automatic deletion of parent file systems;
+- snapshots;
+- clones;
+- cross-cloud support;
+- support for non-Scaleway storage backends;
+- hard per-PVC filesystem quotas unless Scaleway exposes a supported mechanism;
+- UI, dashboards, or web control planes;
+- application-specific logic from URLab or any other product.
+
+The driver must solve one problem well: dynamic RWX PVC provisioning through
+safe subdirectory allocation inside existing Scaleway File Storage parents.
+
+## 4. Public Project Identity
+
+### 4.1 Repository
+
+Recommended repository name:
+
+```text
+scaleway-sfs-subdir-csi
+```
+
+Rationale:
+
+- explicit enough for users to understand the backend;
+- neutral enough for a public open source repository;
+- does not mention private product names;
+- avoids implying that the project is the official Scaleway CSI driver.
+
+The README must clearly state:
+
+```text
+This is a community project and is not an official Scaleway product.
+Created by URLab and released under the MIT license.
+```
+
+### 4.2 License
+
+Use MIT.
+
+Required files:
+
+- `LICENSE`
+- `README.md`
+- `CONTRIBUTING.md`
+- `CODE_OF_CONDUCT.md`
+- `SECURITY.md`
+
+### 4.3 Driver Name
+
+The CSI driver name must be globally unique and must not use a domain owned by
+Scaleway unless Scaleway explicitly adopts or approves the project.
+
+Recommended development placeholder:
+
+```text
+sfs-subdir.csi.example.com
+```
+
+Before any public release, including `v0.x`, maintainers must choose a CSI
+driver name under a domain they control or under a domain explicitly approved by
+the domain owner.
+
+Do not use a Scaleway-owned or Scaleway-branded domain unless Scaleway approves
+the project identity.
+
+The Helm chart must allow overriding the driver name, but production users
+should keep it stable after the first deployment because changing a CSI driver
+name breaks existing PersistentVolumes.
+
+### 4.4 Public Artifacts and Versioning
+
+Before the first public preview, maintainers must choose and document:
+
+- GitHub organization and repository URL;
+- final CSI driver name;
+- public container image registry path;
+- public Helm chart distribution path;
+- public `csi-admin` binary distribution path and supported operator platforms;
+- semantic versioning policy;
+- release tag format;
+- supported Kubernetes and Kapsule versions.
+
+Every released chart must reference public images by immutable digest. Tags
+remain required as human-readable release metadata, but production manifests
+must render `repository@sha256:<digest>` for the driver and every CSI sidecar.
+Tag-only images, `latest`, development-only image names, private registries, and
+placeholder Helm repository URLs are not acceptable in a public release. The
+release metadata must record the exact rendered digests.
+
+## 5. Target User Experience
+
+### 5.1 Administrator Flow
+
+An administrator creates one or more Scaleway File Storage file systems:
+
+```bash
+scw file filesystem create \
+  region=fr-par \
+  name=sfs-subdir-pool-standard-01 \
+  size=2TB
+
+scw file filesystem create \
+  region=fr-par \
+  name=sfs-subdir-pool-standard-02 \
+  size=2TB
+```
+
+Then the administrator creates a dedicated namespace, a Kubernetes Secret for
+the Scaleway credentials, and a second Secret containing the installation
+identity:
+
+```bash
+kubectl create namespace scaleway-sfs-subdir-csi
+kubectl label namespace scaleway-sfs-subdir-csi \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/enforce-version=latest
+
+kubectl -n scaleway-sfs-subdir-csi create secret generic scaleway-sfs-subdir-csi-credentials \
+  --from-literal=SCW_ACCESS_KEY="$SCW_ACCESS_KEY" \
+  --from-literal=SCW_SECRET_KEY="$SCW_SECRET_KEY"
+
+INSTALLATION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+
+kubectl -n scaleway-sfs-subdir-csi create secret generic scaleway-sfs-subdir-csi-identity \
+  --from-literal=installationID="$INSTALLATION_ID"
+```
+
+Then the administrator installs the CSI driver:
+
+```bash
+helm repo add scaleway-sfs-subdir-csi https://<org>.github.io/scaleway-sfs-subdir-csi
+helm repo update
+
+helm upgrade --install scaleway-sfs-subdir-csi \
+  scaleway-sfs-subdir-csi/scaleway-sfs-subdir-csi \
+  --namespace scaleway-sfs-subdir-csi \
+  --set scaleway.region=fr-par \
+  --set scaleway.defaultZone=fr-par-1 \
+  --set scaleway.projectId=<project-id> \
+  --set scaleway.credentials.existingSecretName=scaleway-sfs-subdir-csi-credentials \
+  --set installation.existingSecretName=scaleway-sfs-subdir-csi-identity \
+  --set 'pools.standard.filesystems[0].id=<filesystem-id-1>' \
+  --set 'pools.standard.filesystems[1].id=<filesystem-id-2>'
+```
+
+The production installation path must use existing Kubernetes Secrets for both
+credentials and installation identity. The installation identity is not a
+credential, but it is durable safety state and must be backed up with the driver
+namespace. Chart-generated credentials are forbidden. A chart-generated
+installation identity may exist for local development only and must be clearly
+documented as non-production.
+
+The dedicated namespace is security-sensitive because the CSI mount containers
+are privileged. The installation preflight must verify the effective Pod
+Security Admission policy before Helm installation and fail with an actionable
+message when privileged pods would be rejected. Rights to create Pods or
+workloads in this namespace must be restricted to the platform administrators
+and the Helm release process.
+
+### 5.2 StorageClass Flow
+
+The Helm chart creates a StorageClass similar to:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sfs-subdir-rwx
+provisioner: sfs-subdir.csi.example.com
+parameters:
+  poolName: standard
+  directoryMode: "0770"
+  directoryUid: "1000"
+  directoryGid: "1000"
+  onDelete: archive
+reclaimPolicy: Delete
+allowVolumeExpansion: false
+volumeBindingMode: Immediate
+```
+
+Platform overlays can then map their provider-neutral storage class name to the
+driver. The open source project must not contain private platform-specific
+StorageClass names in its default manifests.
+
+### 5.3 Application Flow
+
+Applications create ordinary RWX PVCs:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: user-volume-a
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: sfs-subdir-rwx
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+The application must not know:
+
+- which parent Scaleway File Storage file system is used;
+- which subdirectory is used;
+- whether the parent pool has one, two, or more file systems.
+
+## 6. Core Design Decisions
+
+### 6.1 Parent File Systems Are Existing Resources in v1
+
+The v1 driver must consume an explicit pool of existing Scaleway File Storage
+file systems.
+
+It must not create parent file systems automatically in v1.
+
+Rationale:
+
+- parent file systems are cost-bearing infrastructure resources;
+- operators must control their number, size, tags, and lifecycle;
+- the number of parents must respect node-level attach limits;
+- keeping parent lifecycle outside the driver makes the first version safer.
+
+Future versions can add optional tag-based discovery or parent provisioning, but
+that must not be part of the v1 implementation.
+
+### 6.2 One PVC Equals One Logical Volume, Not One Scaleway File System
+
+Each Kubernetes PVC becomes one logical CSI volume. A logical CSI volume is:
+
+```text
+parent filesystem ID + base path + generated directory name
+```
+
+Example:
+
+```text
+filesystem: sfs-11111111
+basePath: /kubernetes-volumes
+directory: pvc-4d6c8d2e-tenant-a-user-volume
+```
+
+The physical path inside the parent file system is:
+
+```text
+/kubernetes-volumes/pvc-4d6c8d2e-tenant-a-user-volume
+```
+
+### 6.3 Keep the Pool Small and Explicit
+
+The pool size must be chosen by the operator based on:
+
+- node type attach limits;
+- required total capacity;
+- required aggregate IOPS and throughput;
+- expected workload distribution.
+
+If the selected node type supports only two attached File Storage file systems,
+the pool must contain at most two parents for workloads that can run on that
+node type.
+
+For v1, every node eligible to run workloads that use a pool must be able to
+attach every parent file system in that pool.
+
+The driver must not expose Scaleway's physical File Storage attach limit as the
+Kubernetes CSI `MaxVolumesPerNode` value for logical PVCs. Kubernetes would count
+logical PVCs, not parent file systems, which would defeat the purpose of this
+driver.
+
+V1 must omit `NodeGetInfo.MaxVolumesPerNode`. A future release may add a
+separate tested logical-PVC limit, but it must never expose the physical parent
+File Storage attachment limit as a logical volume count.
+
+The Helm values must expose an explicit operator-owned limit:
+
+```yaml
+pools:
+  standard:
+    maxParentsPerEligibleNode: 2
+```
+
+The driver must validate the configured parent count:
+
+```text
+len(pool.filesystems) <= pool.maxParentsPerEligibleNode
+```
+
+If the validation fails, the controller must fail at startup with a clear
+configuration error.
+
+If multiple pools share the same eligible node set, the validation must be done
+on deduplicated filesystem IDs across those pools and the node's live attachment
+inventory, not by adding two counts that may contain the same parent:
+
+```text
+len(currentlyAttachedFilesystemIDs UNION configuredParentFilesystemIDs) <= nodeAttachLimit
+```
+
+The union must include every attachment visible through the Instance API,
+including attachments created manually or by another CSI driver. Filesystems in
+`attaching`, `available`, and `detaching` state consume one slot until the API
+proves that they are absent. An unknown state makes the preflight fail closed.
+
+Do not introduce per-pool topology in v1 unless a real use case requires it.
+The KISS v1 model is one global eligible node set and aggregate attach-budget
+validation for every pool that can run on that set.
+
+This validation is necessary but not sufficient. The v1 driver must also make
+the homogeneous-node contract executable.
+
+Required v1 preflight:
+
+- identify the Kubernetes nodes eligible to run pods using this StorageClass;
+- verify every eligible node is in the configured Scaleway region;
+- verify every eligible node maps to a Scaleway Instance that can attach the
+  configured parent count;
+- verify the current number of attached File Storage file systems leaves enough
+  room for the configured parents;
+- verify the controller node can attach and mount every configured parent;
+- fail startup before serving CSI controller operations if the check cannot be
+  completed safely.
+
+The controller must also refresh attachment inventory at runtime before any
+operation that may attach a parent to a node. This check must account for File
+Storage file systems attached by this driver, the official Scaleway File
+Storage CSI driver, and manual operations when they are visible through the
+Scaleway API. If remaining attach budget is insufficient, the operation must
+fail clearly before attempting a partial attach.
+
+Production v1 supports one scheduling model: every schedulable Linux workload
+node in the cluster is storage-eligible and must satisfy the File Storage
+compatibility and attach-budget preflight. The node DaemonSet must run on this
+same set, and startup preflight must verify a Ready node-plugin pod and CSINode
+registration for every eligible node.
+
+A production cluster must expose at least two Ready compatible nodes on which
+the controller Deployment can be scheduled; three are recommended when the
+cluster has three or more nodes. The chart and operations guide must not pin the
+singleton controller to one node. This provides rescheduling capacity for a
+graceful drain or maintenance event without claiming automatic takeover after
+an unfenced crash. Preflight reports and rejects a production installation with
+fewer than two controller candidates.
+
+A narrower storage-only node set is not production-supported in v1. An
+acknowledgement flag is not an enforcement mechanism, and `Immediate` binding
+does not constrain pod scheduling. Supporting a narrower set requires the
+topology-aware design deferred to a future version.
+
+The official Scaleway File Storage CSI driver may remain installed on the same
+Kapsule cluster, including when the `scw-filestorage-csi` cluster tag is required
+to enable host support. However, v1 does not support consuming official
+`sfs-standard` PVCs or manually attached extra File Storage filesystems on the
+same workload nodes managed by this driver. Kubernetes accounts attachment
+limits independently per CSI driver and cannot reserve the other driver's
+physical slots. Operators that need active volumes from both drivers must use
+separate clusters until a tested cross-driver scheduling policy exists.
+
+Accordingly, production preflight must reject an eligible or controller node
+that has any live File Storage attachment outside the configured parent set,
+even when nominal attachment headroom remains. This strict rule prevents the
+other driver or a manual operation from consuming a slot after this driver's
+budget decision.
+
+The controller must repeat this exclusivity check before attachment operations
+and during periodic node validation. A newly detected non-configured attachment
+makes the controller degraded and blocks new create/publish operations without
+disrupting already mounted logical volumes.
+
+Per-Instance inventory alone is not sufficient because an existing parent may
+still be attached to an orphaned Kapsule Instance, a deleted Kubernetes Node, or
+an unrelated Scaleway Instance. The controller must also use the regional File
+Storage `ListAttachments` API for every configured parent:
+
+- list every page without accidentally inheriting a single-zone filter from
+  `SCW_DEFAULT_ZONE`;
+- reconcile every attachment resource ID, resource type, and zone against the
+  current controller Instance and known workload Instances;
+- fail closed when an attachment is unreadable, has an unknown resource type,
+  or belongs to an Instance outside the active installation;
+- compare the deduplicated result count with the parent metadata's
+  `NumberOfAttachments`; a temporary mismatch returns `Unavailable` and is
+  retried rather than being interpreted as absence;
+- run this check before the first parent claim, during startup, after any attach
+  result whose completion is ambiguous, and at a bounded periodic interval;
+- require a new parent to have no pre-existing attachment before claiming it,
+  except an attachment created by the current bootstrap attempt after the
+  initial empty-inventory check.
+
+The exception for the current bootstrap attempt must survive a controller
+crash without making an unrelated attachment claimable. Parent claiming is
+serialized, and the controller records at most one bootstrap attempt at a time
+in fixed annotations on the existing controller leadership Lease. After the
+empty regional and Instance inventories have been read and before calling
+`AttachServerFileSystem`, one resource-version compare-and-swap must persist:
+
+```text
+schemaVersion
+attemptID
+installationID
+activeClusterUID
+parentFilesystemID
+controllerNodeID
+controllerInstanceID
+controllerZone
+emptyInventoryObservedAt
+phase = Prepared
+claimTempPath = /.sfs-subdir-csi-owner.<attemptID>.tmp
+```
+
+The record is an operation journal, not a second source of parent ownership.
+Scaleway attachments do not carry this local `attemptID`, so an attachment to
+the recorded Instance is evidence for resuming that attempt but is never proof
+that this installation exclusively created the provider attachment. Before
+owner creation, resume is permitted only when all of the following remain true:
+
+- no parent-global owner, logical-volume ownership, allocation, or driver PV
+  exists for the parent;
+- the regional and Instance inventories contain no attachment other than the
+  exact expected attachment;
+- the recorded installation, cluster, and parent still match runtime identity;
+- the controller holds the Lease under the normal handoff or approved-takeover
+  rules from section 10.3.
+
+When no owner record exists, the controller may resume ownership initialization
+only when the recorded node, Instance, and zone match its current runtime
+identity. It must never automatically detach a bootstrap attachment from a live
+Instance, including its current Instance, because another installation or mount
+namespace may be using the same provider attachment. A failed or abandoned
+attempt becomes an offline recovery operation: the recorded Instance must first
+be conclusively stopped, stopped in place, or deleted, and every controller or
+child mount must be absent or rendered impossible by that fencing. Only then may
+the driver detach the parent, poll `ListAttachments` and `Server.Filesystems` to
+conclusive absence, and clear the bootstrap annotation. An orphaned attachment
+to a deleted Instance that cannot be detached remains fail-closed and requires
+Scaleway support; the driver must not guess ownership.
+
+The claim temp path is deterministic from the random attempt ID and is reserved
+only for that journaled attempt. The controller writes the complete claim to
+that root-level temporary file with no-follow/no-overwrite semantics, `fsync`s
+the file and parent root, then atomically renames it without overwrite to the
+fixed claim path from section 6.7 and `fsync`s the root again. The same attempt
+may validate, complete, or remove only its exact temporary file. A foreign,
+unbound, or ambiguous temporary claim keeps the parent fail-closed.
+
+On Linux, the no-overwrite installation must use
+`renameat2(..., RENAME_NOREPLACE)` or an implementation with the same atomic
+create-if-absent semantics proven by the real `virtiofs` release tests.
+`EEXIST` means another claimant won and must never trigger replacement or
+detach. `ENOSYS`, `EOPNOTSUPP`, or inability to make the file and root directory
+durable fails parent preflight; a check-then-rename fallback is forbidden.
+
+If a crash occurred after atomic owner creation but before annotation cleanup,
+the controller validates that the complete owner record exactly matches the
+attempt and runtime identity, then clears the stale attempt and continues normal
+startup; it never rewrites the owner. Successful owner creation normally clears
+the annotation by compare-and-swap. A missing, malformed, mismatched, or
+multi-attachment attempt fails closed with an actionable manual recovery
+message. A parent-global owner created by another installation always wins the
+atomic no-overwrite race; the losing installation must not detach the shared
+provider attachment. The controller must never infer bootstrap ownership merely
+because an attachment points to its current Instance.
+
+`Server.Filesystems` remains the authoritative source for the transitional
+state of an attachment on a known Instance. `ListAttachments` is the
+installation-wide inventory that discovers attachments to Instances the
+Kubernetes node list cannot reveal. Both views must agree before the controller
+serves new mutations.
+
+For attachment ownership, a known workload Instance is backed by an existing
+Kubernetes Node and matching CSINode registration for this driver in the
+configured Project and region. A cordoned or temporarily unschedulable Node
+remains known until its Node object is removed, which allows normal drain
+operations without reclassifying a warm attachment as foreign. An Instance
+without that evidence is unknown even if its name or tags look familiar.
+
+In the pinned SDK, `ListAttachments` fills an omitted request zone from the
+client's default zone. The implementation must therefore use a dedicated
+regional File Storage client without a default zone, or an equivalent
+release-tested request path that proves the outgoing query has no `zone`
+filter. Unit tests must inspect the request and verify that attachments from
+`fr-par-1`, `fr-par-2`, and `fr-par-3` are returned and deduplicated.
+
+### 6.4 Capacity Is a Reservation, Not a Hard Quota in v1
+
+The PVC `resources.requests.storage` value must be treated as a logical
+reservation used for placement and reporting.
+
+The v1 driver must not claim to enforce hard per-PVC quotas unless a supported
+Scaleway File Storage quota mechanism is identified and tested.
+
+Logical capacity accounting must be explicit and deterministic:
+
+```text
+reserveBytes = max(
+  minFreeBytes,
+  ceil(observedParentSizeBytes * minFreePercent / 100)
+)
+usableParentBytes = max(0, observedParentSizeBytes - reserveBytes)
+logicalCapacityBytes = floor(usableParentBytes * maxLogicalOvercommitRatio)
+logicalAllocatedBytes = sum(selectedCapacityBytes for reserving allocation records)
+logicalAvailableBytes = max(0, logicalCapacityBytes - logicalAllocatedBytes)
+```
+
+The implementation must use checked integer or exact decimal arithmetic. It
+must not let floating-point rounding, integer overflow, or a size refresh make
+logical capacity negative or wrap around.
+
+`maxLogicalOvercommitRatio` defaults to `1.0`. A value greater than `1.0` is an
+operator decision to overcommit logical reservations on top of the observed
+usable parent size. At the default ratio, workloads that remain within their
+logical reservations cannot consume the configured safety reserve solely
+because too many reservations were accepted. A ratio greater than `1.0`
+deliberately waives that reservation-backed guarantee. The driver must document
+the risk clearly and must still enforce the actual free-space guardrails
+described below.
+
+The following states reserve logical capacity:
+
+- `Reserved`;
+- `CreatingDirectory`;
+- `Ready`;
+- `Deleting`;
+- `Archived`;
+- `Retained`.
+
+`Deleted` records never reserve logical capacity.
+
+The README must explicitly document this limitation:
+
+```text
+PVC sizes are used for scheduling and pool accounting. They are not hard
+filesystem quotas in v1.
+```
+
+Because reservations are not hard quotas, the driver must also observe real
+parent filesystem free space.
+
+Each pool must support safety thresholds:
+
+```yaml
+pools:
+  standard:
+    minFreeBytes: 10737418240
+    minFreePercent: 5
+```
+
+`CreateVolume` must fail with a clear error if no active parent can satisfy the
+configured free-space reserve after accepting the new PVC request, even when
+logical reservation accounting still shows available capacity.
+
+The check must be fail-closed:
+
+- parent selection must use fresh actual free-space information from `statfs`;
+- a parent with missing, stale, or failed `statfs` data must be excluded for the
+  current request or make the request fail with a clear transient error;
+- the selected parent must satisfy both `actualFreeBytes - selectedCapacityBytes >=
+  minFreeBytes` and the configured post-request `minFreePercent` threshold.
+
+Create-time guardrails do not enforce runtime quotas. A running workload can
+still consume more than its requested logical size and fill the shared parent.
+V1 must treat this as an accepted production risk:
+
+- expose runtime parent free-space metrics;
+- emit degraded conditions or Kubernetes events when a parent crosses warning or
+  critical free-space thresholds;
+- provide sample Prometheus alert rules;
+- document that this StorageClass is not a hard isolation boundary for
+  adversarial or untrusted tenants unless operators isolate pools by tenant or
+  Scaleway exposes a tested hard quota mechanism.
+
+### 6.5 Parent File System Size Must Be Refreshed from Scaleway
+
+Parent file systems can be resized outside the driver through Scaleway tools.
+The driver must not cache parent capacity forever.
+
+Required behavior:
+
+- fetch parent metadata from the Scaleway API during controller startup;
+- refresh parent metadata periodically;
+- refresh parent metadata during `CreateVolume`;
+- expose the last observed size and last refresh timestamp in logs and metrics;
+- fail clearly if current parent metadata cannot be fetched and the driver needs
+  that information to make a safe placement decision.
+
+Recommended default refresh interval:
+
+```text
+5 minutes
+```
+
+The interval must be configurable.
+
+The driver must not automatically resize parent file systems in v1. Resizing is
+an infrastructure operation controlled by the operator through Scaleway Console,
+CLI, Terraform, Pulumi, or API.
+
+When a parent is resized outside the driver, the next metadata refresh must make
+the new size visible for future `CreateVolume` placement decisions.
+
+The official Scaleway File Storage resize contract supports growth only;
+shrinking a filesystem is unsupported. Real-provider tests and operator
+documentation must therefore cover upward resize only and must never instruct
+an operator to test a shrink.
+
+Every refresh must still compare the observed size with the previous value. An
+unexpected decrease is a provider or observation anomaly, not a supported
+workflow. It marks only that parent `critical-size-regression`, excludes it from
+new placement, emits a Kubernetes Event and alert metric, and reports the exact
+difference from the previous observation and from current reservations plus the
+safety reserve. Existing node mounts remain untouched. Safety-improving
+unpublish and cleanup may continue only when their normal ownership, mount, and
+state checks succeed. The condition clears automatically only after a fresh
+authoritative observation is at least the previous accepted size; v1 has no
+acknowledgement flag that suppresses the anomaly.
+
+Unit tests with the fake provider must cover the defensive size-regression path
+and recovery. Real-provider tests must cover upward growth and verify that a
+shrink is neither requested nor represented as supported.
+
+### 6.6 Scaleway Provider Contract
+
+This section is the normative provider appendix for v1. It is based on the
+official `scaleway/scaleway-filestorage-csi` implementation at commit
+`2ede1238d63cf03b575eacee2ef1449be9106387`, inspected on 2026-07-12. That
+reference uses `github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36`. The
+implementation must pin an explicit tested SDK version and record any later
+reference commit in the compatibility table. Official code is Apache-2.0; code
+copied from it must preserve all applicable license and notice requirements.
+
+Required APIs and identity contract:
+
+- use `github.com/scaleway/scaleway-sdk-go`;
+- use `file/v1alpha1` to read regional parent filesystem metadata and validate
+  filesystem ID, project, region, size, and availability, and to list all
+  attachments for each configured parent;
+- use `instance/v1` to read the target server and its filesystem attachment
+  inventory, and to call `AttachServerFileSystem`;
+- use `DetachServerFileSystem` only for the offline parent decommission,
+  provider-fenced stale-node cleanup, or provider-fenced provisional-bootstrap
+  rollback defined in sections 6.3, 6.9, 6.14, and 6.17, or the completed
+  safe-uninstall sequence in section 7.5. Each path must first conclusively
+  fence the relevant Instance or stop the owning driver component and prove or
+  make impossible every live controller and child mount;
+  never use it for normal logical-volume unpublish;
+- the node plugin obtains its Instance ID, zone, region, and commercial type
+  from the local unauthenticated Scaleway metadata service, matching the
+  official driver behavior;
+- `NodeGetInfo.NodeId` is exactly `<zone>/<serverID>`;
+- the controller parses and validates that node ID and always performs zonal
+  Instance operations in the parsed target zone. `SCW_DEFAULT_ZONE` is SDK
+  initialization configuration only and is never the workload node zone;
+- the controller accepts a publish target only when the node ID matches the
+  CSINode registration of an existing eligible Kubernetes Node and the resolved
+  Instance belongs to the configured Project and region;
+- the node plugin may access the local metadata service but must not receive
+  Scaleway credentials or call authenticated public Scaleway APIs.
+
+The controller must normalize the pinned SDK's complete
+`FileSystem.Status` enum. The matrix is closed: any future or unreadable value
+uses the unknown row until a compatibility-tested release adds it.
+
+| File Storage observation | New placement | New attachment or controller filesystem mutation | Existing data path and cleanup | Cold-start meaning |
+| --- | --- | --- | --- | --- |
+| `available` | allowed after all other checks | allowed | allowed | may become ready after all other gates |
+| `creating` or `updating` | excluded for this decision | retryable `Unavailable`; do not attach, create, archive, delete, or GC | already verified kernel mounts continue; node unpublish/unstage and normal metadata-only controller unpublish remain allowed | non-serving while this configured parent is required for ownership reconciliation |
+| `error` | excluded | `FailedPrecondition`; do not attach or mutate the filesystem | do not tear down healthy existing mounts automatically; node unpublish/unstage and normal metadata-only controller unpublish remain allowed | non-serving with an explicit provider-status error |
+| `unknown_status`, unknown future value, or unreadable status | excluded | retryable `Unavailable`; do not infer safety | do not tear down healthy existing mounts automatically; node unpublish/unstage and normal metadata-only controller unpublish remain allowed | non-serving until an authoritative supported status is read |
+
+A runtime transition away from `available` marks that parent degraded and
+blocks only operations that depend on it; it does not make unrelated parents or
+already-mounted workloads unavailable. The controller must emit a bounded
+Kubernetes Event and metric on status transitions. It may resume blocked work
+only after a fresh authoritative read returns `available` and all normal
+ownership, attachment, mount, and capacity checks pass.
+
+The controller must normalize the pinned SDK's Instance state before any new
+attachment or recovery decision. The v1 state matrix is closed and fail-safe:
+
+| Instance observation | New publish or controller lifecycle attach | Recovery/fencing meaning |
+| --- | --- | --- |
+| `running` | allowed after all other inventory and budget checks | process is not fenced |
+| `starting` | retryable `Unavailable`; do not attach | process is not fenced |
+| `stopping` | retryable `Unavailable`; do not attach | process is not yet fenced |
+| `locked` | retryable `Unavailable`; do not attach | process is not fenced |
+| `stopped` or `stopped in place` | `FailedPrecondition`; do not attach | process is fenced, subject to attachment-absence checks |
+| conclusive Instance `NotFound` | `NotFound`; do not attach | process is fenced, but regional orphan attachments remain blocking |
+| unknown, unreadable, or ambiguous | retryable `Unavailable`; do not attach | no fencing proof |
+
+The same matrix must be used by publish, controller lifecycle attachment,
+bootstrap rollback, stale-node cleanup, and abnormal takeover. A deleted
+Instance is proof that its process cannot continue, but it is not proof that
+Scaleway removed the File Storage attachment. Before clearing quarantine,
+published-node evidence, or recovery blocks, the controller must also obtain a
+fresh paginated regional inventory and prove that the relevant parent
+attachment is absent. An orphan attachment to a deleted Instance remains
+fail-closed and requires the documented Scaleway support escalation path.
+
+Attachment inventory and idempotency contract:
+
+1. List every regional File Storage attachment for the target parent, across
+   all pages and zones, and reject any attachment outside the active
+   installation.
+2. Read the target server with the Instance API and inspect
+   `Server.Filesystems`.
+3. Treat every filesystem in `attaching`, `available`, or `detaching` state as
+   consuming one physical attachment slot. Unknown states fail closed.
+4. Enforce section 6.3 by rejecting non-configured live attachments on
+   production workload/controller nodes.
+5. Calculate the post-operation budget from the union of currently attached IDs
+   and configured parent IDs. Never add overlapping counts.
+6. If the target parent is `available`, return success.
+7. If it is `attaching`, poll the server until it becomes `available`.
+8. If it is `detaching`, return a retryable `Unavailable` error. Do not issue a
+   competing attach.
+9. If it is absent and the union fits within
+   `ServerType.Capabilities.MaxFileSystems`, call `AttachServerFileSystem` once,
+   then poll until the target becomes `available`.
+10. After conflict, timeout, connection loss, or any ambiguous API result,
+    re-read both the regional attachment inventory and the target server before
+    deciding whether to retry or return success.
+
+The official driver currently uses a fixed three-second sleep after attach. That
+is a behavioral reference, not an acceptable readiness contract for this
+driver. Polling must use a configurable deadline with a production default of 10
+minutes, honor an earlier caller cancellation, use bounded backoff with jitter,
+and never busy-loop. Sidecar timeouts must be configured consistently with this
+deadline. A timeout returns `DeadlineExceeded`; temporary Scaleway or network
+failures return `Unavailable`.
+
+Provider error mapping:
+
+- malformed IDs, zones, or configuration -> `InvalidArgument`;
+- missing parent or Instance after a conclusive read -> `NotFound`;
+- rejected IAM authorization -> `PermissionDenied`;
+- physical attachment limit or provider quota exhausted ->
+  `ResourceExhausted`;
+- incompatible Instance type, region, or parent state ->
+  `FailedPrecondition`;
+- temporary API, network, `attaching`, `detaching`, or unknown completion state
+  -> `Unavailable`;
+- exhausted operation deadline -> `DeadlineExceeded`.
+
+The production IAM application must be scoped to the target Project. With the
+permission sets documented by Scaleway at the time of this specification, the
+minimum usable policy is:
+
+- `FileStorageReadOnly` to read existing parent metadata;
+- `InstancesFullAccess` to read Instances and attach or explicitly detach File
+  Storage filesystems.
+
+`InstancesFullAccess` is broader than the driver ideally needs. The README must
+state this limitation. If Scaleway publishes a narrower attachment-specific
+permission set, it must replace `InstancesFullAccess` after a least-privilege E2E
+test. `FileStorageFullAccess` is not required because v1 never creates, resizes,
+or deletes parent filesystems.
+
+Mount contract:
+
+- parent filesystems are mounted with filesystem type `virtiofs`;
+- the mount source is the parent filesystem ID;
+- `ControllerPublishVolumeResponse.publish_context` is empty in v1;
+- the node derives everything needed for the mount from immutable
+  `volume_context`, the local metadata identity, and host attachment state;
+- the driver never depends on an undocumented NFS endpoint or user-managed
+  Private Network configuration. Scaleway documents the private backend
+  connection as managed and transparent.
+
+Release-time compatibility contract:
+
+- File Storage is limited to regions and Instance types that the current
+  Scaleway API and documentation qualify. As of this specification, the public
+  documentation identifies `fr-par` and reports File Storage as Public Beta;
+- startup must verify `ServerType.Capabilities.MaxFileSystems > 0` for every
+  eligible node and must not rely only on a hardcoded family list;
+- every release must embed the exact allowlist of Scaleway commercial types
+  qualified by its real Kapsule E2E matrix. Startup requires both allowlist
+  membership and live `ServerType.Capabilities.MaxFileSystems > 0`; a non-zero
+  limit alone does not qualify an untested type. Extending the production
+  allowlist requires a new tested release, not an operator acknowledgement;
+- every advertised commercial Instance type must pass real Kapsule E2E and
+  appear in the release compatibility table;
+- the Kapsule cluster must carry the `scw-filestorage-csi` tag at cluster level
+  whenever Scaleway requires it to enable File Storage host support. A pool-level
+  tag is insufficient;
+- the official CSI may be installed but must remain unused on this driver's
+  workload nodes, as defined in section 6.3;
+- every release must re-check product maturity, region availability, quotas,
+  attach limits, cluster tag behavior, and the SDK attachment states.
+
+A production release must either target a GA Scaleway File Storage offer or
+document an explicit operator acceptance gate for beta/preview status, including
+support, SLA, backup, rollback, and fallback implications. Provider facts that
+cannot be confirmed by public documentation must be proven by the real Kapsule
+E2E suite before release; the driver must fail closed rather than infer them.
+The installation preflight and README must verify the cluster-level
+`scw-filestorage-csi` tag through the Kapsule API/CLI before Helm installation;
+the runtime driver does not gain broader Kapsule IAM solely to repeat that
+administrative check.
+
+### 6.7 Parent Ownership and Stable Installation Identity
+
+In v1, one parent filesystem is an exclusive ownership boundary for exactly one
+driver installation. Sharing one parent between installations, even through
+apparently disjoint base paths, is unsupported because two installations cannot
+atomically prove that `/a` and `/a/b` do not overlap without a parent-global
+claim registry.
+
+Each installation must have a stable `installationID` supplied through the
+production identity Secret described in section 7. The value must remain stable
+for the lifetime of every PV, allocation record, ownership record, and parent
+claim created by that installation.
+
+The controller must also derive an immutable `activeClusterUID` from the UID of
+the Kubernetes `kube-system` Namespace. The installation ID identifies the
+logical driver installation; the cluster UID proves which Kubernetes cluster is
+currently authorized to operate its parents. A copied identity Secret must not
+authorize a second cluster.
+
+Each parent must have one root-level parent-global claim record:
+
+```text
+/.sfs-subdir-csi-owner.json
+```
+
+The owner record must contain:
+
+```json
+{
+  "schemaVersion": "1",
+  "revision": 1,
+  "driverName": "sfs-subdir.csi.example.com",
+  "installationID": "...",
+  "activeClusterUID": "...",
+  "parentFilesystemID": "...",
+  "basePath": "/kubernetes-volumes",
+  "basePathHash": "...",
+  "controllerNamespace": "...",
+  "helmReleaseName": "...",
+  "leadershipLeaseName": "scaleway-sfs-subdir-csi-controller",
+  "bootstrapAttemptID": "...",
+  "contentChecksum": "sha256:...",
+  "createdAt": "..."
+}
+```
+
+Rules:
+
+- each parent filesystem ID may appear exactly once across all configured pools
+  in one installation;
+- a parent claimed by one installation must not be configured by another
+  installation, imported through the official CSI driver, or modified by
+  another provisioner;
+- `basePath` must be an absolute, normalized, non-root path;
+- after the parent-global claim is established, the controller may create a
+  missing base path and reserved subdirectories with driver-only ownership;
+- a previously unclaimed v1 parent must be dedicated and empty: the fixed claim
+  file, configured base path, and logical-volume metadata paths must be absent,
+  and no unrelated user entry may exist on the parent. The one exception is the
+  exact temporary claim file bound to the current bootstrap journal;
+- this driver and the official Scaleway File Storage CSI driver may coexist on
+  the same cluster only through separate driver names and separate
+  StorageClasses;
+- startup preflight must validate that the root-level claim file is either
+  absent or already owned by the same configured
+  `driverName`, `installationID`, `activeClusterUID`, controller namespace, and
+  fixed `leadershipLeaseName`;
+- the parent-global claim is permanent in v1. Removing a parent from a pool does
+  not release it for another installation. Parent claim transfer is a future
+  feature requiring an explicit offline migration protocol.
+
+If ownership cannot be proven, the controller must fail closed before any
+metadata/data mutation or logical-volume stage, publish, archive, retain, or
+delete. The only permitted parent mount is the provisional inspection path
+defined in section 10.2; it must not expose a logical volume. "Read-only
+inspection" describes the controller operation surface, not an unverified
+`virtiofs` mount option: the provisional mount uses the same release-tested
+flagless parent mount contract, while the process exposes no mutation or repair
+path until ownership is proven.
+
+Creating the parent-global claim must be atomic. The implementation must not use
+a check-then-create sequence or create a destination directory before ownership
+is durable. It first inspects the dedicated parent and fails closed on any
+unexpected data, base path, claim file, temporary claim not bound to the exact
+journal, symlink, or nested mount. It then uses the root-level temp-file,
+`fsync`, and no-overwrite rename protocol defined in section 6.3. The final
+claim is immutable and is never replaced in v1. A diagnostic dry-run may print
+the blocking inventory but never authorizes adoption. There is no production
+bootstrap override or persistent adoption flag in v1. Importing existing data
+is a future offline migration feature and must not be implemented implicitly.
+
+Production identity lifecycle:
+
+- the chart requires `installation.existingSecretName` and reads the UUID-like
+  value from `installation.idKey`;
+- the chart never owns or deletes that existing Secret;
+- an upgrade or rollback must reuse the same value;
+- reinstalling the chart requires the same Secret or a restored Secret with the
+  same value;
+- same-cluster namespace recovery must observe the same `activeClusterUID` from
+  `kube-system` and the same value in every parent-global owner record;
+- automatic cross-cluster restore is unsupported in v1. A different
+  `activeClusterUID` must keep the controller non-serving even when the restored
+  `installationID` matches;
+- v1 does not implement parent-claim transfer. Moving an installation to a new
+  cluster requires an explicitly documented future offline transfer protocol
+  that first fences every old controller and workload Instance and then updates
+  every parent claim consistently;
+- if the Secret is missing while any driver PV, allocation record, or
+  parent-global owner record exists, startup fails closed;
+- the operations guide must back up the identity Secret together with allocation
+  records and Helm values;
+- automatic identity generation is allowed only behind an explicit
+  development-only value and must never be a production default.
+
+### 6.8 Parent Selection Strategy
+
+The driver must support a simple production-safe parent selection strategy.
+
+Required v1 strategy:
+
+```text
+least-allocated
+```
+
+Definition:
+
+- reconstruct or validate missing allocation records from existing
+  PersistentVolumes when required;
+- compute logical allocation from allocation records owned by this driver,
+  keyed by `logicalVolumeID`;
+- sum requested PVC capacity by parent file system;
+- refresh Scaleway metadata and actual free-space information for eligible
+  active parents;
+- exclude parents that do not satisfy logical capacity, actual free-space, node
+  compatibility, or lifecycle requirements;
+- select the remaining parent with the most remaining logical capacity;
+- break ties with deterministic hashing of the requested volume name.
+
+The v1 driver must run exactly one controller replica. CSI sidecar leader
+election is still required where supported, but it does not replace
+driver-owned leadership coordination for startup reconciliation, pool
+accounting, controller mounts, archive, retain, delete, and node compatibility
+refresh.
+
+Controller HA and automatic failover are out of scope for v1. They can be added
+only after the project has a tested storage-level fencing or equivalent takeover
+design. A Kubernetes Lease alone is not fencing.
+
+The driver must persist the chosen parent in the allocation record, the
+driver-owned ownership record, and immutable `volume_context` returned by
+`CreateVolume`. The CSI `volumeHandle` stores the deterministic logical volume
+ID and mapping hash that validate this immutable mapping. After that, the
+volume always uses the same parent, even if parent sizes change later.
+
+### 6.9 Parent Lifecycle
+
+Each parent file system in a pool must have an explicit lifecycle state:
+
+```text
+active
+draining
+```
+
+Behavior:
+
+- `active`: eligible for new logical volumes;
+- `draining`: existing logical volumes continue to work, but the parent is not
+  selected for new logical volumes.
+
+`draining` changes placement only. It must not remove the parent from lifecycle
+operations. The controller must still be able to attach and mount a draining
+parent while any allocation record, ownership record, archived data, retained
+data, delete operation, or GC operation references it.
+
+A parent file system cannot be removed online from the Helm values in v1.
+Changing it to `draining` stops new placement, but the parent remains configured
+while the driver is running because controller and node parent mounts are kept
+warm and physical attachments are intentionally not reference-counted.
+
+Exceptional parent decommissioning is an offline operator procedure, not a CSI
+reconciliation feature. It is permitted only when no active, reserving,
+archived, retained, deleting, PV, VolumeAttachment, published-node, staging
+mount, or live detailed ownership record references the parent. Valid terminal
+allocation tombstones with `state: Deleted` and `reservesCapacity: false`, and
+matching compact `Deleted` ownership tombstones, are historical evidence and do
+not block the procedure. Allocation tombstones may use the detailed, compact,
+or `deletedUnknown` variant. Detailed allocation tombstones may be compacted in
+place first but compaction is not a prerequisite.
+
+Before detaching the parent, the decommission validator must compare every
+remaining compact ownership tombstone with its Kubernetes allocation tombstone
+and reject any missing, conflicting, malformed, or non-terminal pair. This is
+the last online validation that reads the decommissioned parent's compact
+ownership inventory.
+
+The procedure must then:
+
+1. stop the controller and node-plugin processes that can use the parent;
+2. verify and unmount the exact controller and node parent mount on every
+   attached Instance, after proving no child bind mount remains;
+3. verify the parent is absent from each Instance's mount table;
+4. call the explicit detach operation and poll both `ListAttachments` and
+   `Server.Filesystems` until the attachment is absent everywhere;
+5. remove the parent from Helm values only after those checks succeed.
+
+Removing a parent from values does not release its permanent parent-global claim
+or make cross-installation reuse supported in v1. The operations guide must not
+describe a live-node detach shortcut. After removal, Kubernetes allocation
+tombstones are the only online name-reservation and historical evidence for that
+parent. Startup, checkpoint, and reconciliation must not reattach or remount an
+unconfigured historical parent only to read its compact ownership tombstones,
+must not reconstruct those tombstones, and must not perform capacity accounting
+or filesystem mutation against that parent.
+
+Controller startup must fail clearly if existing reserving or non-terminal
+allocation records, ownership records, or PersistentVolumes reference a parent
+file system that is missing from the current configuration. A schema-valid terminal tombstone with
+`state: Deleted` and `reservesCapacity: false` may retain its historical parent
+ID after offline decommission and must not make startup fail. This exception
+does not authorize filesystem access, reconstruction, or parent reuse.
+
+Reintroducing a previously decommissioned parent ID into configuration is not a
+lightweight rollback. Before serving, the controller must perform the complete
+parent claim, attachment, mount, inventory, allocation-pairing, and ownership
+validation required for any configured parent. Any difference from the
+permanent claim or retained Kubernetes tombstones fails closed.
+
+V1 has no emergency configuration bypass. Recovery requires restoring the exact
+parent to configuration or completing the documented offline decommission
+procedure. The driver never weakens ownership, path, or attachment checks based
+on an operator boolean.
+
+The operations guide must document the safe sequence:
+
+```text
+active -> draining -> no references -> stop driver -> unmount everywhere -> detach everywhere -> remove from values
+```
+
+### 6.10 Volume Handle and Volume Context
+
+The volume handle must be stable, parseable, compact, and sufficient to locate
+the driver's durable allocation record.
+
+CSI `DeleteVolume` must not depend on `volumeContext` during the normal path.
+The handle therefore carries immutable lookup identity, while long mapping data
+lives in the allocation record, the PersistentVolume CSI attributes, and the
+driver-owned ownership record.
+
+Required v1 format:
+
+```text
+sfs1:<logical-volume-id>:<mapping-hash>
+```
+
+Example:
+
+```text
+sfs1:lv-4d6c8d2e9f1a2b3c:mh-9f34ac10d8e7a1b2
+```
+
+Rules:
+
+- the encoded handle must be less than or equal to 128 bytes;
+- `logicalVolumeID` is `lv-` followed by the first 32 lowercase hexadecimal
+  characters of `SHA-256(driverName + NUL + CreateVolumeRequest.name)`;
+- `mapping-hash` must be derived from immutable mapping fields:
+  `poolName`, `parentFilesystemID`, normalized `basePath`, `directoryName`, and
+  `logicalVolumeID`;
+- the handle must not encode long values such as full base paths, directory
+  names, regions, or parent names;
+- the driver must validate the format and length on every controller and node
+  operation that can mutate or expose state;
+- invalid handles must return clear CSI errors, except for the CSI-mandated
+  `DeleteVolume` unknown-ID behavior defined below.
+
+The mapping hash is `mh-` followed by the first 32 lowercase hexadecimal
+characters of SHA-256 over canonical JSON containing exactly the mapping fields
+listed above. Object keys are lexicographically sorted, strings are UTF-8,
+integers use base-10 JSON representation, and no insignificant whitespace is
+written. The request hash uses the same canonicalization and `rh-` prefix over
+the normalized creation fields defined in section 6.12. A truncated-hash
+collision is detected by comparing the stored full original identity and
+immutable fields; the driver must fail closed rather than reuse the record.
+
+`basePathHash` is `bp-` plus the first 32 lowercase hexadecimal characters of
+SHA-256 over the normalized UTF-8 base path. `volumeHandleHash` is `vh-` plus
+the first 32 lowercase hexadecimal characters of SHA-256 over the complete
+volume handle. These algorithms and prefixes are part of the v1 compatibility
+contract.
+
+The compact handle intentionally does not contain every recovery field. The
+allocation record is the primary durable mapping. The PersistentVolume CSI
+attributes and the driver-owned ownership record are secondary recovery inputs.
+If all durable mapping sources are missing, the driver must not guess a
+filesystem path. For `DeleteVolume`, it must preserve CSI idempotency by
+recording a minimal non-reserving deleted-unknown tombstone and returning success
+for a valid driver handle only when every authoritative lookup completed
+successfully and conclusively reported absence. API timeouts, denied reads,
+unmounted parents, stale inventory, or unavailable metadata are not absence and
+must return a retryable error without writing a tombstone.
+
+`CreateVolume` must also return immutable `volume_context` fields:
+
+```text
+schemaVersion
+installationID
+activeClusterUID
+poolName
+parentFilesystemID
+basePath
+basePathHash
+directoryName
+directoryMode
+directoryUid
+directoryGid
+onDelete
+logicalVolumeID
+```
+
+`logicalVolumeID` must use the exact deterministic algorithm above. It must not
+be random. This is the key idempotency invariant for repeated CSI `CreateVolume`
+calls with the same name.
+
+The returned CSI wire data must remain within the CSI specification limits:
+
+- every `volume_context` key and value must be at most 128 UTF-8 bytes;
+- the complete `volume_context` map must be at most 4 KiB under the CSI-defined
+  size calculation;
+- the implementation must validate the final encoded map before persisting an
+  allocation record, creating a directory, or returning `CreateVolume`;
+- chart validation must bound `installationID`, pool names, parent IDs,
+  `basePath`, directory defaults, and every other configured value that can
+  appear in the map. A generated directory name must be shortened by its
+  deterministic naming algorithm, never truncated after the mapping hash has
+  been computed;
+- a value that cannot fit without changing identity must fail with
+  `InvalidArgument`. The driver must not silently omit a required key or emit a
+  partial context.
+
+Boundary tests must cover 128-byte strings, 129-byte strings, a map exactly at
+4 KiB, and a map one byte over the limit, including multi-byte UTF-8 input.
+
+V1 never reuses a `CreateVolumeRequest.name` within one installation, including
+after deletion and tombstone compaction. Kubernetes external-provisioner volume
+names are unique, so this restriction does not affect ordinary PVC recreation.
+Permanent name reservation avoids an old `DeleteVolume` retry ever resolving to
+a newer logical volume with the same deterministic ID.
+
+Node staging and publishing operations must receive these immutable
+`volume_context` fields from the PV. They must recompute the mapping hash,
+validate it against the parsed handle, and fail closed on missing, unknown, or
+mismatched fields. One shared immutable-context validator must compare every
+normalized context field, not only the mapping hash:
+
+- `ControllerPublishVolume` compares it with the allocation and detailed
+  ownership record before provider attach or durable publish-fence mutation;
+- `NodeStageVolume` and `NodePublishVolume` compare it with the parent claim and
+  per-volume ownership record before `chmod`, `chown`, stage, or publish;
+- `schemaVersion`, `installationID`, `activeClusterUID`, delete policy,
+  UID/GID/mode, parent/path identity, and every hash are all mandatory equality
+  checks.
+
+`ValidateVolumeCapabilities` is the only non-delete exception: because the RPC
+is read-only and the upstream CSI sanity contract may omit `volume_context`, an
+empty map is resolved from the handle plus authoritative allocation and
+ownership records. When the map is present, every field must match exactly.
+Missing context remains an error for `ControllerPublishVolume`,
+`NodeStageVolume`, and `NodePublishVolume` because those calls have provider,
+durable, or filesystem side effects.
+
+The mapping hash remains the compact path-identity proof; field-by-field
+validation protects the complete v1 context. The "no `volumeContext`" recovery
+requirement applies to controller `DeleteVolume` and the read-only validation
+exception above, not to normal controller publish or node mounting.
+
+Changing a pool `basePath` while volumes exist is not supported in v1.
+
+`DeleteVolume` resolution order:
+
+1. parse and validate the handle;
+2. load the allocation record by `logicalVolumeID`, distinguishing a conclusive
+   Kubernetes `NotFound` from an unavailable or forbidden lookup;
+3. validate that the persisted mapping hash matches the handle;
+4. if the allocation record is missing and the PV still exists, reconstruct from
+   the PV CSI attributes and the driver-owned ownership record;
+5. if the allocation record is missing but configured parent/base paths still
+   contain a matching driver-owned ownership record for `logicalVolumeID`, use
+   it only after validating the mapping hash and driver name;
+6. if any authoritative lookup is unavailable, return `Unavailable` or
+   `FailedPrecondition` without mutating state;
+7. only if every authoritative source was read successfully and all report
+   absence, persist a minimal non-reserving deleted-unknown tombstone, emit an
+   event/metric, and return success without touching the filesystem.
+
+### 6.11 Directory Naming
+
+Directory names must be deterministic, safe, and human-inspectable.
+
+Recommended format:
+
+```text
+<namespace>--<pvc-name>--<short-pv-or-volume-id>
+```
+
+Rules:
+
+- lower-case;
+- max length enforced;
+- only safe characters: `a-z`, `0-9`, `-`, `_`, `.`;
+- no `/`;
+- no `..`;
+- no path traversal;
+- no shell interpretation assumptions;
+- include a short stable suffix to avoid collisions.
+
+The Helm chart must run `external-provisioner` with:
+
+```text
+--extra-create-metadata=true
+```
+
+The driver may use these CSI parameters when present:
+
+```text
+csi.storage.k8s.io/pvc/name
+csi.storage.k8s.io/pvc/namespace
+csi.storage.k8s.io/pv/name
+```
+
+Do not depend on PV name during `CreateVolume`; the PV may not exist yet.
+
+Fallback when PVC metadata is absent:
+
+```text
+<logical-volume-id>
+```
+
+The final sanitized directory name must be persisted in the allocation record,
+the returned volume context, and the driver-owned ownership record. It must not
+be encoded directly in the compact volume handle; the handle only contains the
+bounded logical volume ID and mapping hash.
+
+The full path must always be joined and validated through a safe path helper.
+Never concatenate paths with string interpolation for destructive operations.
+
+### 6.12 Directory Lifecycle
+
+The driver must manage directory lifecycle at the CSI controller level.
+
+`CreateVolume` must:
+
+1. validate and canonically normalize the request, choose
+   `selectedCapacityBytes`, and compute `requestHash` for integrity;
+2. derive deterministic `logicalVolumeID` from `driverName` and
+   `CreateVolumeRequest.name`;
+3. acquire the per-logical-volume lock and read the deterministic allocation
+   ConfigMap before any provider refresh, `statfs`, or new placement work;
+4. if the record exists, apply semantic compatibility and state handling
+   immediately: return `Ready`, resume `Reserved` or `CreatingDirectory` using
+   the persisted parent, or return the defined terminal/incompatible error;
+5. only after a conclusive ConfigMap `NotFound`, refresh Scaleway metadata for
+   configured active parents;
+6. attach and mount candidate parent file systems on the controller pod's node
+   when needed;
+7. collect fresh `statfs` data for candidate parents;
+8. choose a parent that satisfies logical capacity, actual free-space reserve,
+   lifecycle, and node-compatibility requirements;
+9. atomically create the allocation record named from `logicalVolumeID` in
+   `Reserved` state, including the selected parent, selected capacity,
+   normalized immutable parameters, and request hash;
+10. if create returns `AlreadyExists` or an ambiguous API result, re-read that
+    same deterministic record and follow step 4; never perform a second
+    placement;
+11. move the allocation record to `CreatingDirectory`;
+12. create the logical volume data directory;
+13. write the driver-owned ownership record outside the mounted data directory;
+14. apply ownership and mode to the logical data directory;
+15. verify the ownership record, data directory, ownership, and mode;
+16. move the allocation record to `Ready`;
+17. return a CSI volume handle and volume context containing the immutable
+    mapping.
+
+If `CreateVolume` is retried while the allocation record is `Reserved` or
+`CreatingDirectory`, the driver must resume and repair the operation. It must
+not return success until the directory and driver-owned ownership record have
+been verified. A retry must not require the parent to remain eligible for new
+placement or have spare capacity; it validates and resumes the already-reserved
+mapping.
+
+Capacity and compatibility rules:
+
+- if `required_bytes > 0`, `selectedCapacityBytes` is `required_bytes`;
+- if the capacity range is absent or `required_bytes == 0`, v1 uses a 1 GiB
+  logical reservation;
+- if `limit_bytes > 0` and the selected capacity exceeds it, return
+  `OutOfRange`;
+- a replay is capacity-compatible when the persisted selected capacity is
+  greater than or equal to the new `required_bytes` and, when non-zero, less
+  than or equal to the new `limit_bytes`;
+- pool, delete policy, UID, GID, mode, access type, supported access modes, and
+  other immutable StorageClass parameters must be semantically equal after
+  canonical normalization;
+- map order and capability order must not affect compatibility or hashes;
+- a compatible replay returns the original handle, immutable volume context,
+  and persisted selected capacity;
+- an incompatible replay returns `AlreadyExists` as required by CSI.
+
+`requestHash` is a canonical integrity and diagnostics field. Exact hash
+equality must never replace the semantic compatibility check required by CSI.
+Its canonical payload contains exactly: original required bytes, original limit
+bytes, selected capacity bytes, pool name, delete policy, directory UID, GID,
+mode, filesystem access type, normalized filesystem type, and sorted supported
+access modes. Volume content sources, non-empty mount flags, non-empty topology
+accessibility requirements, and mutable parameters are unsupported in v1 and
+must be rejected before hashing.
+
+If `CreateVolume` is retried after the same logical record has reached a
+terminal state, the driver must not silently reuse the old mapping as a new
+active volume:
+
+- `Ready` with a semantically compatible request returns the existing mapping;
+- `Reserved` and `CreatingDirectory` with a semantically compatible request
+  resume and repair creation;
+- `Deleting` fails with a clear "deletion in progress" error;
+- `Archived`, `Retained`, and `Deleted` fail with `AlreadyExists` or
+  `FailedPrecondition` and a clear message that v1 permanently reserves the CSI
+  volume name within the installation;
+- an unrecoverable observation leaves the record in its last defined
+  crash-resumable state and returns an actionable error; v1 never invents an
+  unpaired generic failure state.
+
+`NodeStageVolume` must verify the directory exists before mounting it. It must
+not create or recreate the logical data directory for `Ready`, `Deleting`,
+`Archived`, or `Retained` records. Directory creation and repair are
+controller-owned operations limited to `Reserved` and `CreatingDirectory`
+recovery paths.
+
+Rationale:
+
+- CSI `DeleteVolume` is a controller operation, not a node operation;
+- archive/delete policies require filesystem access during controller delete;
+- creating the directory during `CreateVolume` makes provisioning failures
+  visible before pods are scheduled;
+- relying only on node-side directory creation would leave cleanup ambiguous.
+
+The controller therefore needs a tightly scoped filesystem operations path. The
+v1 implementation must use one simple model: the active controller pod owns the
+attach, mount, `statfs`, directory, archive, retain, and delete lifecycle for
+parent file systems through a controller-owned mount root.
+
+A separate filesystem-manager sidecar is out of scope for v1. It may be added
+later only if the direct privileged controller model proves insufficient.
+
+The chart must let operators constrain controller placement through
+`nodeSelector`, `affinity`, and `tolerations`. The controller must fail fast if
+it is scheduled on a node that cannot attach and mount the configured parents.
+
+### 6.13 Ownership Record
+
+Every logical volume must have an authoritative driver-owned ownership record
+outside the user-mounted data directory:
+
+```text
+<basePath>/.sfs-subdir-csi/volumes/<logicalVolumeID>.json
+```
+
+The ownership record must contain:
+
+```json
+{
+  "schemaVersion": "1",
+  "recordKind": "detailed",
+  "driverName": "sfs-subdir.csi.example.com",
+  "installationID": "...",
+  "activeClusterUID": "...",
+  "volumeHandle": "...",
+  "volumeHandleHash": "...",
+  "logicalVolumeID": "...",
+  "mappingHash": "...",
+  "poolName": "standard",
+  "parentFilesystemID": "...",
+  "basePath": "/kubernetes-volumes",
+  "basePathHash": "...",
+  "directoryName": "...",
+  "createVolumeRequestName": "...",
+  "requestHash": "...",
+  "originalRequiredBytes": 10737418240,
+  "originalLimitBytes": 0,
+  "selectedCapacityBytes": 10737418240,
+  "normalizedCreateParameters": {},
+  "deletePolicy": "archive",
+  "directoryUid": 1000,
+  "directoryGid": 1000,
+  "directoryMode": "0770",
+  "publishedNodeIDs": [],
+  "state": "Ready",
+  "revision": 1,
+  "contentChecksum": "sha256:...",
+  "createdAt": "..."
+}
+```
+
+The ownership record is required for:
+
+- idempotent create when the directory already exists;
+- node-side directory validation before bind mount;
+- `archive`;
+- `delete`;
+- `retain`;
+- recovery after controller restart.
+
+The ownership record is also the last-resort immutable recovery envelope when
+both the allocation ConfigMap and PV are unavailable. It must therefore contain
+the original create request name, request hash, original capacity range,
+selected capacity, normalized immutable creation parameters, delete policy,
+UID/GID/mode, and complete mapping fields. These values are copied at creation
+and never inferred later from a current StorageClass or pool default. Recovery
+recreates the allocation record with compare-and-swap before entering the normal
+delete state machine.
+
+Detailed ownership records have one closed lifecycle extension shared with the
+allocation record. Fields are absent until their transition begins and then
+become immutable for that operation:
+
+```text
+deleteOperationID
+deleteOperation
+deleteSourcePath
+deleteTargetPath
+deletePreparedAt
+deleteRemoveStartedAt
+deleteCompletedAt
+archivedPath
+retainedPath
+quarantinePath
+gcRequestID
+gcRequestedMode
+gcExpectedState
+gcRequestedAt
+gcOperationID
+gcTargetPath
+gcQuarantinePath
+gcStartedAt
+gcRemoveStartedAt
+gcCompletedAt
+```
+
+Readers reject unknown lifecycle fields and state/field combinations outside
+the transition table in section 10.6. An operation ID and its paths never change
+after preparation.
+
+`publishedNodeIDs` is lifecycle state rather than immutable creation input, but
+it must be mirrored in the ownership record so namespace loss cannot erase the
+last proof of a potentially live node mount. Destructive operations require the
+allocation and ownership sets to agree and both to be empty. Publish-first and
+unpublish-first crashes can produce the same divergent representation, so
+generic or startup reconciliation must not infer an operation direction. Under
+the per-volume lock it computes the deduplicated union, writes that union to the
+allocation record first and the ownership record second, and never removes an
+entry. Only an active `ControllerUnpublishVolume`, after its normal-node or
+provider-fencing checks succeed, may remove a node entry.
+
+The user-mounted data directory is untrusted. Workloads may delete, rename, or
+modify any file inside it. Therefore a marker placed inside the data directory
+may be written for diagnostics, but it must never be the sole proof used for
+archive, delete, retain, or recovery.
+
+Destructive operations must fail closed if the driver-owned ownership record is
+missing or inconsistent with the allocation record, volume handle, or volume
+context.
+
+The ownership state is part of node-side authorization. Only `Ready` authorizes
+new `ControllerPublishVolume`, `NodeStageVolume`, and `NodePublishVolume`
+operations. Before a filesystem mutation for delete or GC, the controller must
+atomically update the record to the prepared lifecycle state. `Deleting`,
+`Archived`, `Retained`, and `Deleted` never authorize a new mount.
+Unpublish and unstage remain idempotent in every state.
+
+Ownership records follow the allocation lifecycle:
+
+- `Ready`: the ownership record authorizes node staging and controller
+  lifecycle operations.
+- `Archived` and `Retained`: the ownership record must be preserved and updated
+  with the terminal path and state. It remains required for manual GC.
+- `Deleted`: the ownership record becomes a permanent compact, non-authorizing
+  tombstone after the allocation `Deleted` tombstone is durable. It is never
+  removed in v1.
+
+The compact ownership tombstone remains at the same deterministic path and
+contains exactly the durable identity needed to reject name reuse and reconstruct
+a missing Kubernetes tombstone:
+
+```text
+schemaVersion = 1
+recordKind = compactDeleted
+revision
+driverName
+installationID
+activeClusterUID
+volumeHandleHash
+logicalVolumeID
+createVolumeRequestName
+mappingHash
+parentFilesystemID
+basePathHash
+directoryName
+state = Deleted
+deleteResult
+updatedAt
+deletedAt
+contentChecksum
+```
+
+When populated by the matching detailed predecessor, the compact ownership
+tombstone may additionally preserve only these terminal audit fields:
+`deleteOperation`, `archivedPath`, `retainedPath`, `quarantinePath`,
+`deleteOperationID`, `deleteCompletedAt`, `gcOperationID`, `gcTargetPath`,
+`gcQuarantinePath`, and `gcCompletedAt`. Delete-created tombstones must include
+`deleteOperationID`; GC-created tombstones must include `gcOperationID` and
+`gcCompletedAt`. Unknown fields are rejected. These fields never authorize a
+filesystem operation.
+
+It never authorizes staging, publishing, filesystem mutation, or capacity
+reservation. Startup must enumerate detailed and compact ownership records on
+every currently configured parent. If a compact ownership tombstone on a
+configured parent has no allocation ConfigMap after same-cluster recovery, the
+controller reconstructs the matching `compactDeleted` allocation tombstone by
+compare-and-swap before serving. Any identity or checksum mismatch fails
+closed. Compact ownership records on an offline-decommissioned, unconfigured
+parent are intentionally not read during normal startup or checkpoint; their
+already-validated Kubernetes allocation tombstones remain the online evidence.
+
+Offline parent decommission requires no reserving or non-Deleted allocation
+records and no live detailed ownership records for that parent, plus the mount,
+published-node, and attachment checks in section 6.9. Any schema-valid
+non-reserving `Deleted` allocation tombstone may retain the historical parent ID
+without blocking decommissioning. Compact `Deleted` ownership tombstones are
+also historical evidence and do not block decommissioning, but the final
+decommission validation must prove that every remaining compact ownership
+tombstone matches its allocation tombstone before the parent becomes
+unavailable. The parent-global claim remains unreleased.
+
+### 6.14 Delete Policy
+
+The driver must support three delete policies:
+
+```text
+archive
+delete
+retain
+```
+
+Default:
+
+```text
+archive
+```
+
+Behavior:
+
+- `archive`: move the directory to `<basePath>/.archived/<directory>-<timestamp>`;
+- `delete`: recursively delete only the validated directory;
+- `retain`: leave the directory untouched and log the retained path.
+
+The `delete` policy must be opt-in.
+
+The driver must refuse deletion if:
+
+- the path is empty;
+- the path is `/`;
+- the path equals the base path;
+- the path is outside the configured base path after normalization;
+- the path contains traversal;
+- the target cannot be proven to belong to the volume being deleted.
+
+Archive and retain must create durable tombstone records that remain part of
+pool accounting until a documented garbage collection operation removes them.
+
+`DeleteVolume` must follow a concrete idempotent state machine:
+
+1. parse and validate the volume handle;
+2. acquire the same per-logical-volume lock used by publish and lifecycle
+   operations;
+3. load the allocation record by `logicalVolumeID`;
+4. validate that the record's `mappingHash` matches the handle;
+5. if the record is `Deleted`, `Archived`, or `Retained`, validate enough
+   persisted state to return idempotent success without touching a new path;
+6. list VolumeAttachment objects for this driver and handle. If the read is
+   unavailable, return a retryable error. If any attachment object remains,
+   including one with a deletion timestamp, return `FailedPrecondition` because
+   the volume may still be in use;
+7. require the allocation and ownership `publishedNodeIDs` sets to agree and be
+   empty. A missing or unavailable node is not proof that its bind mount
+   disappeared. Apply the fenced-node recovery rule below before clearing a
+   stale entry;
+8. transition `Ready` to a prepared `Deleting` record before any filesystem
+   mutation. This record must include a collision-resistant
+   `deleteOperationID`, the delete operation, and the planned
+   archive/quarantine/retain target path when the policy needs one;
+9. atomically update the driver-owned ownership record to the matching
+   non-authorizing `Deleting` state;
+10. attach and mount the parent on the controller node if needed;
+11. validate the safe path, persisted base path, parent ID, driver name, and
+   driver-owned ownership record;
+12. execute the configured delete policy;
+13. persist matching terminal allocation and ownership state before returning
+    success.
+
+For the `delete` policy, terminalization writes the non-reserving allocation
+`Deleted` tombstone first and then atomically replaces the matching detailed
+ownership record with its permanent compact ownership tombstone. A crash after
+the first write may complete only that exact ownership compaction after
+validating the prepared delete operation, mapping, path, and terminal outcome;
+it never repeats
+filesystem deletion. `DeleteVolume` returns success only after both records
+agree. `archive` and `retain` preserve matching detailed terminal ownership
+records until explicit GC performs the same allocation-first, compact-owner-last
+terminalization.
+
+`ControllerPublishVolume` must acquire the per-logical-volume lock and accept
+only `Ready`. A publish racing with deletion either completes before the
+VolumeAttachment check and makes deletion fail, or observes `Deleting` and is
+rejected. It must never publish after the prepared deletion state is durable.
+For `SINGLE_NODE_WRITER`, an existing different node ID in the conservative
+union of allocation and ownership `publishedNodeIDs` returns
+`FailedPrecondition` before any provider attachment. Repeated controller publish
+to the same node remains idempotent; the node service separately enforces the
+single-target rule required by this access mode.
+
+Every allocation and ownership record must contain the same deduplicated,
+bounded `publishedNodeIDs` set. After the parent attachment is confirmed
+`available` and before returning a successful `ControllerPublishVolume`, the
+controller must add the request's exact node ID to the allocation record first,
+then durably mirror it to the ownership record. It returns success only after
+both records agree.
+
+`ControllerUnpublishVolume` may trust the CSI node-unpublish/unstage ordering
+only for a conclusive normal-node path: the Kubernetes Node still exists, is
+`Ready=True`, has no `node.kubernetes.io/out-of-service` taint, and its current
+CSINode registration advertises this driver's exact request node ID. This does
+not independently prove an unmount; it establishes that the request follows
+the normal CSI orchestration contract rather than Kubernetes forced-detach or
+orphan cleanup. If any of that evidence is missing, stale, mismatched, or
+unreadable, the controller must retain the durable node fence until the provider
+fencing rule below conclusively proves that the old Instance can no longer
+serve the mount. A deleted VolumeAttachment is never such proof.
+
+For every node ID that is safe to clear, the controller removes the ownership
+entry first and the allocation entry second. These write orders ensure that at
+least one durable source remains conservative at every crash point. If a crash
+leaves the sets divergent, generic reconciliation restores their union; the
+retried unpublish then revalidates safety and removes the target again. This may
+temporarily preserve or restore a stale fence but never discards one without
+proof. Unavailable Kubernetes or provider reads return `Unavailable` without
+clearing the fence; a conclusive but still-unfenced stale node returns
+`FailedPrecondition` with the exact node and required operator action.
+
+CSI permits `ControllerUnpublishVolume.node_id` to be empty and defines that
+request as unpublish from all nodes. Under the per-volume lock, the target set
+is the exact request node ID when non-empty, otherwise the deduplicated union of
+the allocation and ownership `publishedNodeIDs` sets. The controller applies
+the same normal-node or provider-fenced decision independently to every target.
+It may durably clear proven-safe targets, but returns success only when both
+records agree and every requested target is absent. It must never translate an
+empty node ID into an empty-string entry or blindly erase the complete set.
+A non-empty request node ID already absent from both agreeing records is an
+idempotent success and does not require Kubernetes or provider reads.
+
+The set is a conservative fence for non-graceful node loss; it is not a usage
+counter. A stale entry may be cleared automatically only when the Scaleway API
+conclusively proves either that the Instance no longer exists, or that the
+Instance is non-running and this logical volume's parent attachment has been
+removed from that Instance. For a deleted Instance, the fresh regional
+attachment inventory must also prove that no orphan attachment remains. A
+missing Kubernetes Node, deleted Pod, absent
+VolumeAttachment, timeout, or unreachable Instance is not sufficient. Reads
+that are unavailable or ambiguous keep the entry and block delete/GC. The
+operations guide must require the operator to stop and detach or delete the
+Instance before retrying the destructive operation. Once fencing is proven, the
+controller clears the ownership entry first and allocation entry second using
+the same crash-safe unpublish ordering; operators never patch either record
+directly.
+
+For the pinned Instance SDK, only terminal `stopped` and `stopped in place`
+states qualify as non-running. `starting`, `stopping`, `locked`, unknown, and
+unreadable states do not fence a process and must keep the published-node entry.
+
+Policy-specific rules:
+
+- `archive`: before any rename, persist `Deleting` with `deleteOperation =
+  archive`, the validated `deleteSourcePath`, and a collision-resistant
+  `archivedPath` under `<basePath>/.archived`. Then move the data directory once
+  to that already-persisted path and persist `Archived`. Retries must handle:
+  source present + archive path absent, source absent + archive path present,
+  and source absent + archive path absent. The last case must fail closed with a
+  manual recovery message.
+- `retain`: persist `Retained` with `retainedPath`. It must not move data.
+  Retries return success without moving data.
+- `delete`: before any rename, persist `Deleting` with `deleteOperation =
+  delete`, the validated `deleteSourcePath`, and a collision-resistant
+  `quarantinePath` under `<basePath>/.deleted`. Then move the data directory to
+  that already-persisted quarantine path and complete the lifecycle durability
+  barrier from section 6.15. Before recursive removal, write
+  `deleteRemoveStartedAt` to the allocation record first and then to the exact
+  matching ownership record. Recursive removal is authorized only after both
+  records agree on the operation ID, paths, and remove-start evidence. After
+  removal, complete the `.deleted` directory durability barrier, persist
+  `Deleted`, and release logical reservation. If a retry sees source absent,
+  quarantine absent, and matching `deleteRemoveStartedAt` in both records, it
+  must first complete the `.deleted` directory durability barrier and may then
+  mark the record `Deleted`. Without matching evidence, it must fail closed.
+
+`Archived` and `Retained` records continue reserving logical bytes until a
+documented manual garbage-collection operation removes the data and updates the
+record. `Deleted` records no longer reserve capacity, but remain as durable
+tombstones. Normal `DeleteVolume` must never delete terminal allocation records.
+An operation that cannot advance safely remains in its last persisted
+crash-resumable state. It preserves the capacity semantics of that state and
+returns a clear recovery action through the CSI error, Kubernetes Event, and
+bounded diagnostic status. Operators never patch lifecycle state directly.
+
+`DeleteVolume` missing-state semantics:
+
+- an empty `volume_id` fails with `InvalidArgument`;
+- a non-empty foreign or syntactically impossible ID that this driver could
+  never have emitted returns idempotent success without creating a tombstone or
+  performing Kubernetes, provider, or filesystem lookup;
+- a parseable driver handle whose logical record exists but whose mapping hash
+  conflicts fails closed; it is evidence of corruption, not an unknown volume;
+- valid driver handles with a known terminal tombstone return success;
+- valid driver handles with no allocation record, no PV attributes, and no
+  ownership record return success after persisting a minimal non-reserving
+  deleted-unknown tombstone only when every required Kubernetes and filesystem
+  lookup completed successfully and conclusively reported absence;
+- any unavailable, forbidden, timed-out, stale, or unmounted lookup returns
+  `Unavailable` or `FailedPrecondition` without persisting deletion state;
+- known inconsistent states fail closed when the driver has enough evidence
+  that data may still exist but cannot prove a safe mutation target.
+
+Manual GC must apply the same `VolumeAttachment` and `publishedNodeIDs` gates as
+normal deletion. Renaming a directory does not revoke an existing bind mount,
+so archive is not exempt from this rule.
+
+The driver must never recover deletion state by heuristic scanning of
+`.archived` or `.deleted`. It must rely on the allocation record, the
+driver-owned ownership record, and deterministic/persisted delete target paths.
+
+### 6.15 Filesystem Safety
+
+All filesystem operations must go through a dedicated safety package.
+
+Required behavior:
+
+- validate every path component below `basePath` with no symlink following;
+- verify the final bind source is a real directory, not a symlink;
+- never follow symlinks during archive/delete;
+- never cross mount boundaries during archive/delete;
+- avoid check-then-act filesystem races for destructive operations;
+- anchor destructive traversal under an already-open trusted `basePath`
+  directory and use no-follow, descriptor-relative operations where the Go/Linux
+  implementation allows it;
+- never overwrite an existing archive target;
+- make archive target names collision-resistant by including volume ID,
+  timestamp, and a random suffix;
+- apply `chown` and `chmod` only to the logical volume root by default, not
+  recursively;
+- implement `delete` as a two-step flow:
+  1. move the verified directory to a driver-owned quarantine directory;
+  2. recursively remove only that verified quarantined directory.
+
+Required reserved directories under the pool base path:
+
+```text
+.archived
+.deleted
+.sfs-subdir-csi
+.sfs-subdir-csi/volumes
+```
+
+The driver must refuse to create user logical volumes using reserved names.
+Reserved directories are driver-owned implementation state. They must not be
+bind-mounted into workloads, and user data paths must never be allowed to
+traverse into them.
+
+The initial root-level parent claim uses the dedicated no-overwrite protocol in
+sections 6.3 and 6.7. All per-volume metadata writes use one crash-durable
+helper:
+
+1. open a same-directory temporary file with exclusive creation and no symlink
+   following;
+2. write canonical JSON containing a schema version, monotonically increasing
+   revision, and SHA-256 checksum over the canonical payload excluding the
+   checksum field;
+3. `fsync` the temporary file;
+4. atomically create or replace the destination without following symlinks and
+   without overwriting an unexpected owner;
+5. `fsync` the containing metadata directory;
+6. read back and validate the complete record before advancing the Kubernetes
+   allocation state.
+
+The implementation must never rewrite the only valid metadata generation in
+place. Initial record creation uses no-overwrite semantics. Controlled updates
+must verify the expected prior revision before replacement. Crash-point tests and
+real Scaleway E2E must validate the required `virtiofs` rename and durability
+behavior before v1 release.
+
+Filesystem lifecycle mutations have a separate durability contract. A
+successful syscall is not sufficient evidence for advancing Kubernetes or
+ownership state to the next durable phase:
+
+- after creating a logical data directory and applying its final UID, GID, and
+  mode, sync the directory inode and its containing base directory before
+  writing ownership `Ready`;
+- after moving a source into `.archived` or `.deleted`, sync both the source and
+  destination parent directories before recording rename completion;
+- after recursively removing a quarantine directory, sync `.deleted` before
+  writing terminal `Deleted` state or releasing capacity;
+- after removing a bootstrap temporary claim during rollback, sync the parent
+  filesystem root before clearing the bootstrap journal;
+- archive and GC use the same barriers as normal delete; no separate weaker
+  path is allowed.
+
+The implementation must use the smallest Linux durability primitive that has
+the required semantics on the release-qualified `virtiofs` stack, normally
+file/directory `fsync` and, only when required and proven, `syncfs` for the
+mounted parent. An unsupported, ambiguous, or failed durability operation keeps
+the prepared non-terminal state and returns a retryable or manual-recovery
+error; it never advances optimistically. These barriers cover driver-owned
+metadata and directory entries, not recursive flushing of arbitrary workload
+data. Real node-failure tests must interrupt each lifecycle phase and verify the
+post-restart source/target and durable-state pairing.
+
+### 6.16 Mount Model
+
+The node plugin must mount parent file systems and then bind-mount subdirectories
+to individual CSI volume targets.
+
+Expected node flow:
+
+```text
+NodeStageVolume:
+  1. parse volume handle and acquire the context-aware per-logical-volume node
+     lock
+  2. validate required immutable volume context and mapping hash
+  3. validate the parent is configured for this driver and region
+  4. while retaining the volume lock, use the per-parent node lock to mount or
+     validate the parent SFS at a
+     driver-owned path with virtiofs
+  5. verify base path exists
+  6. verify the logical volume directory exists and has a valid driver-owned
+     ownership record in Ready state
+  7. verify the local exact CSI node ID is present in the ownership record's
+     publishedNodeIDs set
+  8. apply ownership and mode if configured
+  9. validate that the CO-provided staging path is an existing writable absolute
+     directory under the configured kubelet staging tree; Kubernetes owns its
+     creation and removal
+  10. return idempotent success only when an existing staging mount has the
+      exact logical-directory source, supported capability, and filesystem
+      type; otherwise return `AlreadyExists`
+  11. bind-mount the logical directory to the per-volume staging path; on
+      failure, undo only mounts created by this call and leave the CO-owned
+      directory intact
+
+NodePublishVolume:
+  1. parse the handle, acquire the same per-logical-volume node lock, and
+     revalidate the Ready ownership record and local published node ID
+  2. inspect the live mount table and prove the staging path is the exact
+     logical-directory bind mount backed by the expected configured parent
+     `virtiofs` mount; an unmounted, replaced, stacked, or foreign staging path
+     returns `FailedPrecondition`
+  3. for `SINGLE_NODE_WRITER`, reject a different existing target for the same
+     staged volume with `FailedPrecondition`; an identical retry at the same
+     target remains idempotent
+  4. validate that the target is an absolute path under the kubelet-managed
+     plugin target tree, and create the target directory when absent
+  5. if the target is already mounted from the exact requested staging path
+     with the same supported capability and read-only mode, return success; if
+     any of those properties differ, return `AlreadyExists` without remounting
+  6. bind-mount the staging path to the pod target path
+  7. respect `NodePublishVolumeRequest.readonly`; read-only requests must result
+     in a read-only bind mount
+  8. if mounting fails, remove the target directory only when this call created
+     it and only after proving that it is not mounted and is empty
+
+NodeUnpublishVolume:
+  1. parse the handle, acquire the same per-logical-volume node lock, and
+     validate with no-follow resolution that the absolute target is under this
+     driver's exact kubelet pod CSI target subtree
+  2. when mounted, inspect the live mount table and prove the target source is
+     this volume's validated staging mount and ultimately the expected parent
+     and logical directory; a foreign, stacked, aliased, or mismatched mount
+     returns `FailedPrecondition` without unmounting
+  3. unmount the pod target path when ownership is proven; an absent or
+     already-unmounted
+     target is an idempotent success
+  4. remove the driver-created target directory after proving it is unmounted
+     and empty; tolerate `NotFound`, but surface any other cleanup failure
+
+NodeUnstageVolume:
+  1. parse the handle, acquire the same per-logical-volume node lock, and
+     validate with no-follow resolution that the absolute staging path is under
+     this driver's exact kubelet staging subtree
+  2. when mounted, inspect the live mount table and prove the source is the
+     requested logical directory under the expected configured parent; a
+     foreign, stacked, aliased, or mismatched mount returns
+     `FailedPrecondition` without unmounting
+  3. unmount the per-volume staging path when ownership is proven; absent or
+     already-unmounted is an
+     idempotent success
+  4. leave creation and removal of the staging directory to Kubernetes
+  5. keep the parent mounted unless safe cleanup is implemented
+```
+
+Parent mounts can remain mounted on the node. The pool is intentionally small,
+and keeping parent mounts warm avoids unnecessary attach/mount churn.
+
+Concurrent `NodeStageVolume` calls for logical volumes sharing one parent must
+serialize parent mount creation and validate an existing mount's source,
+filesystem type, and target before treating it as idempotent success. Per-volume
+staging operations must reject an existing mount whose source, capability, or
+filesystem type conflicts with the request. Publishing operations additionally
+validate the requested read-only mode. A conflict returns `AlreadyExists`; the
+driver never repairs it by remounting in place because that could alter a live
+pod mount.
+
+All four Node stage/publish/unstage/unpublish RPCs must acquire one
+context-aware in-process lock keyed by parsed `logicalVolumeID` before any mount
+table check or mutation. The lock serializes same-volume check-and-act
+sequences, honors cancellation while waiting, and is released on every error.
+The separate per-parent lock is acquired inside the volume lock only for shared
+parent mount creation and validation. No Node code path may acquire these locks
+in the opposite order. The implementation must never create stacked mounts as
+a retry mechanism.
+
+`NodeStageVolume` must fail with `FailedPrecondition` when a `Ready` volume's
+data directory or driver-owned ownership record is missing or mismatched. It
+must not run `mkdir -p` for a data directory that should already exist.
+
+`NodeStageVolume` must not call authenticated public Scaleway APIs and must not
+require Scaleway credentials. Node identity is initialized separately from the
+local metadata service. The stage operation must treat local `virtiofs` mount
+failure as proof that the parent is not available on the node after
+`ControllerPublishVolume`.
+
+### 6.17 Attach Model
+
+The controller must attach parent file systems to the target Scaleway Instance
+when Kubernetes schedules a workload on a node.
+
+Expected controller flow:
+
+```text
+ControllerPublishVolume:
+  1. parse volume handle
+  2. load and validate a Ready allocation and ownership record under the
+     per-logical-volume lock
+  3. resolve node ID to Scaleway Instance ID and zone
+  4. execute the attachment inventory, budget, attach, and readiness state
+     machine from section 6.6
+  5. persist node ID in the allocation record, then mirror it to the ownership
+     record as defined in section 6.14
+  6. return an empty publish context only after both records agree
+
+ControllerUnpublishVolume:
+  1. acquire the per-logical-volume lock
+  2. build the target set from the exact request node ID, or from the union of
+     both persisted sets when node_id is empty
+  3. for each target, establish the conclusive normal-node path or apply the
+     provider-fenced stale-node rule; ambiguous targets keep their fence
+  4. for each safe target, remove it from the ownership set first
+  5. remove the same target from the allocation set second
+  6. verify both records agree and all requested targets are absent; a retry
+     first reconciles any divergent sets to their union, then repeats the
+     safety check and removal
+  7. do not detach the parent except through the explicit provider-fenced
+     stale-node cleanup path
+```
+
+Default behavior must be conservative:
+
+- attach parents idempotently;
+- keep parent file systems attached while the node is part of the cluster;
+- do not detach a parent just because one logical PVC was unpublished.
+
+Rationale: many PVCs share the same parent. Detaching a parent while another
+logical volume still uses it would break unrelated workloads.
+
+A future version can implement safe reference-counted detach. It is not required
+for v1.
+
+V1 must still handle stale node attachments operationally:
+
+- rebuild driver-relevant `(nodeInstanceID, parentFilesystemID)` attachment
+  inventory from the regional `ListAttachments` API and known Instances;
+- refresh live attachment inventory before `ControllerPublishVolume` and before
+  controller lifecycle mounts;
+- expose metrics and warnings for stale attachments on deleted or unknown nodes;
+- provide an explicit offline operator cleanup procedure. A live Instance must
+  first unmount the parent and prove that no child bind mount remains. A lost
+  Instance must be stopped and detached or deleted. Detach is allowed only after
+  every allocation's `publishedNodeIDs`, PV, VolumeAttachment, staging path, and
+  mount evidence has been reconciled as described in sections 6.14 and 6.9.
+
+The provider appendix must state whether Scaleway automatically removes File
+Storage attachments when an Instance is deleted. The driver must not assume that
+behavior unless it is verified by documentation and e2e tests.
+
+Exactly two v1 paths may call the Scaleway attach API:
+
+- `ControllerPublishVolume`, for the workload node in the request;
+- the active controller lifecycle reconciler, for the controller pod's current
+  node when it needs parent access for reconciliation, `statfs`, create, delete,
+  archive, retain, or GC.
+
+Both paths must use the same section 6.6 inventory, exclusivity, budget,
+idempotency, polling, timeout, and error-mapping implementation. The controller
+must resolve its current Kubernetes node through Downward API `spec.nodeName`
+and the matching CSINode node ID, then validate the Scaleway Instance and zone.
+It must never use `SCW_DEFAULT_ZONE` as the controller target zone.
+`NodeStageVolume` only mounts and bind-mounts after attachment has been requested
+by one of these controller paths.
+
+The v1 `ControllerPublishVolumeResponse.publish_context` is empty, matching the
+provider contract in section 6.6. The node uses immutable `volume_context`, its
+local identity, and host attachment state. Adding node-specific publish context
+is a future wire-contract change and is not permitted in v1.
+
+### 6.18 Topology and Scheduling
+
+The v1 model is intentionally simple: all schedulable Linux workload nodes form
+one homogeneous eligible set in the configured Scaleway region, and every one of
+those nodes can attach every configured parent.
+
+`volumeBindingMode: Immediate` is acceptable only under that invariant.
+
+The driver must not silently rely on this invariant. Startup preflight must prove
+that all schedulable Linux workload nodes and the controller node satisfy the
+homogeneous contract. Otherwise the controller must remain unready and refuse
+new CSI mutations. A development-only skip flag may bypass preflight, but the
+chart and README must state that this mode is unsupported for production.
+
+The node DaemonSet must target `kubernetes.io/os=linux` and cover the same
+workload-node set. Preflight must verify that every eligible node is Ready, has a
+Ready node-plugin pod, and exposes this driver in its CSINode object before the
+controller serves provisioning or publish operations.
+
+Readiness alone does not prove that a rolling DaemonSet has the same parent
+allowlist and schema contract as the controller. The chart must compute a
+`nodeConfigGeneration` as SHA-256 over canonical node-relevant configuration:
+driver name, region, complete parent ID and base-path mapping, node mount roots,
+supported access modes, and ownership schema reader/writer generation. It
+writes the bounded hash to a fixed Pod
+annotation on both controller and node-plugin Pods. Before serving create or
+publish, the controller must require one Ready node-plugin Pod with the exact
+expected generation on every eligible node. A staggered Helm/DaemonSet rollout
+therefore causes temporary unready state rather than provisioning a volume that
+an old node configuration cannot mount.
+
+Mixed compatible and incompatible workload node pools, a narrowed node
+selector, and externally acknowledged scheduling are unsupported in production
+v1. They require the topology-aware future design below rather than an
+operator-acknowledgement boolean.
+
+The controller must maintain this contract after startup. It must revalidate
+eligible nodes when relevant Kubernetes Node objects change, or at a bounded
+periodic interval. If the eligible node set becomes invalid, the controller must
+expose a clear degraded condition, keep existing mounts safe, and refuse new
+operations that depend on the homogeneous-node invariant until the operator
+fixes placement or capacity.
+
+If a future version supports heterogeneous topology-aware pools, it must add:
+
+- `WaitForFirstConsumer`;
+- `NodeGetInfo.accessible_topology`;
+- `CreateVolumeRequest.accessibility_requirements`;
+- `CreateVolumeResponse.accessible_topology`;
+- parent topology persisted in the allocation record and immutable volume
+  context without breaking the compact handle contract.
+
+That topology-aware mode is out of scope for v1.
+
+### 6.19 Access Modes
+
+The v1 CSI access-mode surface is deliberately small and exact:
+
+```text
+SINGLE_NODE_WRITER
+MULTI_NODE_MULTI_WRITER
+```
+
+`MULTI_NODE_MULTI_WRITER` is the URLAB RWX path. `SINGLE_NODE_WRITER` is a
+narrower use of the same backend and is required for compatibility with the
+pinned upstream CSI sanity suite. For a single-node volume, the controller must
+reject publication to a second distinct node. On the node, only an identical
+retry at the same target is allowed; a second different target returns
+`FailedPrecondition`, as required for a non-multi-node access mode. V1 does not support
+`MULTI_NODE_READER_ONLY`, `MULTI_NODE_SINGLE_WRITER`, or the newer single-node
+mode variants. Read-only pod mounts remain supported through
+`NodePublishVolumeRequest.readonly` without advertising a read-only access mode.
+
+V1 has one fixed parent mount contract because many logical volumes share the
+same `virtiofs` parent mount:
+
+- `VolumeCapability` must use the mounted filesystem access type;
+- `fs_type` must be empty or exactly `virtiofs` after normalization;
+- non-empty CSI mount flags are unsupported and mapped according to the
+  RPC-specific table below;
+- non-empty `accessibility_requirements` are rejected because v1 does not
+  advertise or implement topology;
+- parent mounts always use one driver-owned, release-tested option set and never
+  inherit options from an individual StorageClass or PVC;
+- read-only behavior is implemented and verified on the per-volume bind mount,
+  not by remounting the shared parent read-only.
+
+The same validation must run in `CreateVolume`,
+`ValidateVolumeCapabilities`, `ControllerPublishVolume`, `NodeStageVolume`, and
+`NodePublishVolume`. An idempotent stage succeeds only when the existing mount
+matches the complete supported capability. An idempotent publish must also
+match the requested read-only mode.
+
+Validation results are RPC-specific, as required by CSI:
+
+| RPC | Unsupported well-formed capability | Malformed request | Existing incompatible publication/mount |
+| --- | --- | --- | --- |
+| `CreateVolume` | `InvalidArgument` | `InvalidArgument` | `AlreadyExists` for an incompatible replay |
+| `ValidateVolumeCapabilities` | `0 OK` with `confirmed` unset and diagnostic `message` | `InvalidArgument` | not applicable; unknown volume is `NotFound` |
+| `ControllerPublishVolume` | `FailedPrecondition` | `InvalidArgument` | `AlreadyExists` when already published incompatibly |
+| `NodeStageVolume` | `FailedPrecondition` | `InvalidArgument` | `AlreadyExists` at the same staging target |
+| `NodePublishVolume` | `FailedPrecondition` | `InvalidArgument` | `AlreadyExists` at the same target |
+
+The implementation may share parsing and normalization, but it must not share
+one hard-coded gRPC result across these RPCs. Tests assert the exact status and
+the `ValidateVolumeCapabilitiesResponse` shape.
+
+For a second `NodePublishVolume` target, `SINGLE_NODE_WRITER` returns
+`FailedPrecondition` whether the remaining arguments match or not.
+`MULTI_NODE_MULTI_WRITER` permits another target when its request is otherwise
+supported. These target-count semantics are node-local and are derived from the
+validated live mount table, not a new durable control-plane record.
+
+The v1 parent option set is empty: mount exactly
+`mount -t virtiofs <filesystem-id> <parent-target>` with no user-configurable
+mount flags. New parent-wide options require a later compatibility-tested
+release and cannot be introduced through a StorageClass.
+
+When a pod or CSI request asks for a read-only mount, `NodePublishVolume` must
+publish the target path as read-only. Idempotent re-publish must preserve the
+requested mode. If an existing mount has a conflicting read-only/read-write
+mode, the driver must return `AlreadyExists` without changing the mount; it must
+not silently return success with the wrong access mode or remount a live target.
+
+### 6.20 Volume Expansion
+
+Logical PVC expansion is out of scope for v1.
+
+The v1 StorageClass must set:
+
+```yaml
+allowVolumeExpansion: false
+```
+
+Parent File Storage expansion is separate:
+
+- operator expands parent SFS through Scaleway;
+- driver observes the new parent size on next metadata refresh;
+- new PVCs use the refreshed size.
+
+Future logical PVC expansion can be added after v1. It must define allocation
+record updates, retry behavior, shrink rejection, and reconciliation after
+partial expansion failures before enabling `external-resizer`.
+
+### 6.21 Reclaim Policy
+
+The v1 StorageClass must use:
+
+```text
+reclaimPolicy: Delete
+```
+
+This tells Kubernetes to call `DeleteVolume` when the PVC/PV is deleted.
+
+Actual data behavior is controlled by the driver's `onDelete` parameter:
+
+- Kubernetes reclaim policy `Delete` + driver `archive` means the PV is deleted
+  but data is archived.
+- Kubernetes reclaim policy `Delete` + driver `delete` means the PV and data are
+  both deleted.
+- Kubernetes reclaim policy `Delete` + driver `retain` means the PV is deleted
+  but data remains in place.
+
+## 7. Configuration
+
+### 7.1 Helm Values
+
+The Helm chart must expose a clear `values.yaml`:
+
+```yaml
+driver:
+  name: sfs-subdir.csi.example.com
+  logLevel: info
+
+installation:
+  existingSecretName: scaleway-sfs-subdir-csi-identity
+  idKey: installationID
+  generateForDevelopmentOnly: false
+
+scaleway:
+  region: fr-par
+  defaultZone: fr-par-1
+  projectId: ""
+  credentials:
+    existingSecretName: scaleway-sfs-subdir-csi-credentials
+    accessKeyKey: SCW_ACCESS_KEY
+    secretKeyKey: SCW_SECRET_KEY
+
+controller:
+  replicas: 1
+  leaderElection: true
+  updateStrategy: Recreate
+  maxConcurrentMutations: 10
+  shutdownDeadline: 90s
+  terminationGracePeriodSeconds: 120
+  progressDeadlineSeconds: 3900
+  leadership:
+    enabled: true
+    leaseDuration: 30s
+    renewDeadline: 20s
+    retryPeriod: 5s
+  attachReadyDeadline: 10m
+  metadataRefreshInterval: 5m
+  parentMountRoot: /var/lib/scaleway-sfs-subdir-csi/controller-parents
+  privilegedMounts: true
+  nodeSelector:
+    kubernetes.io/os: linux
+  affinity: {}
+  tolerations: []
+
+node:
+  parentMountRoot: /var/lib/scaleway-sfs-subdir-csi/parents
+  kubeletPath: /var/lib/kubelet
+  nodeSelector:
+    kubernetes.io/os: linux
+  affinity: {}
+  tolerations: []
+
+scheduling:
+  allSchedulableLinuxNodesAreEligible: true
+  requireHomogeneousEligibleNodes: true
+  skipNodePreflightForDevelopmentOnly: false
+
+pools:
+  standard:
+    basePath: /kubernetes-volumes
+    selectionPolicy: least-allocated
+    maxParentsPerEligibleNode: 2
+    maxLogicalOvercommitRatio: 1.0
+    minFreeBytes: 10737418240
+    minFreePercent: 5
+    onDelete: archive
+    directoryMode: "0770"
+    directoryUid: "1000"
+    directoryGid: "1000"
+    filesystems:
+      - id: ""
+        name: sfs-subdir-pool-standard-01
+        state: active
+      - id: ""
+        name: sfs-subdir-pool-standard-02
+        state: active
+
+storageClasses:
+  - name: sfs-subdir-rwx
+    poolName: standard
+    defaultClass: false
+    reclaimPolicy: Delete
+    allowVolumeExpansion: false
+    volumeBindingMode: Immediate
+```
+
+`controller.replicas` must be `1` in v1. The Helm chart must reject values
+greater than `1` with a clear validation error unless a future release adds and
+tests driver-internal leader election for every controller-owned mutation.
+`controller.leaderElection` configures CSI sidecar leader election where
+supported; it must not be documented as driver-controller HA in v1.
+`controller.updateStrategy` must be `Recreate`. `controller.leadership` must be
+enabled. The chart creates the narrow Lease RBAC, while the controller creates
+and owns the runtime Lease through Kubernetes optimistic concurrency. Helm must
+not render or patch the mutable Lease object because doing so could erase live
+holder or recovery evidence. The Lease coordinates the single active process
+but is not a storage fence. The chart must reject production values that narrow
+the node-plugin/workload eligible set, disable the homogeneous-node preflight,
+or remove `kubernetes.io/os=linux`. Compatible controller-only placement
+constraints remain supported only when they leave at least two Ready candidate
+nodes and do not bind the controller to one hostname or one failure domain.
+
+`node.parentMountRoot` is fixed to
+`/var/lib/scaleway-sfs-subdir-csi/parents` in production v1. A development
+override is unsupported for release values. `node.kubeletPath` may vary by
+distribution but must be absolute, normalized, and resolve to a directory
+disjoint from the fixed parent root. Node startup resolves symlinks and rejects
+equality or ancestor/descendant overlap between the parent root and kubelet,
+plugin socket, registry, pod, staging, or target trees before enabling
+Bidirectional propagation.
+
+### 7.2 StorageClass Parameters
+
+Supported StorageClass parameters:
+
+```yaml
+parameters:
+  poolName: standard
+  onDelete: archive
+  directoryMode: "0770"
+  directoryUid: "1000"
+  directoryGid: "1000"
+```
+
+Rules:
+
+- `poolName` is required, must reference an existing pool, and must be a bounded
+  DNS-safe name.
+- `onDelete` defaults to the pool policy and must be exactly `archive`, `delete`,
+  or `retain`.
+- directory ownership and mode default to the pool policy;
+- UID and GID must be base-10 integers in the inclusive range 0 to 2147483647;
+- mode must match `0[0-7]{3}` and is interpreted as octal;
+- the external-provisioner metadata keys
+  `csi.storage.k8s.io/pvc/name`,
+  `csi.storage.k8s.io/pvc/namespace`, and
+  `csi.storage.k8s.io/pv/name` are accepted only as non-policy naming metadata
+  injected by `--extra-create-metadata=true`;
+- every other unknown parameter is rejected with `InvalidArgument` rather than
+  silently ignored;
+- StorageClass parameters must never contain credentials.
+
+The three metadata keys are not user policy and are not compared as immutable
+StorageClass parameters during an idempotent replay. Their sanitized result is
+captured by the persisted `directoryName` and mapping hash. Missing metadata
+uses the deterministic fallback from section 6.11.
+
+### 7.3 Credentials
+
+Credentials must come from Kubernetes Secrets. Non-secret provider scope must
+have one different, authoritative source: Helm values.
+
+Environment variable sources:
+
+```text
+SCW_ACCESS_KEY          <- credentials Secret
+SCW_SECRET_KEY          <- credentials Secret
+SCW_DEFAULT_PROJECT_ID  <- scaleway.projectId
+SCW_DEFAULT_REGION      <- scaleway.region
+SCW_DEFAULT_ZONE        <- scaleway.defaultZone
+```
+
+The credentials Secret must contain only the access and secret key. Project,
+region, and default zone must not also be accepted from that Secret, because two
+configuration authorities could select the wrong Project or region. The chart
+must render non-secret scope directly from validated values and must never put
+credentials in ConfigMaps.
+
+Scaleway File Storage parent metadata is regional. Instance attachment
+operations are node-specific and must use the zone of the target Scaleway
+Instance. `SCW_DEFAULT_ZONE` may be required to initialize the Scaleway Go SDK,
+but it must never be used as the workload node zone for
+`ControllerPublishVolume`. The controller must derive the node zone from the CSI
+`NodeId` or from validated Scaleway node metadata for the target node.
+
+In v1, Scaleway credentials must be mounted only into the controller container
+or controller-side components that strictly need Scaleway API access. The node
+plugin must not receive `SCW_ACCESS_KEY`, `SCW_SECRET_KEY`, or equivalent
+Scaleway credentials.
+
+Rationale:
+
+- only the controller calls Scaleway APIs for metadata and attach;
+- the node plugin may read the local unauthenticated Instance metadata service,
+  but `NodeStageVolume` must not call authenticated public Scaleway APIs;
+- the node plugin is a privileged DaemonSet and should not carry cloud
+  credentials it does not need.
+
+The chart must always reference an existing credential Secret. It must not
+accept raw access or secret keys as Helm values or render a credential Secret,
+including for local development. Tests must ensure credentials never appear in
+ConfigMaps, StorageClasses, logs, or non-Secret rendered resources.
+
+The README must document the Project-scoped IAM permission sets and their known
+granularity limitation exactly as defined in section 6.6.
+
+### 7.4 Helm Chart Contract
+
+The Helm chart is part of the production surface. It must be concrete enough to
+install the driver outside URLab without private assumptions.
+
+Required stable values surface:
+
+```yaml
+image:
+  repository: ""
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+sidecars:
+  operationTimeout: 12m
+  externalProvisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner
+    tag: ""
+    digest: ""
+    workerThreads: 5
+  externalAttacher:
+    image: registry.k8s.io/sig-storage/csi-attacher
+    tag: ""
+    digest: ""
+    workerThreads: 5
+  nodeDriverRegistrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: ""
+    digest: ""
+  livenessProbe:
+    image: registry.k8s.io/sig-storage/livenessprobe
+    tag: ""
+    digest: ""
+
+imagePullSecrets: []
+resources:
+  controllerDriver:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  externalProvisioner:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  externalAttacher:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  nodeDriver:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  nodeDriverRegistrar:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  livenessProbe:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 64Mi}
+probes:
+  startup:
+    periodSeconds: 10
+    failureThreshold: 360
+  readiness:
+    periodSeconds: 10
+  liveness:
+    periodSeconds: 20
+podLabels: {}
+podAnnotations: {}
+priorityClassName: system-cluster-critical
+serviceAccounts:
+  controller: {create: true}
+  node: {create: true}
+rbac:
+  create: true
+metrics:
+  enabled: true
+  service:
+    enabled: true
+```
+
+The chart must render, at minimum:
+
+- controller Deployment with `strategy: Recreate`;
+- node DaemonSet;
+- CSIDriver;
+- StorageClass objects;
+- controller ServiceAccount and RBAC;
+- node ServiceAccount and RBAC;
+- RBAC for the controller-owned runtime leadership Lease;
+- sidecar leader-election RBAC where needed;
+- metrics Service when metrics are enabled;
+- startup, readiness, and liveness probes with startup timing that permits the
+  bounded provider and reconciliation preflight;
+- CSI socket volumes and hostPaths required by Kubernetes CSI.
+
+The chart must explicitly define controller and node security contexts, hostPath
+mounts, CSI socket paths, kubelet paths, and mount propagation. It must not use
+wildcard hostPath mounts.
+
+The chart must include `values.schema.json` for structural types and numeric
+ranges, plus template validation for cross-field rules. It must reject at least:
+
+- missing production identity or credential Secret references;
+- empty project, region, driver name, pool name, parent ID, or StorageClass name;
+- duplicate parent filesystem IDs across pools;
+- a missing pool referenced by a StorageClass;
+- root, relative, non-normalized, or reserved base paths;
+- a production `node.parentMountRoot` different from the fixed dedicated path,
+  or any kubelet/socket/registry/pod/staging path that is relative,
+  non-normalized, equal to, an ancestor of, or a descendant of that root;
+- any configured CSI context field that can exceed 128 UTF-8 bytes, or any
+  configuration whose fixed context values already make a valid 4-KiB
+  `volume_context` impossible; runtime validation covers request-derived values;
+- unsupported delete policy, directory mode, UID, or GID;
+- non-positive capacity ratios or invalid free-space percentages;
+- more than one default StorageClass;
+- `controller.replicas != 1`, a non-`Recreate` controller strategy, disabled
+  leadership, or narrowed production node-plugin/workload placement; compatible
+  controller-only placement constraints remain allowed;
+- invalid leadership timing or a sidecar operation timeout that is not greater
+  than `controller.attachReadyDeadline` by at least one minute;
+- a mutation limit below one or above the release-tested maximum of 10;
+- sidecar worker counts below one or above the release-tested controller
+  mutation limit;
+- `controller.shutdownDeadline` without at least 30 seconds of additional pod
+  termination grace, or a Deployment progress deadline that cannot cover the
+  startup-probe budget plus a five-minute margin;
+- empty version tags or missing/malformed `sha256` digests for the controller
+  or any sidecar in release values.
+
+Resource requests and limits are required separately for every controller and
+node container. The defaults above are conservative starting points and remain
+operator-overridable; release E2E and scale tests must prove that the controller
+stays within its default 512 MiB memory limit at the supported scale envelope.
+The default startup-probe budget is intentionally 60 minutes so slow provider
+attachment or large reconciliation does not cause a restart loop. Readiness,
+operation deadlines, and actionable status expose progress; liveness must not be
+used as a short provisioning timeout.
+
+The chart must pass the same explicit `sidecars.operationTimeout` to the
+`--timeout` flag of external-provisioner and external-attacher. Their upstream
+defaults are much shorter than the driver's ten-minute attachment deadline and
+must not be relied upon. The production default is 12 minutes. A caller
+cancellation is still honored, and state-driven retries remain required for
+operations such as recursive deletion that can exceed one sidecar attempt.
+
+The chart must also pass the explicit `workerThreads` values to the provisioner
+and attacher `--worker-threads` flags. The driver enforces the authoritative
+process-wide mutation limit; sidecar worker counts only prevent unnecessary
+queue pressure and do not replace that gate.
+
+Before v1, the release notes must include a compatibility table with:
+
+- supported Go toolchain version;
+- supported Kubernetes versions;
+- supported Kapsule versions tested by e2e;
+- CSI spec module version;
+- pinned `kubernetes-csi/csi-test` module version;
+- Scaleway SDK version;
+- sidecar image versions and required flags;
+- minimum and maximum tested sidecar versions;
+- upgrade test coverage from the previous released chart to the candidate chart.
+
+Production releases must pin explicit image tags and non-empty immutable image
+digests. Operators may override images, but release mode must reject a tag-only
+override and the README must state that untested sidecar/image combinations are
+outside the support contract.
+
+### 7.5 Safe Uninstall Contract
+
+Direct `helm uninstall` is unsupported because Helm may remove Lease RBAC before
+the controller finishes its graceful release and may remove node Pods while
+warm parent mounts still exist. The project must provide an idempotent
+`csi-admin uninstall prepare` workflow that runs before Helm deletion.
+`csi-admin` is an operator-side binary using the caller's kubeconfig; it invokes
+the narrow controller/node admin endpoints with `kubectl exec` and scales
+workloads with the operator's existing authorization. The runtime controller
+and node ServiceAccounts receive no workload-write or pod-exec permission for
+this workflow.
+
+1. inventory every driver PV, PVC, Pod target, VolumeAttachment, allocation,
+   published-node fence, staging mount, and node target. The command never
+   deletes user workloads or PVCs implicitly; it prints the exact blockers and
+   requires the operator to remove them through normal Kubernetes workflows;
+2. wait until Kubernetes has completed every normal node unpublish and unstage,
+   and reject preparation while any live driver PV, non-terminal allocation,
+   VolumeAttachment, published-node fence, staging bind mount, or workload
+   target remains;
+3. quiesce the controller through the same global barrier used by checkpoint;
+   the active uninstall request owns the barrier and is the only admin mutation
+   allowed to execute the remaining ordered cleanup;
+4. invoke the node-local admin command with `kubectl exec` on every eligible
+   node-plugin Pod, prove no child bind mount remains, and unmount only the exact
+   configured driver parent roots;
+5. scale the node DaemonSet to zero while its RBAC still exists, wait for every
+   node-plugin Pod to terminate, and retain the successful exact per-node
+   unmount inventory from step 4. With workloads removed and node plugins
+   stopped, no driver component can remount a parent;
+6. unmount the controller's exact parent roots, detach each configured parent
+   from every installation Instance, and poll both paginated regional and
+   Instance inventories to conclusive absence. This is the only normal
+   production path, besides the explicitly fenced recovery paths, that
+   authorizes detach;
+7. request graceful controller release, verify the exact release marker, scale
+   the controller to zero while its Lease Role and RoleBinding still exist, and
+   wait for Pod termination;
+8. only then permit `helm uninstall`. Terminal allocation ConfigMaps, external
+   identity/checkpoint Secrets, parent claims, and user data are never deleted
+   implicitly.
+
+The command is dry-run capable, resumable by request ID, and fails closed on any
+unreadable mount or provider inventory. The chart does not use a privileged
+pre-delete hook; the explicit command keeps operator authorization and audit
+outside the runtime driver. Reinstall requires the same identity Secret and
+validates all retained claims before serving.
+
+The uninstall audit result must record the request ID, chart/driver/admin
+versions, fixed Lease name and UID, exact nodes and Instances checked, unmounted
+paths, detached parent IDs, final inventory hashes, and completion timestamp.
+Retries with the same request ID resume from observed state and never skip a
+previously incomplete proof.
+
+### 7.6 Admin CLI Release Contract
+
+`csi-admin` is a supported release artifact, not a source-tree helper. Every
+release must publish versioned static binaries for the documented operator
+platforms, SHA-256 checksum files, an SBOM, and build provenance beside the Helm
+chart and driver image. The README must show checksum verification before use.
+
+The binary must expose `csi-admin version` and perform a version handshake with
+the controller/node admin endpoint before any mutation. V1 accepts only the
+same major admin protocol and an explicitly declared compatible minor range; an
+unknown or incompatible protocol fails before quiesce, GC, checkpoint, upgrade,
+or uninstall changes state. Audit output records both versions.
+
+Release CI and the release-candidate E2E suite must download and verify the
+packaged binary, then use that exact artifact for checkpoint, GC, upgrade
+preflight, and safe uninstall. `go run`, an unversioned locally built binary, or
+direct record editing is not an accepted production procedure.
+
+## 8. Repository Structure
+
+Recommended structure:
+
+```text
+scaleway-sfs-subdir-csi/
+  cmd/
+    scaleway-sfs-subdir-csi/
+      main.go
+    csi-admin/
+      main.go
+  pkg/
+    driver/
+      identity.go
+      controller.go
+      node.go
+      server.go
+    scaleway/
+      client.go
+      filesystem.go
+      instance.go
+      fake.go
+    pool/
+      config.go
+      selection.go
+      accounting.go
+      refresh.go
+      parent_lifecycle.go
+    volume/
+      handle.go
+      path.go
+      allocation_record.go
+      ownership_record.go
+      delete_policy.go
+    safety/
+      filesystem.go
+      statfs.go
+    mount/
+      mounter.go
+      linux.go
+      fake.go
+    k8s/
+      pv_index.go
+      node_metadata.go
+    coordination/
+      lease.go
+      shutdown.go
+      quiesce.go
+    recovery/
+      checkpoint.go
+      takeover.go
+      upgrade.go
+  charts/
+    scaleway-sfs-subdir-csi/
+      Chart.yaml
+      values.yaml
+      templates/
+  deploy/
+    examples/
+      pvc.yaml
+      pod-read-write.yaml
+      pod-read-only.yaml
+      storageclass.yaml
+  docs/
+    architecture.md
+    limitations.md
+    operations.md
+    troubleshooting.md
+  hack/
+    e2e/
+      create-kapsule-cluster.sh
+      create-sfs-pool.sh
+      install-driver.sh
+      run-e2e.sh
+      cleanup.sh
+  test/
+    e2e/
+    sanity/
+  .github/
+    workflows/
+      ci.yaml
+      release.yaml
+  Dockerfile
+  Makefile
+  README.md
+  LICENSE
+  CONTRIBUTING.md
+  SECURITY.md
+```
+
+Keep files focused. Do not build a large single `driver.go` file.
+
+## 9. Implementation Requirements
+
+### 9.1 Language
+
+Use Go.
+
+Rationale:
+
+- Kubernetes CSI ecosystem is Go-first;
+- Scaleway official drivers are Go;
+- CSI sidecars and examples are Go-oriented;
+- fake clients, mounters, and CSI sanity tests are straightforward in Go.
+
+### 9.2 CSI Services
+
+Implement:
+
+- Identity service;
+- Controller service;
+- Node service.
+
+Both the controller and node CSI sockets must implement all three Identity
+RPCs: `GetPluginInfo`, `GetPluginCapabilities`, and `Probe`. Their identity
+responses are identical even though Controller and Node services are deployed
+in separate pods:
+
+- `GetPluginInfo.name` equals the configured immutable CSI driver name and
+  satisfies the CSI domain-name and 63-byte constraints;
+- `GetPluginInfo.vendor_version` is the non-empty immutable semantic release
+  version of the running driver binary;
+- `GetPluginCapabilities` advertises exactly `CONTROLLER_SERVICE` in v1;
+- it does not advertise `VOLUME_ACCESSIBILITY_CONSTRAINTS` or another plugin
+  capability that v1 does not implement.
+
+The CSI sanity gate must use the split controller and node endpoints and assert
+that Controller tests actually ran. A suite that silently skipped Controller
+tests because the node endpoint omitted `CONTROLLER_SERVICE` is a failure.
+
+Required Controller methods:
+
+- `CreateVolume`
+- `DeleteVolume`
+- `ControllerPublishVolume`
+- `ControllerUnpublishVolume`
+- `ControllerGetCapabilities`
+- `ValidateVolumeCapabilities`
+
+`ControllerGetCapabilities` must advertise exactly the capabilities required by
+v1:
+
+- `CREATE_DELETE_VOLUME`;
+- `PUBLISH_UNPUBLISH_VOLUME`.
+
+It must not advertise expansion, snapshot, clone, list, or capacity capabilities
+in v1.
+
+Required Node methods:
+
+- `NodeStageVolume`
+- `NodeUnstageVolume`
+- `NodePublishVolume`
+- `NodeUnpublishVolume`
+- `NodeGetInfo`
+- `NodeGetCapabilities`
+
+`NodeGetCapabilities` must advertise:
+
+- `STAGE_UNSTAGE_VOLUME`.
+
+It must not advertise expansion in v1.
+
+`NodeGetVolumeStats` and `GET_VOLUME_STATS` are out of scope for v1. Logical
+PVCs are subdirectories without hard quotas; returning parent `statfs` as if it
+were per-PVC capacity would be misleading, and recursive per-directory scans are
+too expensive and fragile for production. A future version may add this only if
+the README and metrics clearly state whether values are parent-scoped or
+PVC-scoped.
+
+`ValidateVolumeCapabilities` and `CreateVolume` accept only mounted filesystem
+volumes. `CreateVolume` rejects a block capability with `InvalidArgument`;
+`ValidateVolumeCapabilities` returns `0 OK` with `confirmed` unset and a clear
+message for the same well-formed but unsupported capability.
+
+`ValidateVolumeCapabilities` accepts an omitted `volume_context` and resolves
+the read-only check from the parsed handle plus authoritative allocation and
+ownership records. A non-empty context must match every immutable field. This
+exception exists solely for CSI interoperability and never applies to a
+side-effecting publish or node RPC.
+
+### 9.3 Sidecars
+
+The Helm chart must deploy standard CSI sidecars:
+
+- `external-provisioner`
+- `external-attacher`
+- `node-driver-registrar`
+- `livenessprobe`
+
+Use explicit version tags for reporting and immutable image digests for the
+production pull identity. Do not use `latest` or tag-only production images.
+
+`external-provisioner` must be configured with:
+
+```text
+--extra-create-metadata=true
+--worker-threads=5
+```
+
+`external-attacher` must be configured with `--worker-threads=5`. Both worker
+counts remain configurable within the release-tested limit, while the driver
+semaphore is the authoritative concurrency control.
+
+All sidecars that support leader election and write shared Kubernetes state must
+have leader election enabled.
+
+Every production sidecar image must be rendered by immutable digest as defined
+in section 7.4; an explicit tag remains required for operator-facing version
+reporting but is not the pull identity.
+
+### 9.4 CSIDriver Manifest
+
+The Helm chart must create a `CSIDriver` object.
+
+Required v1 manifest:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: sfs-subdir.csi.example.com
+spec:
+  attachRequired: true
+  podInfoOnMount: false
+  volumeLifecycleModes:
+    - Persistent
+  fsGroupPolicy: None
+```
+
+The driver owns directory UID/GID/mode in v1. If a future version supports
+Kubernetes `fsGroup` semantics, it must document precedence between
+StorageClass UID/GID/mode and pod `securityContext.fsGroup`, and must test the
+performance cost of ownership changes.
+
+### 9.5 Idempotency
+
+Every CSI operation must be idempotent:
+
+- replaying a compatible create for a non-terminal volume name returns the same
+  logical mapping;
+- deleting an already-deleted volume succeeds;
+- attaching an already-attached parent succeeds;
+- mounting an already-mounted parent succeeds;
+- creating an existing directory succeeds if it belongs to the volume;
+- publishing an already-published volume succeeds if it targets the same path.
+
+The driver must persist an allocation record before returning a successful
+`CreateVolume` response. This record is required because CSI provisioners may
+retry `CreateVolume` before the Kubernetes PersistentVolume has been created.
+
+Required v1 implementation:
+
+- create one ConfigMap per logical volume in the driver namespace;
+- derive `logicalVolumeID` deterministically from `driverName` and
+  `CreateVolumeRequest.name`;
+- name the ConfigMap deterministically from `logicalVolumeID`, for example
+  `sfs-subdir-volume-<logicalVolumeID>`;
+- treat ConfigMap creation as the atomic idempotency lock for
+  `CreateVolumeRequest.name`;
+- label and index it only with bounded Kubernetes-safe values. Raw user or
+  provider values must be stored in ConfigMap `data` or annotations, not labels;
+- store a canonical request hash covering the normalized capacity range, pool,
+  capabilities, access modes, and StorageClass parameters. The hash is an
+  integrity field, not the sole replay decision;
+- store pool name, parent filesystem ID, directory path, original capacity
+  range, selected capacity bytes, normalized immutable parameters,
+  `mappingHash`, `reservesCapacity`, delete policy, UID/GID/mode, creation
+  timestamp, and state;
+- use optimistic Kubernetes updates to avoid concurrent allocation races;
+- keep terminal allocation records after `DeleteVolume` completes. `Deleted` is
+  a non-reserving tombstone; `Archived` and `Retained` reserve capacity until
+  manual garbage collection;
+- treat the PV volume handle and volume context as immutable Kubernetes-facing
+  state after the PV exists;
+- rebuild state from both allocation records and PVs on controller startup.
+
+Required allocation states:
+
+```text
+Reserved
+CreatingDirectory
+Ready
+Deleting
+Archived
+Deleted
+Retained
+```
+
+Retry rules:
+
+- same `CreateVolumeRequest.name` with semantically compatible capacity,
+  capabilities, and normalized immutable parameters returns the existing
+  mapping only when the allocation record is `Ready`;
+- the same compatible request resumes creation only when the allocation record
+  is `Reserved` or `CreatingDirectory`;
+- an incompatible request fails with `AlreadyExists` and a clear explanation of
+  the conflicting immutable field;
+- `AlreadyExists` during allocation record creation must never create a second
+  record. The driver must read the existing record and run the semantic
+  compatibility check;
+- `Reserved` and `CreatingDirectory` records must be repaired before returning
+  success or remain in that state with an actionable error;
+- `Deleting` must fail with a clear "deletion in progress" error;
+- `Archived`, `Retained`, and `Deleted` records are terminal tombstones and
+  must not be returned as active mappings for a new `CreateVolume` call;
+- reusing the same CSI `CreateVolumeRequest.name` after a terminal tombstone
+  is unsupported for the lifetime of the installation, even after GC or compact
+  tombstone conversion;
+- capacity reservations are released only when the allocation record reaches a
+  terminal state that no longer reserves capacity;
+- `DeleteVolume` retries must be state-driven. `Deleting` resumes the recorded
+  operation, `Archived`/`Retained` return success without moving data, and
+  `Deleted` returns success without touching the filesystem. An unsafe or
+  ambiguous observation leaves the last state unchanged and returns its
+  actionable recovery error.
+
+Do not introduce a CRD in v1 unless ConfigMap-backed allocation records prove
+insufficient during implementation or testing.
+
+### 9.6 Error Handling
+
+Errors must be returned as proper gRPC status errors:
+
+- invalid configuration -> `InvalidArgument`;
+- missing parent filesystem -> `NotFound`;
+- no parent has enough logical capacity -> `ResourceExhausted`;
+- Scaleway API unavailable -> `Unavailable`;
+- permission denied -> `PermissionDenied`;
+- existing volume name with incompatible immutable parameters ->
+  `AlreadyExists`;
+- unsupported capacity range -> `OutOfRange`;
+- volume still referenced by a VolumeAttachment -> `FailedPrecondition`;
+- unsafe path -> `FailedPrecondition`;
+- transient attach or mount readiness failure -> `Unavailable` with context;
+- local invariant or unrecoverable mount implementation failure -> `Internal`
+  with context.
+
+Every error must include enough context to debug the issue without exposing
+secrets.
+
+### 9.7 Logging
+
+Logs must include:
+
+- CSI operation name;
+- logical volume ID;
+- pool name;
+- parent filesystem ID;
+- node ID when relevant;
+- sanitized path when relevant.
+
+Logs must not include:
+
+- access keys;
+- secret keys;
+- bearer tokens;
+- raw Secret contents.
+
+### 9.8 Metrics
+
+Expose Prometheus metrics on the controller and node pods.
+
+Minimum controller metrics:
+
+```text
+sfs_subdir_pool_parent_capacity_bytes
+sfs_subdir_pool_parent_allocated_bytes
+sfs_subdir_pool_parent_archived_reserved_bytes
+sfs_subdir_pool_parent_retained_reserved_bytes
+sfs_subdir_pool_parent_available_bytes
+sfs_subdir_pool_parent_actual_free_bytes
+sfs_subdir_pool_parent_actual_used_bytes
+sfs_subdir_pool_parent_volumes
+sfs_subdir_create_volume_total
+sfs_subdir_delete_volume_total
+sfs_subdir_scaleway_api_errors_total
+sfs_subdir_parent_metadata_refresh_timestamp_seconds
+sfs_subdir_controller_ready
+sfs_subdir_controller_leader
+sfs_subdir_reconciliation_last_success_timestamp_seconds
+sfs_subdir_allocation_records
+sfs_subdir_node_attachment_slots_used
+sfs_subdir_node_attachment_slots_limit
+sfs_subdir_attachment_inventory_last_success_timestamp_seconds
+sfs_subdir_unknown_attachments
+sfs_subdir_published_node_fences
+sfs_subdir_parent_condition
+sfs_subdir_eligible_nodes_expected
+sfs_subdir_eligible_nodes_ready
+sfs_subdir_node_config_generation_mismatches
+sfs_subdir_csi_operations_total
+sfs_subdir_csi_operation_duration_seconds
+sfs_subdir_controller_mutations_inflight
+sfs_subdir_controller_mutations_queued
+```
+
+Minimum node metrics:
+
+```text
+sfs_subdir_node_parent_mounts
+sfs_subdir_node_stage_volume_total
+sfs_subdir_node_publish_volume_total
+sfs_subdir_mount_errors_total
+```
+
+Metric labels must remain bounded. CSI operation and duration metrics may use
+operation name and gRPC code. Allocation metrics may use state and pool. They
+must not use volume IDs, PVC names, paths, node IDs, or other unbounded values as
+labels.
+
+Unknown-attachment and published-node-fence metrics are aggregate gauges with
+only bounded pool/state labels. Exact Instance, node, and volume identities
+belong in structured events and logs, never metric labels.
+
+The repository must provide sample Prometheus alert expressions for these
+production conditions:
+
+- controller not ready or no current Lease holder;
+- reconciliation or attachment inventory older than its documented maximum;
+- unknown or foreign attachments, or published-node fences present;
+- eligible-node count below the expected count, a missing Ready node plugin, or
+  a node configuration-generation mismatch;
+- sustained node mount errors;
+- parent free space below warning or critical thresholds;
+- parent provider status not `available` or
+  `critical-size-regression` present.
+
+The chart must not install a `PrometheusRule` or assume the Prometheus Operator
+by default. The examples are opt-in integration material with documented alert
+meaning, threshold rationale, and first operator action.
+
+Probe semantics:
+
+- the controller CSI `Probe` returns success with `ready=false` until
+  configuration, installation and cluster identity, parent ownership, provider
+  metadata, eligible-node registration, attachment budget, controller parent
+  mounts, leadership, and initial reconciliation succeed;
+- the node-plugin CSI `Probe` returns success with `ready=false` only until its
+  local configuration, Scaleway metadata identity, CSI socket, mount helper, and
+  driver parent-mount root are initialized and valid. It must not depend on
+  controller leadership, parent ownership, the Scaleway public API, controller
+  mounts, or controller reconciliation;
+- each component's CSI `Probe` reads only its own cached readiness state and
+  must not perform a Scaleway API call, filesystem traversal, mount, or
+  reconciliation itself;
+- the standard CSI livenessprobe sidecar in each pod exposes `/healthz` for that
+  pod's CSI endpoint. The driver container's Kubernetes startup and readiness
+  probes use that endpoint over the shared pod network;
+- controller readiness becomes false after leadership loss or when a required
+  global invariant prevents the controller from safely classifying requests.
+  After successful startup, a transient or error status limited to one parent
+  is exposed as a parent-degraded condition and RPC-specific error rather than
+  making unrelated parents globally unavailable. Node readiness becomes false
+  only when its local node-service prerequisites are no longer valid;
+- the driver process exposes a separate shallow `/livez` endpoint for the
+  driver container's Kubernetes liveness probe. It reports only process and
+  internal event-loop health and is not exposed by a Service;
+- Scaleway/API failure during startup, leadership loss, or an unreadable global
+  inventory required for every request must remove readiness without failing
+  `/livez` or causing a restart loop. A runtime failure scoped conclusively to
+  one parent keeps global readiness and blocks only that parent's dependent
+  operations;
+- the leadership watchdog must terminate the process after the configured
+  renewal deadline so a stale controller cannot continue accepting mutations.
+
+The controller and node pods must wire these endpoints explicitly in the chart;
+one endpoint must not be reused for contradictory readiness and liveness
+semantics. Tests must prove that an unavailable provider keeps cold startup
+unready without restarting it, that a runtime failure scoped to one parent does
+not block unrelated parents, that neither condition makes a healthy node plugin
+unready, and that a wedged process or expired controller leadership watchdog
+does terminate the affected process.
+
+## 10. Pool Accounting and Recovery
+
+### 10.1 Source of Truth
+
+The driver's allocation record is the authoritative source of truth for
+lifecycle state, immutable mapping, capacity reservation, deletion, recovery,
+and accounting.
+
+Kubernetes PersistentVolumes are the Kubernetes-facing binding evidence after a
+volume is created. They are immutable projections and secondary recovery inputs,
+not the primary accounting source.
+
+The driver-owned ownership record is the filesystem ownership proof. Destructive
+operations require agreement between the allocation record and the ownership
+record. Its mirrored `publishedNodeIDs` set is intentionally co-authoritative
+for destructive-operation fencing so namespace loss cannot erase that safety
+evidence.
+
+The CSI volume handle is lookup identity only. It is not a complete mapping.
+
+The controller must read PVs with:
+
+- `spec.csi.driver == <driverName>`;
+- `spec.csi.volumeHandle` matching the v1 handle format.
+
+It must reconstruct or validate:
+
+- logical volume ID and mapping hash from the compact handle;
+- parent filesystem ID, pool name, base path, directory name, and requested
+  capacity from immutable PV CSI attributes when the allocation record needs
+  recovery;
+- ownership and driver identity from the driver-owned ownership record.
+
+This dual model is intentional:
+
+- allocation records make `CreateVolume` idempotent before PV creation;
+- allocation records make `DeleteVolume` recoverable after PV deletion begins;
+- PVs remain the durable Kubernetes-native source after binding;
+- startup recovery can reconcile records and PVs without a separate database.
+
+Logical reservation accounting must be computed from allocation records only.
+If both a PV and an allocation record exist for the same `logicalVolumeID`, the
+controller must de-duplicate by `logicalVolumeID` and count the allocation
+record once. If immutable fields conflict between PV, allocation record, and
+ownership record, the controller must fail closed and refuse new provisioning
+until manual recovery resolves the conflict.
+
+Detailed allocation records use `recordKind: detailed` and must include at
+least:
+
+```text
+schemaVersion
+recordKind = detailed
+recordRevision
+driverName
+activeClusterUID
+state
+installationID
+createVolumeRequestName
+requestHash
+originalRequiredBytes
+originalLimitBytes
+selectedCapacityBytes
+normalizedCreateParameters
+logicalVolumeID
+volumeHandle
+volumeHandleHash
+mappingHash
+poolName
+parentFilesystemID
+basePath
+basePathHash
+directoryName
+reservesCapacity
+deletePolicy
+deleteResult
+deleteOperationID
+deleteOperation
+deleteSourcePath
+deleteTargetPath
+deletePreparedAt
+deleteRemoveStartedAt
+deleteCompletedAt
+directoryUid
+directoryGid
+directoryMode
+createdAt
+updatedAt
+deletedAt
+archivedPath
+retainedPath
+quarantinePath
+publishedNodeIDs
+gcRequestID
+gcRequestedMode
+gcExpectedState
+gcRequestedAt
+gcOperationID
+gcTargetPath
+gcQuarantinePath
+gcStartedAt
+gcRemoveStartedAt
+gcCompletedAt
+```
+
+`publishedNodeIDs` is a deduplicated array of exact CSI node IDs, bounded by the
+number of eligible nodes and updated only through the publish/unpublish rules in
+section 6.14.
+
+The ConfigMap stores the allocation record as canonical JSON in the single data
+key `record.json`; indexed bounded values are duplicated only in the labels
+defined in section 11.4. `schemaVersion` is the string `"1"` for the initial
+schema, timestamps are RFC 3339 UTC, byte counts and revisions are base-10 JSON
+integers, and duplicate JSON keys or invalid field types are rejected. Every
+update uses Kubernetes `resourceVersion` compare-and-swap.
+
+Allocation records must set `reservesCapacity` consistently with the state
+machine:
+
+- `Reserved`, `CreatingDirectory`, `Ready`, `Deleting`, `Archived`, and
+  `Retained` set `reservesCapacity: true`;
+- `Deleted` sets `reservesCapacity: false`.
+
+`archive` and `retain` states continue to reserve their original logical bytes
+until a documented garbage-collection process removes the archived or retained
+data and updates the record.
+
+`Deleted` records are terminal non-reserving tombstones. The deterministic
+per-volume ConfigMap must remain for the lifetime of the installation so an old
+handle can never resolve to a newer volume. After the operator's chosen detailed
+record retention window, the controller may update that same ConfigMap in place
+to a compact schema using resource-version compare-and-swap. It must not delete
+the ConfigMap or move the proof into a shared index.
+
+A compacted tombstone uses the distinct `recordKind: compactDeleted` variant.
+It contains this required closed field set:
+
+```text
+schemaVersion
+recordKind = compactDeleted
+recordRevision
+driverName
+installationID
+activeClusterUID
+createVolumeRequestName
+logicalVolumeID
+volumeHandleHash
+mappingHash
+state = Deleted
+parentFilesystemID
+directoryName
+reservesCapacity = false
+deleteResult
+updatedAt
+deletedAt
+```
+
+Only the following terminal audit fields may additionally be present when they
+were populated by the detailed record: `deleteOperationID`, `deleteOperation`, `archivedPath`,
+`retainedPath`, `quarantinePath`, `deleteCompletedAt`, `gcOperationID`,
+`gcTargetPath`, `gcQuarantinePath`, and `gcCompletedAt`. Unknown fields are
+rejected. Compaction is one resource-version compare-and-swap from a
+schema-valid `recordKind: detailed`, `state: Deleted`,
+`reservesCapacity: false` record; it never changes identity or terminal outcome.
+Compact tombstones do not require their historical parent to remain configured
+and are never used for filesystem mutation, reconstruction, or capacity
+reservation.
+
+A `deletedUnknown` record remains in its separate minimal shape below and is
+never forced into the detailed or compact requirements.
+
+Conclusive-absence deletion uses a distinct `recordKind: deletedUnknown`
+variant under schema version `"1"`. It contains only facts recoverable from the
+request and successful absence checks:
+
+```text
+schemaVersion
+recordKind = deletedUnknown
+recordRevision
+driverName
+installationID
+activeClusterUID
+logicalVolumeID
+volumeHandleHash
+mappingHash
+state = Deleted
+reservesCapacity = false
+absenceReason
+createdAt
+updatedAt
+deletedAt
+```
+
+Fields such as create request name, capacity, pool, parent, base path,
+directory, and delete policy must be absent rather than invented. Readers,
+startup reconciliation, compaction, and `DeleteVolume` must explicitly support
+this variant. It is never eligible for filesystem mutation, capacity
+accounting, active-volume reconstruction, or `CreateVolume` name reuse.
+
+`recordKind` is the only v1 allocation-schema discriminator. Readers must
+implement exactly `detailed`, `compactDeleted`, and `deletedUnknown`; they must
+reject an unknown kind and must not infer the shape from missing fields. Because
+no prior public schema exists, v1 must not emit the ambiguous legacy value
+`recordKind: full`.
+
+### 10.2 Rebuild on Startup
+
+On startup, the controller must:
+
+1. load pool config;
+2. fetch parent metadata from Scaleway;
+3. run the node compatibility and attach-limit preflight;
+4. attach and mount every configured parent required for controller lifecycle,
+   including `draining` parents with existing allocation or ownership records;
+5. collect fresh `statfs` data for mounted parents;
+6. list allocation records owned by the driver;
+7. list existing PVs owned by the driver;
+8. reconcile allocation records, PVs, and driver-owned ownership records;
+9. rebuild logical allocation state from allocation records, including archived
+   and retained reservations on both active and draining parents;
+10. log a clear pool summary.
+
+Stale allocation records without a matching PV must not be deleted
+automatically unless the directory state has been checked and the configured
+cleanup policy has been applied.
+
+If a PV exists without an allocation record, the controller must reconstruct the
+record from the volume handle, PV CSI attributes, and driver-owned ownership
+record, or fail closed with a recovery message.
+
+If both allocation record and PV are missing but a matching ownership record
+exists, the controller may reconstruct a detailed allocation record only from the
+complete immutable recovery envelope required by section 6.13. It must first
+persist the reconstructed record with compare-and-swap, mark the recovery in its
+audit fields, and then use the normal lifecycle state machine. A missing field,
+checksum mismatch, or disagreement with the handle fails closed; current Helm
+or StorageClass defaults are never substituted.
+
+`Reserved` and `CreatingDirectory` are repairable startup states:
+
+- if the data directory is missing, resume creation;
+- if the data directory exists at the expected safe path, is empty, and the
+  allocation record proves this create operation reached `CreatingDirectory`,
+  write or repair the driver-owned ownership record and continue;
+- if the data directory already has a matching ownership record, continue;
+- if the data directory contains unexpected data without a matching
+  driver-owned ownership record, fail closed with a manual recovery message.
+
+For `Ready`, `Deleting`, `Archived`, and `Retained`, a missing ownership record or
+an immutable mapping mismatch is not automatically repaired. A state-only lag
+caused by a documented crash point may be repaired when the record has the same
+driver, installation, handle, mapping hash, parent, base path, and directory,
+and its revision/state is exactly the expected predecessor of the persisted
+allocation transition. Any other mismatch fails closed and requires manual
+recovery. This narrow rule makes prepared state transitions resumable without
+allowing the controller to invent ownership.
+
+For `Deleted`, startup applies the terminal pairings and forward-only repair
+table in section 10.6. A detailed `Deleted` allocation with matching compact
+ownership is the normal retention state. A compact allocation and compact
+ownership must agree on driver, installation, cluster, create request name,
+logical volume, handle hash, mapping hash, parent, directory identity, operation
+IDs, and terminal result. A missing allocation tombstone may be reconstructed
+only from a schema-valid matching compact ownership tombstone as defined in
+section 6.13. A detailed `Deleted` allocation with the exact detailed ownership
+predecessor may finish only the corresponding ownership compaction without
+touching the filesystem. A missing compact ownership tombstone, missing field,
+or any other disagreement is not repaired from current configuration and keeps
+the controller non-serving when the parent is currently configured. For a
+historical parent removed by the completed offline decommission procedure, the
+controller validates the non-reserving Kubernetes tombstone only and does not
+remount the parent to require or reconstruct the compact ownership peer. The
+separate `deletedUnknown` variant has no ownership record and follows its
+conclusive-absence contract.
+
+Same-cluster namespace recovery does not require a separate database. V1
+recovery is supported only from a controller-generated quiesced metadata
+checkpoint; an arbitrary online export is not a consistent backup.
+
+The bundled admin CLI must expose `checkpoint prepare` and `checkpoint resume`
+through a controller-local Unix socket. Operators invoke it with `kubectl exec`
+against the current controller Pod; no network Service or second controller is
+introduced. `checkpoint prepare` carries a unique request ID and performs this
+closed protocol while the controller still owns its Lease and parent mounts:
+
+1. atomically enter checkpoint mode, become unready, reject every new mutating
+   CSI/admin request, pause compaction and background repair, and wait for the
+   process-wide mutation count to reach zero;
+2. reject preparation when any allocation is `Reserved`, `CreatingDirectory`,
+   or `Deleting`, when a GC/delete transition or bootstrap attempt is active,
+   or when allocation and ownership records do not agree;
+3. during the same uninterrupted quiesced interval, read the complete
+   allocation and driver-PV sets; capture a canonical Kubernetes-object
+   inventory containing source UID/resourceVersion plus a hash of each
+   schema-defined recoverable object projection, and a canonical parent
+   inventory for every currently configured parent containing the parent-global
+   owner hash and the relative path, content hash, revision, record kind, and
+   state of every detailed or compact ownership record. Offline-decommissioned
+   parents are represented only by their already-validated Kubernetes
+   allocation tombstones and are not remounted for checkpoint creation;
+4. emit one schema-versioned manifest containing `schemaVersion: "1"`,
+   checkpoint request ID, driver name, backup timestamp, `activeClusterUID`, a
+   hash of `installationID`, chart version, every rendered image digest, current
+   fixed Lease name `scaleway-sfs-subdir-csi-controller`, Lease UID and holder
+   evidence, Kubernetes-object inventory count and
+   aggregate SHA-256, and every per-parent aggregate digest and record count;
+5. remain quiesced while the backup tool exports the exact objects and verifies
+   their source resourceVersions and content hashes against the detailed
+   inventory, then writes that inventory beside the objects in the external
+   package. Any changed, missing, extra, duplicate, or unreadable object
+   invalidates the attempt;
+6. only after a complete package is durably written does the operator run
+   `checkpoint resume`. The controller then performs a full reconciliation,
+   leaves checkpoint mode, and becomes ready. A failed export is discarded and
+   resumed in the same way; it is never labelled as a completed checkpoint.
+
+Checkpoint preparation and resume are idempotent by request ID. `SIGTERM`,
+Lease loss, or a process crash while quiesced invalidates the candidate; no
+graceful-release marker may be interpreted as checkpoint completion. Tests must
+attempt create, delete, publish, unpublish, GC, compaction, bootstrap, and
+background repair between every phase and prove that none crosses the quiesce
+barrier.
+
+The minimal backup set is:
+
+- installation identity Secret;
+- allocation and permanent tombstone ConfigMaps;
+- Helm values and pinned chart version;
+- PV manifests for this driver;
+- the detailed Kubernetes-object inventory used to verify the exported package;
+- the checkpoint manifest, packaged for restore as the data of a fixed
+  externally owned immutable Secret named `sfs-subdir-checkpoint`.
+
+Helm never creates or owns `sfs-subdir-checkpoint`. During restore, the
+operator recreates it in the driver namespace from the completed package before
+starting the controller. It is an `Opaque`, `immutable: true` Secret with the
+single data key `checkpoint.json`; unknown or missing data keys are rejected.
+The controller may only get this exact Secret by name; it verifies the canonical
+manifest SHA-256, schema, request ID, identity/object hashes, and parent
+inventories before recovery discovery. A manifest with any other Lease name is
+incompatible and rejected before provisional acquisition. The controller cannot create, update,
+patch, or delete it. A normal startup with a valid live Lease does not consume a
+stale checkpoint Secret. The operations guide requires deleting the Secret
+after a successful recovery and retaining the external backup package.
+
+The in-cluster checkpoint manifest is intentionally O(number of parents plus
+images), not O(number of volumes). Per-object entries stay in the external
+package; the Secret contains only their count and aggregate digest and must stay
+within the Kubernetes Secret size limit at the supported scale envelope. On
+restore, Kubernetes assigns new UIDs and resourceVersions, so the controller
+recomputes the aggregate from canonical recoverable content and logical object
+identity, excluding server-assigned metadata and status. Source
+UID/resourceVersion are export-consistency evidence only and are never expected
+to survive recreation. Missing, extra, duplicated, or content-changed objects
+change the aggregate and keep recovery non-serving.
+
+Each configured-parent inventory digest is SHA-256 over canonical JSON whose entries are
+sorted by normalized relative ownership-record path. Each entry contains only
+that path, the SHA-256 of the complete record bytes, revision, record kind, and
+state. Parent inventories are sorted by parent filesystem ID in the checkpoint
+manifest. Duplicate paths, duplicate parent IDs, non-normalized paths, checksum
+errors, and unknown schemas invalidate the checkpoint rather than being
+silently skipped.
+
+The recovery point objective is the most recent completed checkpoint. Runtime
+PVC or GC changes after that checkpoint are not silently discarded: ownership
+records on currently configured parents that are newer than, missing from, or
+inconsistent with the restored checkpoint, including an extra or missing
+permanent compact tombstone, change the per-parent inventory digest and keep the
+controller non-serving. Historical unconfigured parents are instead protected
+by the Kubernetes-object aggregate containing their non-reserving allocation
+tombstones. The
+targeted manual recovery procedure is then required. Automatic v1 recovery must
+not invent a forward transition or overwrite newer parent metadata. The backup
+tooling must reject a checkpoint while a transition is active, while the
+controller is not in its exact quiesced request, when the exported object hashes
+do not match its manifest, or when an inventory entry is missing or duplicated.
+
+After namespace loss, restore the namespace-scoped identity and allocation
+records plus the fixed immutable checkpoint Secret before starting the
+controller. Namespace deletion does not remove cluster-scoped PVs: the normal
+flow preserves them and verifies them against the backed-up PV manifests rather
+than creating duplicates. A missing or changed driver PV is a targeted recovery
+condition, not something this automatic namespace-recovery path recreates. The
+controller starts non-serving, mounts configured parents only for recovery
+discovery, reconciles restored records against live PVs and parent-global and
+per-volume ownership records, and becomes ready only when immutable mappings
+agree and the offline fencing gate below is complete. A missing in-progress or
+terminal record must not be guessed from directory names; targeted recovery
+uses the driver-owned ownership record and fails closed on ambiguity.
+
+Namespace recovery is supported only in the same Kubernetes cluster in v1. The
+runtime `activeClusterUID` must match every parent-global owner record. A
+different cluster UID is a hard stop even when all restored Secrets, ConfigMaps,
+PVs, namespace names, and Helm values match. Cross-cluster recovery requires a
+future offline parent-claim transfer protocol and must not be documented as a
+supported v1 procedure.
+
+The historical Lease evidence in a checkpoint is audit data, not proof of the
+last controller after normal operation resumes. A controller created after the
+checkpoint may have run on another Instance. Therefore missing-Lease recovery
+must never fence only the checkpoint holder. An absent Lease and a newly created
+empty Lease are equivalent for recovery decisions; neither bypasses the offline
+gate.
+
+When the Lease is absent or empty, the controller may acquire it provisionally
+and attach/mount configured parents only for provider inventory and read-only
+inspection of parent-global owner records. Read-only here is an operation-level
+restriction; the mount uses the single release-tested flagless `virtiofs`
+profile. The controller must not create or update metadata, repair state, serve
+mutating CSI calls, or perform directory operations during discovery. A
+different Pod UID must never overwrite or provisionally acquire a Lease with a
+non-empty previous holder, even when it is expired, before the exact abnormal
+takeover approval has been validated and consumed.
+
+- if no allocation record, ownership record, driver PV, or parent-global owner
+  record exists, this is a fresh installation and the holder may initialize the
+  parent claims without recovery approval;
+- if any durable driver state exists, recovery is offline in v1. Before
+  approval, the operator must recreate or scale down the Kapsule worker pools so
+  every pre-recovery workload/controller Instance is conclusively stopped or
+  deleted. Fresh regional inventories for every configured parent must then
+  contain no attachment to an old or unknown Instance; only the new provisional
+  recovery controller Instance may appear;
+- the immutable recovery approval must bind the checkpoint request ID and
+  complete manifest SHA-256, and must attest the all-pre-recovery-Instances
+  fencing scope. Waiting for Lease expiry or fencing only the checkpoint holder
+  is never sufficient;
+- if any parent claim has a different `activeClusterUID`, recovery approval
+  cannot authorize it and the controller fails closed.
+
+### 10.3 Concurrent Provisioning
+
+The v1 deployment must run one controller replica. This is the simplest
+production-safe model for a driver that owns parent mounts, pool accounting,
+directory creation, archive, retain, delete, and startup repair.
+
+The controller leadership Lease name is the non-configurable v1 constant
+`scaleway-sfs-subdir-csi-controller`. Helm values must not expose an override.
+The fixed name is included in parent claims, checkpoint manifests, upgrade
+compatibility checks, RBAC `resourceNames` where supported, and preflight tests.
+Changing it requires an explicit future offline migration; it is not a normal
+chart customization.
+
+The Helm chart must render the controller Deployment with `strategy: Recreate`
+in v1. The controller must acquire a Kubernetes Lease before executing any
+driver-owned mutation:
+
+- startup reconciliation and repair;
+- parent attach/mount for controller lifecycle operations;
+- `CreateVolume`;
+- `DeleteVolume`;
+- archive, retain, delete, and GC;
+- node compatibility and attach-budget state updates.
+
+The only pre-approval exception is the bounded provider inventory and read-only
+parent-owner discovery described in section 10.2. It still requires the
+provisional Lease and must have no filesystem write or repair path.
+
+The Lease is leadership coordination, not storage fencing. On every acquisition
+or same-holder reacquisition, one resource-version compare-and-swap must set the
+holder identity and these fixed holder-evidence annotations from validated
+runtime identity:
+
+```text
+coordinationSchemaVersion = 1
+holderPodUID
+holderNodeName
+holderCSINodeID
+holderInstanceID
+holderZone
+holderInstallationID
+holderActiveClusterUID
+```
+
+Renewals preserve this evidence. A mismatch between `holderIdentity` and
+`holderPodUID`, or between the recorded installation/cluster and runtime, makes
+the controller non-serving. Required behavior:
+
+- a controller without the Lease is unready and rejects mutating operations;
+- Lease loss cancels operation contexts, prevents new irreversible steps, and
+  triggers a process exit through an independent watchdog;
+- long delete and GC loops must check cancellation between bounded units of work;
+- graceful shutdown follows the bounded cancellation and release protocol below;
+- the same Pod UID may reacquire leadership after a container restart;
+- a different Pod UID may take over automatically only by consuming a valid,
+  unconsumed graceful-release marker;
+- a different Pod UID must not take over an expired Lease whose previous holder
+  did not clear it solely because time elapsed;
+- abnormal takeover requires the documented operator procedure to confirm the
+  previous process or Instance is stopped, then approve that exact previous
+  holder identity through the immutable operator approval Secret;
+- the approval is provider-verified, consumed, and audited in the Lease before
+  the successor mutates.
+
+The same Lease stores the bounded graceful-handoff evidence in fixed
+annotations. No second coordination object is introduced. After all mutations
+have drained, the current holder may release gracefully only when no bootstrap
+attempt exists and checkpoint mode is inactive. It performs one
+resource-version compare-and-swap that verifies `holderIdentity` still contains
+its exact Pod UID, clears `holderIdentity`, and writes:
+
+```text
+gracefulReleaseSchemaVersion = 1
+gracefulReleaseState = Released
+gracefulReleaseHolderPodUID = <exact releasing Pod UID>
+gracefulReleaseRequestID = <random UUID>
+gracefulReleasedAt = <RFC 3339 UTC timestamp>
+gracefulReleaseLeaseUID = <current immutable Lease metadata.uid>
+gracefulReleaseInstallationID = <current installation ID>
+gracefulReleaseActiveClusterUID = <current cluster UID>
+```
+
+The process exits only after that update succeeds. If it cannot persist the
+release, it exits with the previous holder left uncleared, so the abnormal
+takeover rule remains conservative. The implementation must not rely on the
+standard client-go empty-holder update alone because that update does not retain
+the previous Pod UID.
+
+A successor accepts automatic handoff only when the Lease has no holder, the
+complete marker is schema-valid, its recorded Lease UID equals the current
+immutable `metadata.uid`, its installation and cluster IDs equal runtime, and
+the releasing Pod UID equals the preserved holder evidence, and no bootstrap
+annotation exists. It acquires leadership, writes its new holder evidence, and
+removes only the graceful marker in one compare-and-swap, preserving unrelated
+metadata, so the evidence is consumed exactly once. A missing or recreated
+Lease, an empty Lease without the marker, malformed or already consumed
+evidence, and an expired non-empty holder never qualify as graceful handoff. A
+provisional discovery holder must not erase an expired non-empty identity before
+the corresponding approval is consumed. The runtime controller, not Helm, owns
+the Lease object; Helm install, upgrade, and rollback therefore must not render,
+patch, or delete the live holder, bootstrap attempt annotations, holder evidence,
+or graceful-release annotations.
+
+Required production defaults:
+
+```text
+leaseDuration: 30s
+renewDeadline: 20s
+retryPeriod: 5s
+```
+
+The chart must validate `retryPeriod < renewDeadline < leaseDuration`. The
+independent watchdog must stop mutations and terminate the process no later than
+`renewDeadline` after the last successful renewal.
+
+This deliberately trades automatic controller failover for data safety in v1.
+The chart must not claim controller HA or automatic failover.
+
+Operator approval is a fixed immutable Secret named
+`sfs-subdir-controller-approval`, deliberately using a resource type that the
+controller cannot create, update, patch, or delete. Helm must not own or
+generate it. The operator creates it only after observing the blocked recovery.
+It contains canonical values for:
+
+```text
+schemaVersion = 1
+mode = abnormal-takeover | missing-lease-recovery
+requestID
+installationID
+activeClusterUID
+previousHolderPodUID
+previousHolderNodeName
+previousHolderCSINodeID
+previousHolderInstanceID
+previousHolderZone
+checkpointRequestID
+checkpointManifestSHA256
+recoveryFenceScope
+reason
+approvedAt
+expiresAt
+```
+
+The previous-holder fields are required only for `abnormal-takeover`.
+`missing-lease-recovery` instead requires the exact completed checkpoint request
+ID and manifest SHA-256 plus
+`recoveryFenceScope = all-pre-recovery-instances`; historical holder fields may
+be retained for audit but are never treated as the latest-holder fence.
+
+The Secret must set `immutable: true`, have a maximum validity of one hour, and
+be newer than the controller's observed takeover/recovery condition. The
+controller gets only this exact Secret by name. It validates the Secret's
+immutable Kubernetes UID, schema, expiry, installation, cluster, mode, and exact
+previous-holder evidence against the Lease. It then performs a fresh provider
+read of the recorded Instance. Abnormal takeover is allowed only when that
+Instance is conclusively absent, `stopped`, or `stopped in place`; running,
+starting, stopping, locked, unknown, or unreadable state remains non-serving. A
+stopped Instance's configured parent attachments must be explicitly detached
+and both provider inventories must report absence before activation. If a
+deleted Instance still has an orphan regional attachment, takeover remains
+fail-closed and requires Scaleway support.
+
+For `abnormal-takeover`, every previous-holder field is required and must match
+the uncleared Lease. For `missing-lease-recovery`, the checkpoint fields must
+match the immutable checkpoint Secret and the controller must verify the
+offline all-Instance fencing gate from section 10.2. A disagreement between the
+checkpoint, approval, cluster identity, attachment inventory, and runtime keeps
+the controller non-serving.
+
+After all checks, the successor consumes approval and acquires leadership in one
+Lease compare-and-swap. The Lease records approval Secret UID, request ID, mode,
+consuming Pod UID, and consumption timestamp before any mutation. The same
+Secret UID/request ID cannot authorize another transition, and the operations
+guide requires deleting the approval Secret after successful consumption. A new
+approval requires deleting and recreating the immutable Secret, which gives it a
+new Kubernetes UID.
+
+`missing-lease-recovery` uses the same object and one-time consumption rule. The
+provisional Lease records when recovery was first observed; the approval must be
+created afterward and match the installation, `activeClusterUID`, checkpoint
+request ID, manifest digest, and all-Instance fencing scope. It is accepted only
+when every parent claim matches the current cluster, all pre-recovery Instances
+have been stopped or deleted, and fresh provider inventories contain no old or
+unknown attachment. It never authorizes a different cluster UID. Checkpoint
+holder evidence is retained only for audit and cannot reduce this fencing
+scope.
+
+CSI sidecar leader election must still be enabled where supported, but it is
+not sufficient to protect driver-internal mutations.
+
+Inside the single controller process, protect pool selection and accounting with
+an in-process lock and use a per-logical-volume lock for create, publish,
+unpublish, delete, and GC transitions.
+
+The controller must also use Kubernetes optimistic concurrency on allocation
+records. The in-process lock prevents local races; Kubernetes resource versions
+prevent stale writes after retries, restarts, or future HA work.
+
+All mutating Controller RPCs and controller-owned background mutations must
+also pass through one process-wide, context-aware semaphore before acquiring a
+pool or per-volume lock and before any provider or filesystem mutation. The
+production default and maximum supported v1 value are 10 concurrent mutations,
+matching the tested scale envelope. Waiting for the semaphore must honor caller
+cancellation and deadlines. A fixed acquisition order of global semaphore,
+then per-logical-volume lock when needed, then pool lock when needed preserves
+the existing create idempotency gate and prevents lock inversion. No code path
+may acquire those locks in the opposite order. The controller must expose
+bounded inflight and queued mutation gauges.
+
+Graceful termination is a bounded safety protocol, not a shorter normal
+provisioning timeout:
+
+1. on `SIGTERM`, immediately become unready and reject new mutations;
+2. cancel every active RPC and internal mutation context so state machines stop
+   at their next persisted safe boundary;
+3. wait no longer than `controller.shutdownDeadline` for all mutation holders
+   to exit and for durable records to be internally consistent;
+4. write the graceful-release marker only when no mutator remains, no bootstrap
+   attempt exists, checkpoint mode is inactive, leadership is still held, and
+   the Lease compare-and-swap succeeds;
+5. if the deadline, cancellation, consistency check, or marker write fails,
+   exit without a graceful marker. The successor must then use abnormal
+   takeover rather than assume a clean handoff.
+
+The production defaults are a 90-second shutdown deadline and a 120-second pod
+termination grace period. The grace period must exceed the shutdown deadline by
+at least 30 seconds. This shutdown deadline applies only after pod termination
+begins; normal attachment and deletion operations retain their documented
+deadlines. CSI sidecars may terminate in any order, so correctness must not
+depend on a sidecar remaining alive after the driver receives `SIGTERM`.
+Deployment `progressDeadlineSeconds` must cover the complete startup-probe
+budget plus at least five minutes; the production default is 3900 seconds for
+the 3600-second startup budget.
+
+### 10.4 Pool Full Behavior
+
+If no parent has enough logical available capacity, `CreateVolume` must fail
+with `ResourceExhausted`.
+
+The error must include:
+
+- pool name;
+- requested size;
+- number of parents;
+- total observed capacity;
+- `maxLogicalOvercommitRatio`;
+- total logical capacity;
+- total logical allocation;
+- actual free bytes when available;
+- recommendation to resize a parent or add another parent if node attach limits
+  allow it.
+
+### 10.5 Actual Parent Free-Space Guardrail
+
+The driver must collect real parent filesystem usage with `statfs` where the
+parent is mounted.
+
+`CreateVolume` must refuse new allocations when either threshold would be
+breached after accepting the requested PVC:
+
+- `minFreeBytes`;
+- `minFreePercent`.
+
+This check complements logical accounting. It does not replace it.
+
+Logical accounting already removes the configured reserve from usable capacity
+before accepting reservations. The `statfs` check independently protects
+against unmanaged existing data, workloads that exceed reservations, and
+physical consumption that logical records cannot predict.
+
+Required behavior:
+
+- every active parent considered for placement must have fresh `statfs` data;
+- stale, missing, or failed `statfs` data excludes that parent for the current
+  request or fails the request with a clear transient error;
+- on Linux, define `blockSizeBytes` as the positive `f_bsize` value and define
+  `actualAvailableBytes` as checked multiplication of `f_bavail` by
+  `blockSizeBytes`. The driver must use space available to an unprivileged
+  writer (`f_bavail`), not total free blocks (`f_bfree`);
+- reject the sample as `Unavailable` when `f_bsize` or `f_bavail` is negative or
+  invalid, multiplication overflows, the authoritative observed parent size is
+  zero, or computed available bytes exceed that observed size;
+- compute the physical safety threshold as
+  `max(minFreeBytes, ceil(observedParentSizeBytes * minFreePercent / 100))`
+  with checked integer arithmetic;
+- before subtracting, require `requestedBytes <= actualAvailableBytes`; then
+  accept the physical guard only when
+  `actualAvailableBytes - requestedBytes >= physicalSafetyThresholdBytes`;
+- percentage configuration must be validated in the closed range `[0, 100]`;
+- if one parent is below reserve but another active parent is valid, the driver
+  must select the valid parent;
+- no allocation record may remain in a reserving state after a free-space
+  guardrail failure unless the failure state explicitly documents why capacity
+  is still reserved and how to recover.
+
+The implementation must expose the raw block values, computed available bytes,
+observed parent size, threshold, and sample timestamp as bounded metrics and
+structured diagnostics. Unit tests must cover zero, boundary equality,
+one-byte-below threshold, negative/invalid fields, overflow, available larger
+than observed size, and percentage-rounding cases.
+
+### 10.6 Archived and Retained Data Accounting
+
+Archived and retained data can still consume physical parent capacity after a
+PV is deleted.
+
+The driver must create durable records for archived, retained, and deleted
+terminal states.
+
+Archived and retained records must remain visible in metrics and pool summaries
+until an operator runs documented garbage collection because the data still
+consumes parent capacity.
+
+Deleted records are non-reserving tombstones. They are kept for idempotent CSI
+retries and auditability, not capacity accounting.
+
+Allocation and ownership writes follow one closed crash-recovery table. An
+"exact predecessor" means the same immutable volume identity and revision/state
+immediately preceding the same persisted operation ID and paths. Only that
+one-sided lag may move forward automatically:
+
+| Transition | First durable write | Second durable write | Permitted crash repair |
+| --- | --- | --- | --- |
+| create completion | detailed ownership `Ready` after directory verification | allocation `CreatingDirectory -> Ready` | verify owner/directory/mode, then advance allocation |
+| publish | add node to allocation union | mirror union to ownership | restore union allocation-first, then mirror |
+| verified unpublish | remove node from ownership | remove node from allocation | restore union first; retried unpublish repeats fencing and removal |
+| delete prepare | allocation `Ready -> Deleting` with `deleteOperationID` and paths | ownership `Ready -> Deleting` with the same intent | advance only the exact `Ready` ownership predecessor |
+| delete remove-start | allocation `Deleting` adds `deleteRemoveStartedAt` | matching ownership `Deleting` adds the same evidence | mirror only the exact ownership predecessor for the same delete operation and paths; removal waits for agreement |
+| archive/retain completion | allocation `Archived` or `Retained` | matching detailed ownership terminal state | advance only the matching `Deleting` ownership predecessor |
+| physical delete completion | detailed allocation `Deleted` | compact ownership `Deleted` | compact only the matching `Deleting` ownership predecessor |
+| GC prepare/progress | allocation GC phase and immutable `gcOperationID`/paths | matching detailed ownership phase | advance only the exact prior ownership phase for the same GC |
+| GC completion | detailed allocation `Deleted` | compact ownership `Deleted` | compact only the matching terminal GC predecessor |
+| allocation compaction | ownership is already compact `Deleted` | allocation detailed `Deleted -> compactDeleted` | retry allocation compare-and-swap only |
+
+Two different operation IDs, paths, mappings, successor states, or terminal
+outcomes are a true conflict and remain fail-closed. A predecessor on one side
+and the exact successor on the other is an expected crash window, not a
+conflict. No recovery rule may move either record backward.
+
+The valid terminal pairings are explicit:
+
+- `Archived` allocation plus matching detailed `Archived` ownership;
+- `Retained` allocation plus matching detailed `Retained` ownership;
+- detailed `Deleted` allocation plus matching compact `Deleted` ownership
+  during the allocation retention window;
+- compact `Deleted` allocation plus matching compact `Deleted` ownership after
+  allocation compaction;
+- `deletedUnknown` allocation with no ownership record.
+
+Garbage collection is not automatic in v1.
+
+The v1 project must provide a documented admin garbage-collection path for
+terminal records. The bundled admin CLI must submit a request to the active
+leader by compare-and-swap updating only the `gcRequestID`, `gcRequestedMode`,
+`gcExpectedState`, and `gcRequestedAt` request fields in the target allocation
+ConfigMap. The active controller validates and executes the request. The CLI must
+never change lifecycle state or filesystem paths directly.
+
+Required behavior:
+
+- support dry-run;
+- require namespace, driver name, logical volume ID, and expected terminal
+  state;
+- require active controller leadership before any mutation;
+- acquire the same allocation record lock/concurrency guard used by
+  `CreateVolume` and `DeleteVolume`;
+- validate the allocation record, mapping hash, parent filesystem ID, base
+  path, delete policy, and driver-owned ownership record before any filesystem
+  mutation;
+- refuse to operate on non-terminal records;
+- refuse to operate if any PV still references the logical volume ID;
+- persist `gcOperationID`, `gcTargetPath`, a collision-resistant
+  `gcQuarantinePath` under `<basePath>/.deleted`, and `gcStartedAt` before the
+  first filesystem mutation;
+- mirror that exact GC operation ID, source path, quarantine path, expected
+  predecessor state, and phase into the detailed ownership record with a
+  crash-durable revision update; no rename is allowed until both records agree;
+- atomically move the validated archived or retained target once to the
+  persisted GC quarantine path;
+- persist `gcRemoveStartedAt` in the allocation record and then mirror it to the
+  ownership record before recursively removing only that validated quarantine
+  path;
+- after successful archived/retained cleanup, update the allocation record to
+  `Deleted`, set `reservesCapacity: false`, and preserve the original
+  `deleteOperation`, archived/retained path, GC fields, and timestamps for
+  auditability;
+- after the allocation `Deleted` tombstone is durable, replace the exact
+  matching ownership predecessor with the permanent compact `Deleted` ownership
+  tombstone from section 6.13. Return success only after both terminal records
+  agree on immutable identity and GC outcome;
+- compact an old `Deleted` ConfigMap in place only after the configured detailed
+  record retention window; never delete the deterministic per-volume tombstone;
+- log an audit summary containing driver name, logical volume ID, parent
+  filesystem ID, target path, previous state, final state, and operator-visible
+  result.
+
+GC retries must be idempotent and state-driven:
+
+- allocation and ownership contain conflicting operation IDs, paths, mappings,
+  or successor states -> fail closed without filesystem mutation;
+- allocation contains the persisted next GC phase while ownership is its exact
+  predecessor for the same `gcOperationID` and paths -> mirror that phase to
+  ownership, then continue;
+- source present + quarantine absent -> perform the persisted rename;
+- source absent + quarantine present -> continue removal;
+- source absent + quarantine absent + `gcRemoveStartedAt` set -> persist
+  the `.deleted` directory durability barrier, then persist allocation
+  completion and `Deleted` because matching remove intent exists and absence is
+  now durable, and finally terminalize ownership;
+- source absent + quarantine absent without `gcRemoveStartedAt` -> fail closed
+  with a manual recovery message;
+- allocation `Deleted` plus a matching detailed `Archived` or `Retained`
+  ownership predecessor with the same `gcOperationID`, paths, mapping, and
+  remove-started evidence -> write the compact ownership tombstone without
+  touching the filesystem;
+- matching persisted allocation and ownership completion -> return success
+  without touching the filesystem.
+
+A dry-run may persist only its bounded request/audit fields in the allocation
+record. It must not write GC lifecycle fields, modify ownership metadata, or
+touch the filesystem.
+
+### 10.7 Upgrade and Schema Compatibility
+
+The v1 release must freeze the Kubernetes-facing and recovery contract:
+
+- CSI driver name;
+- volume handle format;
+- mapping hash inputs;
+- required `volume_context` keys;
+- allocation record schema;
+- detailed and compact ownership record schemas;
+- parent-global owner record schema;
+- ownership record path;
+- installation identity Secret contract;
+- fixed controller leadership Lease name;
+- Lease holder, bootstrap, and graceful-release annotation schemas;
+- immutable operator approval Secret schema;
+- quiesced checkpoint manifest and parent ownership inventory schema;
+- controller namespace;
+- canonical logical-volume, request-hash, and mapping-hash algorithms;
+- pool `basePath` for any pool with existing records.
+
+Existing PVs must never be mutated in place to change
+`spec.csi.driver`, `spec.csi.volumeHandle`, or required immutable CSI
+attributes.
+
+Every released driver version must either:
+
+- read and operate on all previously released schemas; or
+- run an explicit idempotent migration before serving CSI operations.
+
+Unknown newer schema versions must fail closed with a clear error. New fields in
+future schema versions must be optional or defaulted when reading v1 records
+unless a documented migration is required.
+
+Online upgrades must support the mixed `N`/`N-1` interval created by independent
+controller and DaemonSet rollouts. Version `N` must not write a schema that the
+supported `N-1` node plugin cannot read until every eligible node advertises the
+new `nodeConfigGeneration`. The release suite must cover old-node/new-controller,
+new-node/old-controller, interruption, and rollback. A schema migration that
+cannot preserve `N-1` readability is an explicit offline, non-rollbackable
+upgrade: quiesce the driver, take a completed checkpoint, stop controller and
+node plugins, run the idempotent migration, and start only version `N`.
+
+The repository must include compatibility fixtures for:
+
+- old PV CSI attributes;
+- old allocation ConfigMaps;
+- old ownership records;
+- compact allocation and compact ownership tombstones;
+- old parent-global owner records;
+- Lease coordination evidence and operator approval Secret fixtures;
+- quiesced checkpoint manifests and per-parent ownership inventories;
+- archived, retained, and deleted terminal states.
+
+The chart rejects structurally invalid candidate values, but it cannot prove the
+historical contents of an externally owned identity Secret or parent claim.
+The required `csi-admin upgrade preflight` command compares candidate immutable
+values, the fixed Lease name, and identity hashes with live
+allocation/ownership state before the old controller is stopped. Controller startup is the final fail-closed authority and
+performs no mutation when `driver.name`, an existing pool `basePath`,
+installation identity, ownership path, or schema generation disagrees. The
+operations guide must state that bypassing preflight can cause a safe outage,
+never silent adoption. Rollback limits must be documented: once an explicitly
+offline migration writes a newer record version, older versions are unsupported
+unless the release contract says otherwise.
+
+Migration from the official Scaleway File Storage CSI driver or from existing
+manually-created PVs is out of scope for v1 automatic behavior. The documented
+safe path is: create new PVCs with this driver, copy data, validate, cut over
+workloads, and keep rollback instructions.
+
+## 11. Security Requirements
+
+### 11.1 Path Safety
+
+Path handling is critical.
+
+All paths must be validated through a dedicated package. Required tests:
+
+- rejects empty path;
+- rejects `/`;
+- rejects `..`;
+- rejects absolute user-provided subpaths;
+- rejects paths outside `basePath`;
+- rejects symlink escape if deletion follows links;
+- rejects symlink replacement between validation and mutation;
+- rejects bind-mount or different-device entries inside a deletion tree;
+- refuses recursive delete unless target is proven safe.
+
+### 11.2 Directory Ownership
+
+The driver must support:
+
+- directory mode;
+- UID;
+- GID.
+
+Defaults must be conservative and documented.
+
+The driver must not recursively change ownership or mode by default. It should
+set ownership and mode only on the logical volume root and on driver-owned
+internal metadata directories.
+
+Driver-owned internal metadata directories must remain owned by the driver and
+must not be writable by workload UID/GID defaults. The workload-writable data
+directory and the driver-owned metadata directory are separate trust zones.
+
+### 11.3 Privileges
+
+The node DaemonSet requires host mount privileges.
+
+The controller also needs filesystem access for `CreateVolume` and
+`DeleteVolume` directory lifecycle. The v1 implementation must run the
+controller pod with the minimum mount privileges needed to attach, mount,
+`statfs`, archive, retain, and delete parent file system directories in a
+controller-owned path.
+
+A privileged filesystem-manager sidecar is out of scope for v1. Do not add a
+second controller filesystem architecture unless the direct privileged
+controller model fails during implementation or real Scaleway e2e testing.
+
+Do not give the controller access to the kubelet workload mount root unless it
+is strictly required. Controller mounts are for provisioning cleanup only.
+
+The Helm chart must render separate ServiceAccounts for:
+
+- the controller pod, shared by the driver container and its controller
+  sidecars because Kubernetes ServiceAccounts are pod-scoped;
+- the node-plugin pod, shared by the node driver, registrar, and liveness
+  container.
+
+The Helm chart must define security contexts explicitly.
+
+Required defaults:
+
+- no `hostPID` unless a tested mount requirement proves it is necessary;
+- no `hostNetwork` unless a tested requirement proves it is necessary;
+- `readOnlyRootFilesystem: true` for non-mount containers;
+- `allowPrivilegeEscalation: false` wherever mount operations do not require it;
+- drop Linux capabilities on every non-mount container;
+- use the explicit privileged mount-container contract below rather than an
+  untested partial capability profile;
+- hostPath mounts limited to the driver mount roots and kubelet plugin paths
+  required by CSI;
+- mount propagation enabled only on the exact mount roots that require it;
+- no wildcard hostPath mounts such as `/`.
+
+The v1 production mount security contract is deliberately conservative and
+explicit:
+
+- the mount-capable controller driver container runs `privileged: true` because
+  it performs kernel `virtiofs` mounts and destructive filesystem lifecycle
+  operations;
+- the controller parent mount root is an `emptyDir` mounted only into the
+  controller driver container. It is not a hostPath and has no access to the
+  kubelet workload mount root;
+- the node driver container runs `privileged: true` and receives only the exact
+  kubelet plugin, plugins-registry, pod, and driver parent-mount hostPaths needed
+  by CSI;
+- node mount propagation is `Bidirectional` only on the exact kubelet/driver
+  mount roots that must propagate mounts to the host;
+- `/dev/fuse`, `hostPID`, and `hostNetwork` are not mounted or enabled in v1;
+- the controller image includes the standard Linux mount utilities needed for
+  `virtiofs`; no NFS client is installed for this feature;
+- all non-mount sidecars run non-root where their upstream image supports it,
+  with read-only root filesystems, no privilege escalation, and all capabilities
+  dropped;
+- the dedicated driver namespace must use the Pod Security admission level
+  required for these two privileged mount containers and must be documented as
+  a security-sensitive namespace.
+
+A future release may replace full privilege with a tested narrower capability
+set, but v1 must not advertise an unproven `SYS_ADMIN`-only profile.
+
+Real Kapsule e2e must run the rendered controller security context, mount a
+parent with `virtiofs`, run `statfs`, create a directory, archive/delete it, and
+restart or reschedule the controller.
+
+### 11.4 RBAC
+
+The controller pod ServiceAccount must receive the least-privilege union of the
+RBAC shipped by the exact pinned external-provisioner and external-attacher
+versions. The chart must derive this from the version-matched upstream manifests
+rather than maintaining an incomplete hand-written subset. At minimum the union
+must cover:
+
+- PersistentVolume get/list/watch/create/delete/patch operations required by
+  external-provisioner and external-attacher;
+- PersistentVolumeClaim get/list/watch/update/patch operations required by
+  external-provisioner;
+- StorageClass get/list/watch;
+- VolumeAttachment get/list/watch/update/patch, including status, for
+  external-attacher and the driver's in-use deletion check;
+- CSINode get/list/watch for external-attacher and node registration preflight;
+- Node get/list/watch for homogeneous-node preflight;
+- get only the `kube-system` Namespace object to derive the immutable
+  `activeClusterUID`;
+- Event create/patch/update;
+- namespace-scoped Lease permissions required by sidecar leader election and
+  driver leadership coordination.
+
+Driver-specific controller permissions are:
+
+- get/list/watch/create/update/patch ConfigMaps in the driver namespace for
+  allocation records only;
+- get/create/update/patch/watch the controller leadership Lease in the driver
+  namespace, constrained to fixed resource name
+  `scaleway-sfs-subdir-csi-controller` wherever Kubernetes RBAC supports
+  `resourceNames`; the runtime ServiceAccount receives no Lease delete
+  permission;
+- get/list/watch Pods in the dedicated driver namespace only, so homogeneous
+  node preflight can discover node-plugin Pods by the chart's fixed labels and
+  verify `spec.nodeName`, absence of `deletionTimestamp`, and Ready condition;
+- get only the fixed `sfs-subdir-controller-approval` and
+  `sfs-subdir-checkpoint` Secrets by resource name; no Secret
+  list/watch/create/update/patch/delete permissions. The kubelet projects the
+  separately named identity and credential Secrets into the controller pod;
+- no write access to arbitrary Secrets, workloads, Nodes, or CSINodes.
+
+The node-plugin ServiceAccount must receive no Kubernetes API permissions unless
+a pinned registrar or liveness version demonstrably requires them. Node identity
+comes from the local Scaleway metadata service, not Kubernetes Node mutation.
+
+The runtime controller ServiceAccount must not get `delete` on allocation
+ConfigMaps. V1 compacts terminal records in place with update/patch and never
+deletes the permanent per-volume tombstone.
+
+The default namespace must be dedicated to the driver, for example:
+
+```text
+scaleway-sfs-subdir-csi
+```
+
+Do not install allocation records into `kube-system` by default.
+
+Allocation ConfigMaps must use:
+
+- a fixed name prefix;
+- bounded DNS-safe owner labels;
+- bounded DNS-safe driver labels;
+- bounded DNS-safe volume ID labels;
+- hash labels for raw or long values.
+
+Required label schema:
+
+```text
+app.kubernetes.io/name=scaleway-sfs-subdir-csi
+sfs-subdir.csi.example.com/installation-id=<bounded installation id>
+sfs-subdir.csi.example.com/logical-volume-id=<bounded logical volume id>
+sfs-subdir.csi.example.com/request-name-hash=<hash>
+sfs-subdir.csi.example.com/volume-handle-hash=<hash>
+sfs-subdir.csi.example.com/pool-name-hash=<hash>
+sfs-subdir.csi.example.com/parent-filesystem-id-hash=<hash>
+sfs-subdir.csi.example.com/state=<bounded state>
+```
+
+Raw CSI names, parent filesystem IDs, pool names, and paths must be stored in
+ConfigMap data or annotations. The implementation must include tests for
+maximum-length names, invalid label characters, and hash collision handling.
+
+Labels are not an RBAC boundary, but they make operations and cleanup safer.
+
+RBAC must be split into minimal Roles/ClusterRoles:
+
+- namespace-scoped allocation record Role;
+- namespace-scoped controller-leadership Lease Role;
+- namespace-scoped leader-election Role;
+- namespace-scoped resource-name-constrained get Role for the immutable operator
+  approval and checkpoint Secrets;
+- namespace-scoped node-plugin Pod read Role with get/list/watch only;
+- version-matched controller sidecar ClusterRoles;
+- cluster-scoped driver read access to PVs, VolumeAttachments, CSINodes, and
+  Nodes where not already included by the sidecar union, plus resource-name
+  constrained get access to the `kube-system` Namespace;
+- node plugin permissions only where required.
+
+### 11.5 Secrets
+
+Secrets must be mounted as environment variables or files only in pods and
+containers that strictly need them.
+
+Scaleway API credentials must not be mounted into:
+
+- the node plugin;
+- `node-driver-registrar`;
+- liveness probes;
+- any container that does not call the Scaleway API.
+
+No credentials in:
+
+- ConfigMaps;
+- StorageClasses;
+- Helm rendered plain text examples;
+- logs;
+- README command examples with real values.
+
+## 12. Testing Strategy
+
+Testing is part of the deliverable, not a follow-up.
+
+### 12.1 Supported v1 Scale Envelope
+
+V1 must validate and document at least this envelope:
+
+- 4 pools;
+- 4 unique parent filesystems, subject to the lower live limit of every eligible
+  Instance;
+- 6 eligible workload nodes;
+- 1,000 active logical volumes;
+- 10,000 permanent compact `Deleted` tombstones;
+- 10 concurrent mutating CSI requests in the single controller process.
+
+These are tested support limits, not hardcoded driver limits. Configuration or
+usage above them must be documented as unvalidated rather than silently
+rejected, except where a real provider, Kubernetes, or safety limit applies.
+
+The implementation must remain O(number of records plus PVs) during startup and
+must not perform an API request per compact tombstone when a paginated list or
+informer cache can provide the same result. A fake-provider scale test must
+reconcile the full envelope within 5 minutes and remain below the chart's default
+512 MiB controller memory limit on the documented CI reference runner. Real
+Kapsule E2E must provision at least 100 PVCs, while workload pods may sample a
+smaller documented subset to control test cost.
+
+### 12.2 Unit Tests
+
+Required unit tests:
+
+- volume handle parsing and serialization;
+- volume handle length is bounded to 128 bytes or less;
+- volume handle delete recovery without `volumeContext`;
+- `volume_context` accepts every key/value at 128 UTF-8 bytes and a complete
+  map at 4 KiB, rejects the corresponding one-byte-over boundaries including
+  multi-byte input, and performs the check before durable or filesystem
+  mutation;
+- invalid handle rejection;
+- mapping hash mismatch rejection;
+- allocation record create/read/update and terminal compaction behavior;
+- exact schema validation for `detailed`, `compactDeleted`, and
+  `deletedUnknown`, including rejection of `recordKind: full`, unknown fields in
+  compact records, and state/`reservesCapacity` combinations that do not match
+  the selected variant;
+- allocation state transitions;
+- `reservesCapacity` accounting by allocation state;
+- deterministic `logicalVolumeID` derived from `CreateVolumeRequest.name`;
+- atomic allocation record creation prevents duplicate records for the same
+  `CreateVolumeRequest.name`;
+- parent-global owner record creation is atomic and rejects mismatched
+  `installationID`;
+- first-parent claim uses only the fixed root claim
+  `/.sfs-subdir-csi-owner.json`; crash injection before and after temporary-file
+  fsync, no-replace rename, and root-directory fsync leaves either no claim or
+  one complete immutable claim, never a partially initialized metadata tree;
+- a losing or stale bootstrap attempt cannot replace the fixed claim, adopt a
+  foreign temporary claim, or remove a temporary claim belonging to another
+  attempt;
+- first-parent claim persists its bootstrap attempt before attach; injected
+  crashes before attach, after an accepted or ambiguous attach, and before
+  owner creation resume or roll back only the exact journaled attachment, while
+  a crash after matching owner creation clears only the stale attempt;
+- bootstrap replay rejects same-attempt claim from a changed Instance and
+  permits only provider-fenced offline rollback there; it rejects a changed parent or
+  cluster, foreign or additional attachment, existing logical state, and a
+  malformed or missing attempt record;
+- two installations racing from the same live controller Instance cannot use
+  either bootstrap journal to detach the other's attachment; automatic rollback
+  from any live Instance is rejected;
+- parent-global ownership rejects a copied installation identity from a
+  different `activeClusterUID`;
+- duplicate parent IDs across pools and claims from another installation are
+  rejected;
+- `CreateVolume` rejects reuse of a terminal `Archived`, `Retained`, or
+  `Deleted` tombstone permanently in v1;
+- compatible capacity-range replay returns the existing volume even when the
+  request hash differs;
+- a compatible `Ready` replay returns the existing mapping without provider
+  refresh, `statfs`, capacity, lifecycle, or placement checks;
+- `Reserved` and `CreatingDirectory` replay uses the persisted parent without
+  selecting a new one;
+- incompatible capacity, capabilities, or immutable parameters return
+  `AlreadyExists`;
+- request map and capability ordering do not change canonical compatibility;
+- `DeleteVolume` state transitions for archive/delete/retain/retry;
+- `DeleteVolume` rejects an empty ID with `InvalidArgument`, returns success for
+  a non-empty foreign or impossible ID without lookup or tombstone creation,
+  and fails closed when a parseable driver handle conflicts with an existing
+  logical record or mapping hash;
+- delete preparation persists archive/quarantine targets before filesystem
+  rename;
+- physical delete does not begin until matching allocation and ownership
+  records contain the same `deleteRemoveStartedAt`; every crash between the two
+  writes and removal resumes forward without deleting from one-sided intent;
+- retry after crash between rename and terminal state resumes safely;
+- terminal `Deleted` tombstone remains non-reserving after `DeleteVolume`;
+- valid driver handle with fully missing state returns idempotent delete success
+  without filesystem mutation and persists a minimal deleted-unknown tombstone
+  only after all authoritative lookups conclusively report absence;
+- `deletedUnknown` schema accepts only its defined fields and is rejected from
+  filesystem mutation, capacity accounting, reconstruction, and name reuse;
+- unavailable, forbidden, or timed-out delete lookups do not persist a
+  deleted-unknown tombstone;
+- `DeleteVolume` fails with `FailedPrecondition` while a VolumeAttachment
+  remains;
+- publish persists a deduplicated node ID before returning success and normal
+  unpublish on a Ready matching Node/CSINode removes it idempotently;
+- unpublish with an empty `node_id` targets the union of both persisted sets,
+  applies the safety decision to every node, and succeeds only when both sets
+  are empty and agree;
+- all-node unpublish interrupted between targets or between ownership and
+  allocation updates preserves every unresolved fence and resumes
+  idempotently;
+- forced unpublish after Node or CSINode loss, an out-of-service taint, identity
+  mismatch, or unreadable Kubernetes state retains the node fence until
+  provider fencing is conclusive; a deleted VolumeAttachment alone never clears
+  it;
+- injected crashes between allocation and ownership publish/unpublish updates
+  restore the deduplicated union in allocation-first order; generic recovery
+  never removes a node ID, and only a retried, revalidated unpublish may do so;
+- delete, archive, and GC remain blocked by a stale `publishedNodeIDs` entry;
+- a stale published node is cleared only after provider-confirmed Instance
+  deletion or non-running state plus absence of the logical volume's parent
+  attachment;
+- `starting`, `stopping`, `locked`, unknown, and unreadable Instance states do
+  not satisfy the published-node fence;
+- the complete Instance state table is enforced consistently; an Instance
+  `NotFound` response cannot clear a fence while regional inventory still shows
+  an orphan parent attachment;
+- publish racing with deletion cannot succeed after the prepared `Deleting`
+  transition;
+- request hash canonicalization and semantic replay compatibility;
+- idempotent `CreateVolume` before PV creation;
+- recovery from `Reserved` and `CreatingDirectory` records;
+- driver-owned ownership record write/read/validate;
+- ownership-only recovery reconstructs the allocation from the complete
+  immutable envelope and never from current defaults;
+- missing driver-owned ownership record fails closed;
+- mismatched driver-owned ownership record fails closed;
+- expected predecessor ownership state is repaired only for the explicitly
+  documented delete or GC transition after each injected update crash point;
+- a compact ownership tombstone on a configured parent reconstructs only its
+  exact missing compact allocation tombstone; missing, extra, or mismatched
+  permanent tombstones keep startup non-serving;
+- workload-visible marker deletion does not authorize or block unsafe deletion;
+- pool config validation;
+- node compatibility preflight validation;
+- publish rejects a node ID that does not match an eligible Node's CSINode
+  registration or configured Project/region;
+- parent selection with one parent;
+- parent selection with multiple parents;
+- parent selection skips an actual-full parent when another parent is valid;
+- parent lifecycle `active` / `draining`;
+- parent removal rejected while reserving records, PVs, or live detailed
+  ownership records reference it;
+- online parent removal is rejected in v1 even after records are drained;
+- the offline decommission validator requires no references, mounts, child bind
+  mounts, or attachments before values removal and proves every remaining
+  compact ownership tombstone matches its allocation tombstone;
+- startup after valid offline decommission accepts detailed and
+  `compactDeleted` non-reserving tombstones that retain a historical parent ID,
+  as well as `deletedUnknown` tombstones with no parent field, while any
+  reserving record, PV, or live detailed ownership record for that parent still
+  fails closed; startup and checkpoint do not remount an unconfigured parent to
+  inspect compact ownership tombstones;
+- parent-global ownership conflict fails startup preflight;
+- pool full behavior;
+- parent size refresh updates available capacity;
+- resize of parent file system affects future placement;
+- the fake provider's unexpected size decrease marks only that parent
+  `critical-size-regression`, blocks new placement there, leaves existing
+  mounts untouched, and clears only after an authoritative observation reaches
+  the previous accepted size;
+- every `FileSystem.Status` row is enforced, including runtime recovery from
+  `creating`/`updating` to `available` and fail-closed unknown values;
+- exact fake-`statfs` calculation from `f_bavail * f_bsize`, checked
+  multiplication/subtraction, threshold maximum and percentage ceiling,
+  including equality, one-byte-below, zero, invalid/negative, overflow, and
+  available-larger-than-observed-size cases;
+- logical capacity subtracts the larger byte/percentage safety reserve before
+  applying the overcommit ratio, including boundary and overflow cases;
+- aggregate attach-budget set-union validation deduplicates already attached
+  configured parents;
+- active official-CSI or manual attachments consume slots and make unsafe
+  same-node operation fail closed;
+- paginated, cross-zone `ListAttachments` discovers unknown, orphaned, and
+  foreign-resource attachments and fails closed on unreadable inventory;
+- `NumberOfAttachments` mismatch with the deduplicated regional list is treated
+  as transient and never as conclusive absence;
+- `ListAttachments` and `Server.Filesystems` disagreement blocks mutations;
+- attachment state-machine table tests cover `available`, `attaching`,
+  `detaching`, unknown state, conflict, lost response, API timeout,
+  cancellation, bounded backoff, deadline, inventory re-read, and exact attach
+  call count;
+- controller workload publish and controller lifecycle attachment both use the
+  same provider state machine and exact target-node zone;
+- node eligibility revalidation after node changes;
+- archive/retain accounting;
+- delete policy `archive`;
+- delete policy `delete`;
+- delete policy `retain`;
+- manual GC refuses non-terminal records;
+- manual GC dry-run does not mutate records or filesystem paths;
+- manual GC for archived/retained data releases logical capacity only after
+  validated cleanup;
+- manual GC mutating path is rejected outside the active leader;
+- GC resumes safely after crashes before rename, after rename, after
+  `gcRemoveStartedAt`, and after completion;
+- a crash after allocation GC completion but before ownership compaction
+  terminalizes only the matching ownership record; conflicting GC operation
+  evidence remains fail-closed;
+- detailed `Deleted` ConfigMaps become `compactDeleted` in place and remain
+  permanent;
+- matching detailed ownership records become permanent compact ownership
+  tombstones and are never deleted by compaction or GC;
+- atomic filesystem metadata writes survive every injected crash point;
+- logical-directory creation, archive/quarantine rename, recursive removal, and
+  bootstrap-temp cleanup each execute the required file/directory durability
+  barriers; injected barrier failure leaves the last durable non-terminal state
+  and a retry resumes without guessing completion;
+- controller Lease loss cancels mutations and terminates the process;
+- graceful shutdown writes the exact release marker and a different Pod UID
+  consumes it once; failed marker writes, malformed or consumed markers, and a
+  manually precreated or restored empty Lease cannot authorize automatic
+  handoff;
+- graceful shutdown writes no release marker while a bootstrap attempt exists
+  or checkpoint mode is active;
+- abnormal takeover requires an exact unconsumed immutable approval Secret,
+  verifies its Kubernetes UID and complete previous-holder identity, confirms
+  the provider fence, and records consumption in the Lease before mutation;
+- absent-or-empty-Lease recovery with durable state requires a consumed
+  same-cluster approval, while discovery proves a fresh empty installation
+  before initialization;
+- provisional discovery never replaces an expired non-empty holder before the
+  exact approval is consumed, and Helm lifecycle operations do not render or
+  alter the runtime Lease coordination annotations and fields;
+- leadership duration ordering and watchdog deadline are enforced;
+- the leadership Lease name is the fixed
+  `scaleway-sfs-subdir-csi-controller` constant in runtime, parent claims,
+  checkpoints, RBAC, preflight, and upgrade compatibility; values cannot
+  override it;
+- controller rollout strategy prevents concurrent mutating controllers;
+- `SIGTERM` immediately removes readiness, rejects new work, cancels active
+  contexts, writes a graceful marker only after zero mutators and a successful
+  Lease compare-and-swap, and exits without that marker at the shutdown
+  deadline; the normal ten-minute attach deadline remains unchanged outside
+  shutdown;
+- a burst of at least 100 fake mutating requests never exceeds the configured
+  process-wide limit of 10, queued calls honor cancellation, and lock-order
+  tests detect an opposite pool/per-volume acquisition;
+- controller and node CSI `Probe` report separate cached readiness without
+  provider or filesystem I/O; controller-only failure and leadership state do
+  not make an otherwise healthy node plugin unready;
+- checkpoint preparation atomically becomes unready, rejects new mutations,
+  drains active mutators, pauses compaction and repair, and remains quiesced
+  until explicit resume; SIGTERM, Lease loss, or a crash invalidates the
+  candidate export and never creates a graceful-release marker;
+- checkpoint creation rejects transitional state, incomplete object sets,
+  allocation/PV hash mismatches, and missing or duplicate parent inventory
+  entries; the fixed immutable checkpoint Secret accepts only a complete
+  manifest whose request ID, digest, object aggregate, and parent inventories
+  all match;
+- at the supported 10,000-tombstone envelope, the checkpoint Secret remains
+  bounded by parents/images rather than volumes; restored Kubernetes UIDs and
+  resourceVersions may differ, while one missing, extra, duplicate, or
+  content-changed logical object changes the aggregate and blocks recovery;
+- missing-Lease restore remains non-serving until every pre-recovery controller
+  and cluster Instance is offline and fresh regional inventories prove no old
+  or unknown attachment; fencing only the historical checkpoint holder is
+  rejected, including the A-checkpoint/B-successor/C-recovery sequence;
+- restore from a stale checkpoint with newer, extra, or missing
+  detailed/compact parent ownership remains non-serving;
+- read-only `NodePublishVolume` creates a read-only bind mount;
+- idempotent re-publish accepts only the exact same source, capability,
+  filesystem type, and read-only mode; every conflict returns `AlreadyExists`
+  without remounting;
+- `NodePublishVolume` creates a missing absolute target and removes it on mount
+  failure only when that call created it and it is unmounted and empty;
+- `NodeUnpublishVolume` is idempotent for absent or already-unmounted targets
+  and cleans only a validated, unmounted, empty driver target directory;
+- `NodeStageVolume` validates but never creates or removes the CO-owned staging
+  directory; `NodeUnstageVolume` unmounts but never removes it, while mount
+  idempotency, conflict, and rollback remain exact;
+- `NodeStageVolume`, `NodePublishVolume`,
+  and `ControllerPublishVolume` reject every missing, unknown, or mismatched
+  immutable volume-context field before any filesystem, provider, or durable
+  side effect; `ValidateVolumeCapabilities` alone may resolve an omitted map
+  read-only from the handle and durable records, while a supplied map must match
+  exactly;
+- `NodeStageVolume` rejects a local node ID absent from the ownership
+  `publishedNodeIDs` fence;
+- `NodePublishVolume` revalidates the same ownership fence and cannot publish
+  from an obsolete staging path after controller unpublish;
+- `NodeStageVolume` fails when a `Ready` volume data directory is missing and
+  does not recreate it;
+- concurrent stages sharing one parent serialize and validate the existing
+  parent mount;
+- all four Node lifecycle RPCs serialize by logical volume with cancellable
+  lock acquisition; stage/publish also take the parent lock in the fixed order,
+  and stress tests prove that concurrent publish/unpublish cannot create a
+  stacked mount or unmount another call's target;
+- publish proves the staging mount is the exact expected logical bind backed by
+  the expected parent; unpublish and unstage refuse foreign, aliased, or stacked
+  sources before unmounting;
+- empty or `virtiofs` filesystem type succeeds, while `ext4`, `xfs`, non-empty
+  mount flags, and non-empty accessibility requirements are rejected;
+- safe path join;
+- unsafe path rejection;
+- reserved directory name rejection;
+- user data cannot overwrite driver-owned metadata paths;
+- symlink in base path rejection;
+- symlink replacement race between validation and mutation is rejected;
+- symlink as logical volume directory rejection;
+- symlink inside a deleted tree does not escape;
+- bind-mount or different-device entry inside a deletion tree is rejected;
+- archive destination collision rejection;
+- directory name sanitization;
+- PVC metadata directory naming with `extra-create-metadata`;
+- the three external-provisioner metadata keys are accepted while unrelated
+  unknown parameters are rejected;
+- fallback directory naming without PVC metadata;
+- idempotent create;
+- idempotent delete;
+- idempotent attach;
+- idempotent mount with fake mounter;
+- `SINGLE_NODE_WRITER` permits only an identical retry at the same node target,
+  rejects a second target on that node and a second distinct node, while
+  `MULTI_NODE_MULTI_WRITER` permits the documented RWX use; every other access
+  mode, including reader-only modes, is unsupported in v1;
+- unsupported capabilities and incompatible existing targets return the exact
+  RPC-specific status defined in section 6, and
+  `ValidateVolumeCapabilities` returns OK with `confirmed` unset for a
+  well-formed unsupported capability;
+- exact Identity, controller, and node CSI capability advertisement on both
+  sockets, including the same plugin name/non-empty vendor version, exactly
+  `CONTROLLER_SERVICE`, and no topology capability;
+- node configuration generation changes whenever any node-relevant value or
+  supported schema generation changes; create and publish remain blocked until
+  every eligible Ready node reports the exact expected generation;
+- N/N-1 mixed-version fixtures prove that a new controller never writes state
+  an old node cannot read, while an incompatible migration remains impossible
+  until the documented offline upgrade is used;
+- fixed node parent-mount and kubelet roots reject equality, nesting, symlink
+  aliasing, and overlap with plugin sockets, registration, pod, stage, or
+  publish trees;
+- a commercial Instance type outside the release-tested allowlist is rejected
+  even if it advertises a positive `MaxFileSystems`, and an allowlisted type is
+  still rejected when the live capability is absent or zero;
+- `NodeGetInfo` omits `MaxVolumesPerNode` in v1;
+- `GET_VOLUME_STATS` is not advertised in v1;
+- block volume rejection.
+
+### 12.3 CSI Sanity Tests
+
+Use Kubernetes CSI sanity tests for the driver.
+
+The sanity suite must run in CI with fake Scaleway and fake mounter
+implementations. The repository must pin the exact `kubernetes-csi/csi-test`
+module version in `go.mod`; CI and release evidence must print that version.
+Updating it is a deliberate compatibility change with a reviewed test result,
+not an unbounded `latest` dependency.
+
+Run sanity separately against the controller and node Unix sockets with the
+service set appropriate to each endpoint. The test harness must fail if the
+Controller suite is skipped or reports zero Controller RPC cases; CI output and
+release evidence must record the executed test names/counts. Add direct
+Identity tests on both sockets because a green Node-only sanity run is not proof
+of the complete controller contract.
+
+### 12.4 Helm Tests
+
+Required checks:
+
+- `helm lint`;
+- render with one parent;
+- render with two parents;
+- render rejects `controller.replicas > 1` in v1;
+- render uses `strategy: Recreate` for the controller;
+- render includes controller leadership Lease RBAC, grants no Lease delete, and
+  constrains it to fixed resource name
+  `scaleway-sfs-subdir-csi-controller`, exposes no Lease-name override, and does
+  not render a mutable runtime Lease object;
+- render grants get only on the fixed immutable operator approval Secret by
+  resource name, grants no Secret list/watch/write/delete, and does not render
+  or own that Secret;
+- render grants the same exact get-only access to the fixed immutable
+  `sfs-subdir-checkpoint` Secret and never renders, owns, lists, watches, or
+  writes either operator-owned Secret;
+- render grants the controller get/list/watch, but no write, for Pods in the
+  dedicated driver namespace and grants no cross-namespace Pod access;
+- render pins `leaseDuration`, `renewDeadline`, and `retryPeriod` with valid
+  ordering;
+- render rejects narrowed production node placement and disabled homogeneous
+  preflight;
+- render with `allowVolumeExpansion: false`;
+- render with custom driver name;
+- render with existing credentials Secret;
+- render with existing installation identity Secret;
+- verify Scaleway credentials are mounted only into the controller;
+- verify project, region, and default zone come only from Helm values;
+- verify the node plugin does not receive Scaleway credentials;
+- render with dedicated namespace;
+- render with controller and node security contexts;
+- render with `external-provisioner --extra-create-metadata=true`;
+- render the same non-empty `nodeConfigGeneration` annotation on the controller
+  and node Pods and prove that every node-relevant value changes it
+  deterministically while controller-only values do not;
+- render passes the configured 12-minute `--timeout` to external-provisioner
+  and external-attacher and rejects a timeout that cannot cover attachment;
+- render passes explicit `--worker-threads=5` to external-provisioner and
+  external-attacher and rejects values above the tested mutation envelope;
+- render sets a 90-second shutdown deadline, 120-second pod termination grace,
+  and 3900-second Deployment progress deadline, and rejects insufficient
+  shutdown or startup margins;
+- production render uses `priorityClassName: system-cluster-critical` for the
+  singleton controller and does not pin it to one hostname or failure domain;
+- render with the `CSIDriver` object;
+- production render uses `repository@sha256:<digest>` for the controller and
+  every sidecar, retains version tags as metadata, and rejects tag-only or
+  malformed-digest release values;
+- render explicit requests and limits for every container;
+- validate the version-matched upstream external-provisioner and
+  external-attacher RBAC union;
+- verify controller RBAC can get only the `kube-system` Namespace for cluster
+  identity and does not gain broad Namespace write access;
+- negative `values.schema.json` and template tests for every cross-field rule
+  listed in section 7.4;
+- render with explicit controller/node security contexts, hostPaths, socket
+  paths, and mount propagation;
+- render uses the fixed production node parent-mount root and rejects any
+  configured parent/kubelet/socket/registration/pod/stage/publish path equality
+  or lexical nesting;
+- chart-install startup preflight rejects normalized or symlink-resolved path
+  overlap before enabling mount propagation;
+- verify the controller parent root is `emptyDir`, the controller has no kubelet
+  hostPath, and only node mount roots use required `Bidirectional` propagation;
+- verify controller and node startup/readiness use their own CSI livenessprobe
+  `/healthz`, liveness uses the respective driver's separate `/livez`, and none
+  of these endpoints is exposed by a Service;
+- verify no credentials are rendered into ConfigMaps;
+- install preflight rejects a namespace that does not enforce the documented
+  privileged Pod Security level and accepts the explicitly labelled dedicated
+  namespace.
+
+### 12.5 Local Integration Tests
+
+Use `kind` or a local Kubernetes cluster for API-level tests that do not require
+real Scaleway mounts.
+
+Validate:
+
+- StorageClass creation;
+- PVC provisioning and deletion through the required fake driver mode;
+- controller and node restart with existing PVCs;
+- a normal `Recreate` rollout consumes the exact graceful-release marker, while
+  a new empty Lease and a failed release write remain non-serving;
+- a rollout during an active fake mutation cancels work at a durable boundary;
+  it emits a graceful marker only after the mutator exits, while a forced
+  shutdown deadline produces no marker and requires abnormal recovery;
+- namespace metadata backup accepts only a quiesced, hash-complete checkpoint;
+  restore reconciliation with matching fake parent ownership records succeeds,
+  while an in-progress or stale checkpoint remains non-serving;
+- concurrent fake Create/Delete/Publish/Unpublish/GC requests cannot cross the
+  checkpoint quiesce barrier; the exported object resourceVersions and parent
+  digests come from the same quiesced interval;
+- same-cluster absent-or-empty-Lease restore remains non-serving until the
+  checkpoint-bound one-time immutable approval Secret is consumed and all
+  pre-recovery Instances are stopped or deleted with fresh attachment
+  inventories; fencing only the checkpoint's historical holder is rejected;
+- a different fake `activeClusterUID` remains non-serving and cannot mutate
+  parent state;
+- provider unavailability during cold startup removes readiness without failing
+  shallow liveness or restarting the controller; after startup, a failure
+  conclusively scoped to one parent blocks that parent but not unrelated
+  parents or healthy node-plugin readiness;
+- RBAC proves the controller can discover labeled node-plugin Pods only in its
+  own namespace and cannot create, update, patch, or delete Pods;
+- external-attacher saved-node-ID fallback after Node/CSINode loss cannot clear
+  the durable node fence without provider fencing, including the empty-node-ID
+  all-node request;
+- 100 concurrent fake Controller mutations remain bounded by the configured
+  process-wide semaphore and cancelled queued calls do not enter provider or
+  filesystem code;
+- checkpoint restore detects an extra or missing compact ownership tombstone on
+  a configured parent through its inventory digest, while a valid historical
+  allocation tombstone for an offline-decommissioned parent is verified only
+  through the Kubernetes-object aggregate and causes no remount;
+- a staggered node DaemonSet rollout blocks create/publish while any eligible
+  Ready node reports the previous configuration generation, then resumes only
+  after every node reports the expected generation;
+- an N/N-1 chart upgrade keeps existing mounts and old-node reads compatible,
+  and prevents new-schema writes until the node rollout is complete;
+- the safe-uninstall workflow rejects live PVs, attachments, fences, stages, or
+  targets; after normal Kubernetes cleanup it quiesces the controller,
+  unmounts node roots, stops the node DaemonSet, unmounts and detaches controller
+  parents, gracefully stops the controller while RBAC still exists, and permits
+  a later Helm uninstall without touching claims, tombstones, parent data, or
+  identity Secrets;
+- every mutating admin operation rejects an incompatible CLI/admin protocol,
+  while the checksum-verified packaged `csi-admin` artifact completes
+  checkpoint, GC, upgrade preflight, and safe uninstall;
+- the chart installs only in the dedicated namespace after the documented
+  privileged Pod Security labels are applied;
+- sidecar wiring.
+
+This chart-install integration test is mandatory in CI. Template rendering and
+direct CSI sanity alone do not prove socket, ServiceAccount, RBAC, and sidecar
+wiring.
+
+### 12.6 Scaleway E2E Tests
+
+Provide e2e scripts that can run against a real Scaleway project.
+
+The e2e suite must be explicit, destructive only inside tagged test resources,
+and easy to clean up.
+
+Required e2e scenario:
+
+1. create or reuse a Kapsule cluster in `fr-par`;
+2. verify the target Scaleway File Storage product status and print it in the
+   test report;
+3. verify current File Storage quota, region availability, and attach limits in
+   the test report;
+4. verify the cluster-level File Storage CSI tag is present and the selected
+   node pool's exact commercial Instance type is in the release-tested
+   allowlist and exposes a positive live `MaxFileSystems` value;
+5. run with Project-scoped `FileStorageReadOnly` and `InstancesFullAccess`, then
+   verify expected permission-denied behavior with an intentionally
+   under-privileged key;
+6. create one parent File Storage file system;
+7. apply the documented privileged Pod Security labels to the dedicated
+   namespace, then install the driver with the rendered production controller
+   and node security contexts and fixed disjoint host paths;
+8. verify the controller leadership Lease exists, only its holder can mutate,
+   and a different Pod UID cannot take over an uncleared expired holder without
+   the exact immutable operator approval Secret;
+9. verify node compatibility preflight passes and reports at least two Ready
+   compatible controller candidates without a single-host pin;
+10. verify every schedulable Linux workload node has a Ready node-plugin pod and
+    CSINode registration;
+11. mount a parent from the controller with `virtiofs`, run `statfs`, create a
+    directory, archive/delete it, verify the immutable root claim was installed
+    atomically, then restart or reschedule the controller;
+12. create 100 PVCs;
+13. verify all PVCs bind;
+14. on one eligible node, read its live
+    `ServerType.Capabilities.MaxFileSystems` value and concurrently mount at
+    least that value plus five distinct logical PVCs backed by the single first
+    parent;
+15. verify independent write/read and sibling-path isolation for every logical
+    PVC in that same-node multiplex test;
+16. verify paginated regional `ListAttachments` and `Server.Filesystems` show
+    exactly one attachment for that parent on the node, and verify
+    `NodeGetInfo` omits `MaxVolumesPerNode`;
+17. run writer pods for at least 10 sampled PVCs;
+18. run reader pods for the sampled PVCs;
+19. mount the same PVC from two pods on two nodes and verify RWX behavior;
+20. mount one PVC read-only and verify writes are rejected;
+21. verify the node plugin pods do not receive Scaleway credentials;
+22. delete one PVC with `archive` policy and verify the archived directory;
+23. delete one PVC with `retain` policy and verify the retained directory and
+    driver-owned ownership record remain;
+24. delete one PVC with `delete` policy and verify only the intended directory
+    is removed while sibling directories remain;
+25. verify missing and mismatched driver-owned ownership records fail closed;
+26. verify a valid deleted handle with conclusively absent state returns
+    idempotent success without filesystem mutation, while an unavailable lookup
+    returns a retryable error and creates no tombstone;
+27. create a second parent File Storage file system;
+28. update Helm values to include the second parent;
+29. create more PVCs and verify distribution;
+30. verify placement skips a parent below actual free-space reserve;
+31. resize one parent File Storage file system through Scaleway;
+32. wait for metadata refresh;
+33. verify the driver observes the new size for new placements;
+34. record the real provider transition through `updating` to `available`,
+    verify no new placement or controller filesystem mutation uses that parent
+    while it is transient, and verify normal operation resumes after the fresh
+    authoritative `available` observation;
+35. drain a node and verify volumes still mount after rescheduling;
+36. perform a normal `Recreate` controller rollout, verify the old Pod writes a
+    graceful-release marker, the new Pod UID consumes it without manual
+    approval, and existing volumes still mount;
+37. restart the node plugin and verify existing volumes still mount;
+38. add or replace an eligible node and verify node compatibility,
+    commercial-type allowlist, live attach limit, and configuration-generation
+    revalidation;
+39. verify actual free-space metrics and alert examples are exposed;
+    verify attachment-inventory freshness, unknown-attachment, and
+    published-node-fence metrics are also exposed without unbounded labels;
+40. on a Kapsule cluster with the official Scaleway File Storage CSI installed
+    but idle, verify an extra manual or official attachment consumes a physical
+    slot, makes this driver fail closed before partial attachment, and that
+    removing the extra attachment restores readiness;
+41. verify the official StorageClass and this driver's StorageClass objects can
+    coexist without default-class, CSIDriver, RBAC, or sidecar conflicts, while
+    documenting that active same-node volume use is unsupported in v1;
+42. after the first public release exists, upgrade the Helm chart from the
+    previous released version to the candidate version while existing PVCs are
+    mounted; deliberately stagger the node rollout, verify create/publish remain
+    blocked while node configuration generations differ, then verify existing
+    handles, allocation records, ownership records, archive, retain, delete,
+    and new PVC creation work after convergence;
+43. run manual GC in dry-run mode, then execute GC through the active leader for
+    one archived or retained
+    test volume and verify capacity accounting is released without touching
+    sibling directories;
+44. interrupt GC after rename and after `gcRemoveStartedAt`, then verify safe
+    state-driven recovery;
+45. compact one old `Deleted` allocation and its matching ownership record in
+    place, then verify later `DeleteVolume` retries remain idempotent, name reuse
+    remains rejected, and checkpoint inventory includes both tombstones;
+46. inject interruption during an ownership-record replacement and verify the
+    previous or new complete generation remains valid;
+47. delete all test Pods and PVCs, wait for PV/VolumeAttachment removal and
+    normal unpublish/unstage, run `csi-admin uninstall prepare`, verify the node
+    DaemonSet stops before controller detach and every exact parent mount and
+    attachment is gone while retained data and durable metadata remain, and
+    only then run `helm uninstall`;
+48. clean up all resources created by the test run.
+
+The v1 release-candidate profile must additionally record these destructive
+recovery scenarios against the exact chart and every rendered image digest:
+
+- run the attach, mount, statfs, claim, publish, unpublish, and cleanup path on
+  every commercial Instance type advertised in the release support matrix and
+  record its live `MaxFileSystems`; a type without retained evidence is not in
+  the v1 allowlist;
+- attach a test parent to a tagged Instance outside the Kubernetes node
+  inventory and verify paginated cross-zone `ListAttachments` keeps the
+  controller non-serving until the attachment is removed;
+- on a fresh secondary test parent, terminate the controller after the real
+  attach succeeds but before owner creation, then verify the durable bootstrap
+  attempt and root temporary claim authorize only that attachment and complete
+  on the same runtime identity. Inject interruption around temporary-file fsync,
+  no-replace rename, and root-directory fsync. Prove that rollback is refused
+  while the recorded Instance is live, then stop or delete that disposable
+  Instance before the exact offline rollback;
+- race two isolated test installations from the same disposable controller
+  Instance and prove neither bootstrap attempt can detach or treat the other's
+  attachment as owned;
+- on a disposable real `virtiofs` parent, exercise symlink replacement,
+  traversal, and nested-mount deletion rejection and prove a sibling sentinel
+  outside the logical volume is unchanged; these tests are mandatory release
+  evidence in addition to fake-mounter unit tests;
+- retain provider attachment-state observations proving
+  `ControllerPublishVolume` returned only after `available`; ambiguous and
+  network-failure transitions remain deterministically covered by fake-SDK
+  fault injection because a cloud test must not simulate them unsafely;
+- hard-stop or delete the disposable node hosting the controller while test
+  workloads mounted on other nodes continue reading and writing. Verify a
+  successor controller cannot mutate through the old Lease or unknown
+  attachment state, complete the documented provider fence and one-time
+  approval, then verify the successor reconciles, existing volumes remain
+  usable, and a new PVC can be provisioned. Record the measured recovery time
+  and exact operator steps in the release evidence;
+- on a disposable tagged test node, create a published-node record, remove its
+  CSINode/Node identity while the Instance is still running, exercise unpublish,
+  and verify the fence remains; then stop and detach or delete that Instance and
+  verify deletion resumes only after provider fencing is conclusive;
+- delete a disposable Instance and record the real regional attachment cleanup
+  behavior. The controller must remain non-serving until fresh inventory reports
+  absence. If Scaleway cannot safely leave an orphan for testing, deterministic
+  fake-provider integration tests must inject the orphan state and prove the
+  documented support escalation path without performing an unsafe cloud action;
+- after draining and removing every reference to the second test parent, stop
+  the driver, run the offline unmount/detach procedure, prove no mount or
+  attachment remains, retain a schema-valid non-reserving `Deleted` allocation
+  tombstone and its compact ownership proof, remove the parent from values, and
+  restart successfully without reattaching or remounting that historical
+  parent;
+- create the documented quiesced checkpoint, remove and recreate the driver
+  namespace in the same cluster while preserving cluster-scoped test PVs and
+  parents, restore the fixed immutable checkpoint Secret, and verify the absent
+  or empty Lease keeps the controller non-serving. Recreate or scale down every
+  pre-recovery worker pool, prove fresh inventories contain no old or unknown
+  attachment, consume the checkpoint-bound one-time recovery approval, then
+  verify existing mount, new provisioning, archive/delete, and tombstone
+  behavior. Separately prove that fencing only the historical checkpoint holder,
+  an in-progress export, and a stale checkpoint with newer fake ownership state
+  all remain non-serving;
+- attempt the same restored metadata with a different synthetic cluster UID in
+  the integration harness and verify no parent mutation is authorized. V1 must
+  not perform a real cross-cluster takeover test because that operation is
+  explicitly unsupported.
+
+### 12.7 E2E Cleanup Contract
+
+Every e2e run must generate a unique run ID.
+
+Every created Scaleway resource must include:
+
+- a unique name prefix containing the run ID;
+- a unique tag containing the run ID;
+- the target project ID;
+- the target region.
+
+Cleanup must:
+
+- require explicit project ID, region, run ID, and non-empty name prefix;
+- support dry-run;
+- refuse broad selectors;
+- delete run-owned workload Pods and PVCs through normal Kubernetes workflows,
+  wait for PV deletion, VolumeAttachment removal, unpublish, and unstage, then
+  run and verify `csi-admin uninstall prepare` before deleting Helm-managed
+  RBAC, controller, or node resources;
+- never delete reused or pre-existing clusters/filesystems unless they were
+  created by the same run ID;
+- print an audit summary before deletion;
+- be idempotent and runnable separately after failed tests.
+
+### 12.8 CI
+
+GitHub Actions must run:
+
+- `go test ./...`;
+- `go test -race ./...` on Linux;
+- `go vet ./...`;
+- `gofmt` check;
+- `golangci-lint`;
+- CSI sanity tests;
+- privileged Linux mount-namespace tests that exercise the real path-safety,
+  symlink-swap, nested-mount, exact staging-source proof, stacked-mount
+  rejection, publish/unpublish locking, exact unmount, and CO-owned
+  staging-directory behavior without replacing those checks with a fake
+  mounter;
+- privileged Linux filesystem-crash tests that fail each required file and
+  parent-directory durability barrier and prove restart observes either the old
+  complete generation or the new complete generation, never guessed success;
+- Helm lint;
+- Helm template checks;
+- release-manifest check that rejects tag-only driver or sidecar images and
+  records every rendered digest;
+- required kind chart-install test with fake provider and mounter;
+- supported-envelope reconciliation and concurrency test;
+- packaged `csi-admin` protocol/version compatibility tests;
+- Docker build.
+
+Release CI must also verify that the exact supported Kubernetes/Kapsule, Go,
+CSI module, pinned `csi-test`, Scaleway SDK, commercial Instance type, and CSI
+sidecar version matrix is present and that every claimed tuple has matching
+automated or retained real-E2E evidence. Untested tuples must not be advertised
+as supported. The table lists deliberate tested combinations; it does not need
+to certify an unnecessary Cartesian product of every independent dimension.
+
+Release workflows must also publish:
+
+- versioned container images to the configured public registry;
+- versioned Helm charts to the configured public chart repository;
+- versioned `csi-admin` static binaries for documented operator platforms;
+- SHA-256 checksums, SBOMs, and build provenance for release artifacts.
+
+Scaleway e2e tests must be manual or scheduled behind repository secrets. They
+must not run on untrusted pull requests.
+
+A v1 release candidate must record a successful real Kapsule E2E result for the
+exact Git commit, chart package, driver image digest, and every CSI sidecar image
+digest being released. The result and cleanup audit must be retained as release
+artifacts. This does not require running cloud E2E on every untrusted pull
+request.
+
+## 13. Documentation Requirements
+
+### 13.1 README
+
+The README must include:
+
+- what the driver does;
+- what problem it solves;
+- architecture diagram;
+- installation prerequisites;
+- Scaleway IAM requirements;
+- parent File Storage pool creation commands;
+- Helm installation;
+- StorageClass examples;
+- PVC examples;
+- deletion policies;
+- resizing behavior;
+- limitations;
+- troubleshooting;
+- production checklist;
+- compatibility with Scaleway Kapsule and the official Scaleway CSI driver;
+- exact `FileStorageReadOnly` and `InstancesFullAccess` Project-scoped IAM
+  requirement and the current permission-granularity limitation;
+- current Scaleway File Storage status and qualified Instance families;
+- exact release-tested commercial Instance type allowlist and the requirement
+  for a positive live `MaxFileSystems` capability;
+- supported v1 scale envelope;
+- quiesced metadata checkpoint, fixed externally owned immutable checkpoint
+  Secret, and offline all-Instance fencing required for same-cluster recovery;
+- empty dedicated-parent bootstrap requirement and the absence of existing-data
+  adoption in v1;
+- atomic root claim path and interrupted-bootstrap recovery boundary;
+- production image-digest pinning, controller mutation limit, and graceful
+  shutdown timing;
+- dedicated privileged Pod Security namespace, fixed disjoint host paths, safe
+  uninstall command, and node configuration-generation rollout gate;
+- supported `SINGLE_NODE_WRITER` and `MULTI_NODE_MULTI_WRITER` access modes;
+- driver name stability and upgrade implications;
+- license and attribution.
+
+### 13.2 Limitations
+
+The README must clearly state:
+
+- not an official Scaleway product;
+- requires Kubernetes nodes that can attach/mount Scaleway File Storage;
+- designed primarily for Scaleway Kapsule/Instances;
+- requires a stable CSI driver name before any real workload deployment;
+- may coexist with an installed but idle official Scaleway File Storage CSI
+  driver, but active official or manual File Storage attachments on this
+  driver's workload nodes are unsupported in v1;
+- Kubernetes and Scaleway administrators are trusted not to import a configured
+  parent as a raw volume through another CSI driver or mount it manually; such
+  administrative access can bypass logical-volume isolation by design;
+- uses a small pool of parent File Storage file systems;
+- one parent is permanently claimed by one driver installation in v1;
+- each claim is bound to one Kubernetes `activeClusterUID`; v1 supports
+  same-cluster namespace recovery from a quiesced checkpoint but not arbitrary
+  online-backup consistency or cross-cluster takeover;
+- same-cluster missing-Lease recovery is an offline operation that requires all
+  pre-recovery cluster/controller Instances to be stopped or deleted and fresh
+  regional inventories to be clean; the historical checkpoint holder alone is
+  not a sufficient fence;
+- all schedulable Linux workload nodes must be compatible; narrow topology is a
+  future feature;
+- v1 runs one controller replica and intentionally has no automatic abnormal
+  failover; takeover after an uncleared holder requires external confirmation
+  and explicit operator approval;
+- normal controller replacement is automatic only after the previous holder
+  writes the exact graceful-release marker; a failed release remains an
+  abnormal takeover;
+- deleting, archiving, or garbage-collecting a volume remains blocked until all
+  persisted published nodes are normally unpublished or provider-fenced;
+- a `CreateVolumeRequest.name` is never reused within one installation;
+- one parent performance envelope is shared by all PVCs placed on that parent;
+- PVC size is a logical reservation in v1, not a hard filesystem quota;
+- a workload can fill a shared parent at runtime; operators must monitor parent
+  free space and isolate pools for untrusted tenants;
+- per-PVC `NodeGetVolumeStats` is not exposed in v1 because logical PVCs are
+  subdirectories without hard quotas;
+- logical PVC expansion is not supported in v1;
+- Scaleway parent shrink is unsupported; an unexpected observed decrease enters
+  `critical-size-regression` and accepts no new placement until a fresh
+  authoritative observation reaches the previous accepted size;
+- pool parent count must respect node-level File Storage attach limits;
+- online parent removal and live-node stale detach are unsupported in v1;
+- CSI mount flags and topology requirements are unsupported, and filesystem
+  type is limited to empty or `virtiofs`;
+- access modes other than `SINGLE_NODE_WRITER` and
+  `MULTI_NODE_MULTI_WRITER`, including reader-only capability modes, are
+  unsupported in v1; pod-level read-only publishing remains supported;
+- parent file systems are not automatically created or deleted in v1;
+- an unclaimed parent must be dedicated and empty; adopting existing data or an
+  existing directory tree is not supported in v1;
+
+The README must state that `archive` protects against accidental PVC deletion
+but is not an independent backup: archived data remains on the same parent File
+Storage failure domain. User-data backup and restore remain operator/platform
+responsibilities outside this CSI driver's v1 scope.
+
+### 13.3 Operations Guide
+
+The operations guide must document:
+
+- why v1 runs one controller replica and how future HA must be introduced;
+- the exclusive ownership rule for each parent filesystem;
+- parent-global owner record and `installationID` bootstrap, backup, restore,
+  initial claim, uninstall, and reinstall behavior;
+- durable bootstrap-attempt inspection, exact resume, and exact rollback after
+  interruption during the first parent claim;
+- root temporary-claim inspection and crash-safe no-replace installation of
+  `/.sfs-subdir-csi-owner.json`;
+- controller-local checkpoint prepare/resume, the immutable checkpoint Secret,
+  explicit RPO, same-cluster namespace recovery, stale-checkpoint failure,
+  all-pre-recovery-Instance fencing, missing-Lease approval, and the explicit
+  absence of cross-cluster recovery in v1;
+- controller leadership, graceful-release marker lifecycle, abnormal takeover
+  approval, and safe upgrade behavior;
+- exact creation, expiry, consumption audit, and post-success deletion of the
+  immutable `sfs-subdir-controller-approval` Secret; the controller never
+  creates or modifies that Secret;
+- exact creation, digest verification, restore use, and post-success deletion
+  of the immutable `sfs-subdir-checkpoint` Secret; Helm and the controller never
+  create or modify it;
+- shutdown behavior, including immediate unready state, bounded cancellation,
+  the no-marker abnormal path, controller-node failure recovery, measured RTO,
+  and the required pod grace/progress margins;
+- homogeneous all-workload-node scheduling contract and the minimum two Ready
+  controller candidates;
+- adding a new parent file system to the pool;
+- growing a parent file system and observing its complete provider-status
+  transition;
+- diagnosing and recovering a defensive `critical-size-regression` condition
+  without disrupting existing mounts;
+- moving a parent file system from `active` to `draining`;
+- keeping a draining parent configured during normal operation and performing
+  the offline unmount/detach procedure before exceptional removal;
+- recovering a stale published node by stopping and detaching or deleting the
+  corresponding Scaleway Instance before retrying deletion;
+- the closed Scaleway Instance state matrix and the support-escalation path for
+  a regional attachment that outlives a deleted Instance;
+- garbage-collecting archived or retained data;
+- compacting old `Deleted` ConfigMaps in place after the configured retention
+  window without deleting the permanent tombstone;
+- recovering from a failed node mount;
+- recovering from accidental PVC deletion when `archive` is enabled;
+- recovering from missing or mismatched driver-owned ownership records;
+- rotating Scaleway credentials;
+- upgrading the Helm release with the preflight command, N/N-1 mixed-version
+  rule, node configuration-generation convergence gate, and offline procedure
+  for incompatible migrations;
+- running `csi-admin uninstall prepare`, verifying its audit result, and only
+  then running `helm uninstall`;
+- downloading and checksum-verifying the version-compatible `csi-admin`
+  release binary;
+- preparing the dedicated namespace Pod Security labels and verifying fixed,
+  disjoint node parent and kubelet host paths;
+- checking pool capacity;
+- integrating the opt-in sample alerts for controller readiness/leadership,
+  stale reconciliation/inventory, unknown attachments, fences, node coverage,
+  generation mismatch, mount errors, parent status, size regression, and free
+  space.
+
+### 13.4 Troubleshooting Guide
+
+Include common failure modes:
+
+- PVC stuck Pending;
+- parent File Storage not found;
+- Scaleway API permission denied;
+- attach limit reached;
+- mount failed;
+- directory permission mismatch;
+- pool full;
+- actual parent free space below reserve;
+- parent metadata refresh failed;
+- parent File Storage status is transient, `error`, unknown, or unreadable;
+- driver-owned ownership record missing or mismatched;
+- incompatible node or parent attach limit reached;
+- storage-eligible node set became invalid after node churn;
+- active official-CSI or manual File Storage attachment consumes a required
+  physical slot;
+- regional attachment inventory contains an unknown or orphaned Instance;
+- parent claim `activeClusterUID` differs from the current cluster;
+- first parent claim is blocked by a missing, mismatched, or ambiguous
+  bootstrap attempt;
+- root parent claim installation is blocked by a foreign temporary claim or a
+  filesystem that cannot provide the required crash-safe no-replace rename;
+- graceful controller release marker is missing, invalid, or already consumed;
+- controller waits for an abnormal takeover approval after an uncleared holder;
+- controller waits for missing-Lease recovery approval after namespace restore;
+- missing-Lease recovery is blocked because an old or unknown cluster Instance
+  or parent attachment is still visible;
+- restored checkpoint is incomplete, in progress, or older than parent
+  ownership state;
+- restored checkpoint parent ownership count or digest differs because a
+  detailed or compact tombstone is missing, extra, or changed;
+- deletion is blocked by a persisted published node that has not been
+  provider-fenced;
+- CSI sidecar timeout is shorter than the attachment readiness deadline;
+- an eligible node reports an old or mismatched configuration generation;
+- fewer than two Ready compatible controller candidates are available;
+- parent size observation regressed below the previous accepted value;
+- the node's commercial Instance type is not release-qualified or its live
+  `MaxFileSystems` capability is zero or absent;
+- node parent-mount and kubelet paths overlap or resolve through a symlink into
+  a protected kubelet/plugin tree;
+- the dedicated namespace does not enforce the required privileged Pod
+  Security level;
+- read-only mount requested but target is writable;
+- `NodePublishVolume` target already exists with a different source,
+  capability, filesystem type, or read-only mode;
+- controller termination deadline elapsed without a graceful-release marker;
+- safe uninstall is blocked by a live PV, attachment, published-node fence,
+  stage, target, parent mount, or provider attachment;
+- `csi-admin` protocol version is incompatible with the running driver;
+- release values contain a tag-only or malformed image reference;
+- node reschedule issue.
+
+## 14. Release Plan
+
+### 14.1 v0.1.0
+
+Development preview.
+
+Required:
+
+- basic CSI Identity/Controller/Node;
+- one pool;
+- one or more explicit parent filesystem IDs;
+- normative Scaleway provider appendix implemented against the pinned SDK and
+  validated against official driver behavior;
+- dynamic PVC provisioning;
+- archive delete policy;
+- driver-owned ownership record;
+- parent-global owner record with production identity Secret;
+- allocation state machine;
+- controller leadership coordination enabled and charted with Kubernetes Lease
+  RBAC;
+- Helm chart with immutable image digests, explicit security contexts, and
+  `Recreate` controller rollout strategy;
+- unit tests;
+- fake CSI sanity tests;
+- Helm template tests for the critical production defaults;
+- public artifact identity decided, even if the release is marked preview;
+- one manual real Scaleway smoke test before publishing the preview:
+  install chart, create one PVC, write/read from one pod, delete with archive,
+  and clean up all tagged resources.
+
+### 14.2 v0.2.0
+
+Operational preview.
+
+Required:
+
+- multiple pools;
+- metrics;
+- better failure messages;
+- e2e scripts;
+- parent metadata refresh;
+- attachment inventory and attach-budget preflight;
+- logical capacity accounting;
+- actual parent free-space metrics;
+- active/draining parent lifecycle;
+- safe path deletion tests, including symlink replacement and different-device
+  entries;
+- homogeneous all-workload-node scheduling contract documented and tested;
+- documentation complete enough for external users;
+- coexistence test profile with the official Scaleway File Storage CSI driver;
+- node compatibility preflight tested on a real Kapsule node pool.
+
+### 14.3 v1.0.0
+
+Production-ready release.
+
+Required:
+
+- real Scaleway e2e validated;
+- provider appendix validated, including IAM permission sets, Instance
+  attachment inventory and polling, stale attachment cleanup, and product
+  maturity assumptions;
+- node drain/reschedule tested;
+- multi-node RWX tested;
+- parent upward resize and complete File Storage status matrix tested;
+- archive/delete/retain tested on real mounted storage;
+- manual GC tested through the active leader on real archived or
+  retained data;
+- driver-owned ownership record failure cases tested;
+- parent-global owner record, `installationID`, duplicate-parent, and
+  cross-installation claim failures tested;
+- same-cluster `activeClusterUID`, missing-Lease recovery approval, and rejected
+  cross-cluster identity tested;
+- normal different-Pod handoff, failed graceful release, and preservation of
+  live Lease fields across Helm operations tested;
+- durable first-claim bootstrap resume and exact rollback tested;
+- atomic fixed root claim tested across temporary-file fsync, no-replace rename,
+  root fsync, stale-attempt, and competing-attempt crash points on real
+  Scaleway `virtiofs`;
+- two-installation same-Instance bootstrap isolation and live-Instance rollback
+  refusal tested;
+- the closed allocation/ownership transition table, exact predecessor repair,
+  normal detailed-Deleted/compact-ownership pairing, and conflicting operation
+  IDs tested at every dual-write crash point;
+- CSI-compatible `CreateVolume` capacity and parameter replay tested;
+- conclusive-absence versus unavailable `DeleteVolume` behavior tested;
+- in-use `DeleteVolume` rejection tested with VolumeAttachments;
+- normal, forced, and empty-node-ID unpublish semantics plus stale
+  published-node fencing tested before delete, archive, and GC;
+- conservative allocation/ownership union recovery tested for every
+  publish/unpublish dual-write crash point;
+- compact handle and mapping-hash compatibility tested;
+- old allocation, ownership, parent-global owner, and PV compatibility fixtures
+  tested;
+- controller restart/reschedule tested;
+- regional attachment inventory and unknown/orphaned Instance rejection tested;
+- controller security context tested on real Kapsule nodes with `virtiofs`
+  mount, statfs, create, archive, delete, and restart flows;
+- in-place permanent Deleted tombstone compaction tested with later
+  `DeleteVolume` retry and rejected name reuse;
+- permanent compact ownership tombstones, allocation reconstruction, and final
+  GC dual-write crash recovery tested;
+- atomic metadata crash recovery and abnormal controller takeover tested;
+- hard controller-node failure tested on real Kapsule: existing remote mounts
+  continue, an unfenced successor remains blocked, approved recovery succeeds,
+  and measured recovery time is retained;
+- quiesced namespace metadata checkpoint, stale/in-progress rejection, and
+  parent ownership inventory count/digest rejection tested;
+- same-cluster namespace restore tested on real Kapsule with the exact release
+  chart and every rendered image digest, including checkpoint-bound approval,
+  all-pre-recovery-Instance offline fencing, and rejection of fencing only the
+  historical checkpoint holder;
+- explicit provisioner/attacher timeout and split readiness/liveness behavior
+  tested;
+- explicit sidecar worker counts and the process-wide ten-mutation limit tested
+  under cancellation and burst load;
+- graceful shutdown deadline, pod termination grace, Deployment progress
+  deadline, and no-marker abnormal path tested;
+- exact Node publish target creation, conflict, rollback, and unpublish cleanup
+  behavior tested;
+- CO-owned Node stage directory behavior, supported access modes, immutable
+  context validation, and RPC-specific CSI status semantics tested against the
+  pinned CSI conformance suite;
+- CSI `volume_context` 128-byte and 4-KiB boundaries tested;
+- namespace-scoped node-plugin Pod discovery RBAC tested without Pod writes or
+  cross-namespace reads;
+- supported scale envelope and default controller resource limits validated;
+- `go test -race ./...` and privileged real Linux mount-namespace path-safety
+  tests pass;
+- real Node mount-source/stacking checks and filesystem durability-barrier
+  failure tests pass;
+- every advertised commercial Instance type has retained real-E2E evidence and
+  a positive live `MaxFileSystems`; unqualified types remain rejected;
+- real parent growth and fake-provider size-regression behavior tested;
+- fixed disjoint host paths and dedicated privileged Pod Security namespace
+  preflight tested on real Kapsule;
+- no-hard-quota runtime risk documented with free-space alerts;
+- credential rotation documented;
+- upgrade preflight, N/N-1 mixed-version compatibility, node configuration-
+  generation convergence, and offline incompatible migration documented and
+  tested;
+- safe uninstall preflight, exact unmount/detach, Helm removal, and reinstall
+  behavior documented and tested;
+- checksum-verified versioned `csi-admin` binaries, SBOM, provenance, and admin
+  protocol compatibility are published and used by release tests;
+- deletion safety audited;
+- no known data loss bugs;
+- no credentials in rendered manifests;
+- every production driver and sidecar image is rendered by immutable digest;
+- more logical PVCs than the physical `MaxFileSystems` value are concurrently
+  mounted on one node through exactly one parent attachment;
+- stable driver name;
+- stable Helm values contract;
+- provider maturity gate passed, or explicit documented operator acceptance for
+  beta/preview Scaleway File Storage status.
+
+## 15. Acceptance Criteria
+
+The development is complete only when all criteria below are satisfied.
+
+### 15.1 Functional
+
+- A user can install the driver with Helm.
+- A user can configure one or more existing Scaleway File Storage parents.
+- A user can create many RWX PVCs from one StorageClass.
+- Each PVC maps to a unique subdirectory.
+- Each logical volume has a valid driver-owned ownership record outside the
+  user-mounted data directory.
+- Multiple PVCs can share the same parent File Storage.
+- One node can mount more distinct logical PVCs than its physical
+  `MaxFileSystems` limit while using exactly one parent attachment.
+- The same PVC can be mounted by multiple pods.
+- The same PVC can be mounted across multiple nodes.
+- Read-only mounts are published read-only.
+- Deleting a PVC archives data by default.
+- Parent resize is detected without reinstalling the driver.
+- An unexpected parent-size regression becomes critical and receives no new
+  placement while existing mounts remain untouched; the product never presents
+  Scaleway shrink as supported.
+- Existing PVCs continue to mount after driver pod restart.
+- Existing PVCs continue to mount after node rescheduling.
+- Logical PVC expansion is disabled in v1.
+- The v1 controller runs as one replica and rejects accidental multi-replica
+  configuration.
+- Production preflight requires at least two Ready compatible controller
+  candidate nodes and the chart does not pin the controller to one node.
+- The controller holds its Kubernetes Lease before any mutating operation.
+- The controller Lease uses the fixed non-configurable v1 name
+  `scaleway-sfs-subdir-csi-controller`.
+- The driver accepts only `SINGLE_NODE_WRITER` and
+  `MULTI_NODE_MULTI_WRITER` in v1 and reports unsupported capabilities with the
+  exact CSI response semantics.
+- Every schedulable Linux workload node passes compatibility, attachment-budget,
+  release-tested commercial-type, live `MaxFileSystems`, node-plugin readiness,
+  CSINode registration, and configuration-generation preflight.
+- Every configured parent has a complete regional attachment inventory that
+  contains only Instances authorized for the active installation.
+- Abnormal takeover by a new Pod UID requires an exact one-time immutable
+  operator approval Secret after the previous process or Instance is confirmed
+  stopped and provider attachment fencing succeeds.
+- Normal replacement by a new Pod UID consumes a valid graceful-release marker
+  exactly once and does not require operator approval.
+- Same-cluster namespace recovery requires explicit approval when durable state
+  exists but the Lease is missing, and automatic restore accepts only a
+  complete quiesced checkpoint after every pre-recovery Instance is offline and
+  fresh attachment inventories are clean; a different cluster UID remains
+  blocked.
+- The controller limits all mutations to the configured maximum of 10 and
+  performs the bounded graceful-shutdown protocol during rollout.
+- An operator can complete the audited safe-uninstall workflow before Helm
+  removes RBAC or Pods, without deleting durable metadata or parent data.
+
+### 15.2 Safety
+
+- The driver never deletes outside the configured base path.
+- The driver refuses destructive operations without a matching driver-owned
+  ownership record.
+- The driver refuses to operate when exclusive parent ownership cannot be
+  proven.
+- The driver refuses to operate when the parent-global owner record has a mismatched
+  `installationID`.
+- The driver refuses to mutate parents when `activeClusterUID` differs from the
+  current cluster.
+- The volume handle is compact, deterministic, bounded to 128 bytes or less,
+  and validated against the persisted mapping hash.
+- Every `volume_context` key/value and complete map respects the CSI 128-byte
+  and 4-KiB limits before any persistent or filesystem mutation.
+- Every immutable `volume_context` field is compared with authoritative state
+  before controller attach/fencing or node filesystem work.
+- `CreateVolume` is atomic and idempotent for repeated
+  `CreateVolumeRequest.name` values.
+- Compatible CSI capacity-range replays return the existing volume; incompatible
+  immutable requests return `AlreadyExists`.
+- A compatible `Ready` replay returns the existing mapping even when provider
+  refresh, current placement, or new capacity is unavailable.
+- `CreateVolume` does not reuse terminal tombstones as active mappings.
+- `DeleteVolume` is crash-consistent across archive, delete, retain, and retry
+  paths.
+- A valid driver-owned `DeleteVolume` request with conclusively absent durable
+  state returns success without guessing or touching the filesystem; unavailable
+  lookups never masquerade as absence.
+- `DeleteVolume` refuses to mutate a volume with a remaining VolumeAttachment.
+- Delete, archive, and GC refuse to mutate a volume with an unresolved
+  `publishedNodeIDs` entry.
+- Forced or ambiguous unpublish never clears a node fence without conclusive
+  normal-node evidence or provider fencing; an empty `node_id` safely evaluates
+  every persisted node.
+- Terminal allocation records remain durable after `DeleteVolume`.
+- Old `Deleted` records may be compacted in place, but the permanent per-volume
+  ConfigMap is never removed in v1.
+- Matching compact ownership tombstones also remain permanently on their
+  parent; GC and checkpoint restore preserve agreement between both proofs.
+- Detailed, compact, and deleted-unknown tombstone schemas are unambiguous, and
+  valid non-reserving tombstones do not prevent a safely decommissioned parent
+  from remaining absent from configuration.
+- Manual GC is explicit, idempotent, dry-run capable, and refuses unsafe paths.
+- Mutating GC only runs through the active leader.
+- GC returns success only after allocation and ownership records contain the
+  same terminal operation outcome.
+- Allocation and ownership records follow one closed transition table; only an
+  exact one-step predecessor from the same operation may be repaired, while
+  conflicting evidence remains non-serving.
+- Parent-global and ownership metadata writes are atomic and crash-durable.
+- Logical-directory creation, rename, removal, and bootstrap cleanup become
+  complete only after their required filesystem durability barriers succeed.
+- The first parent claim is crash-resumable only through its exact durable
+  bootstrap attempt; unrelated attachments are never treated as owned or
+  detached, and rollback never detaches from a live Instance.
+- The fixed root parent claim is installed by a crash-safe no-replace operation;
+  a partial, stale, or competing temporary claim is never adopted.
+- The driver never logs secrets.
+- Scaleway credentials are not mounted into the node plugin.
+- Controller RBAC can read labeled node-plugin Pods only in the driver namespace
+  and cannot mutate Pods.
+- Controller RBAC has exact get-only access to the externally owned immutable
+  approval and checkpoint Secrets and cannot create, modify, list, watch, or
+  delete them.
+- Controller and node-plugin probes expose independent cached readiness and
+  shallow liveness contracts without circular dependencies.
+- Invalid StorageClass parameters fail clearly.
+- Unsupported filesystem types, mount flags, and topology requirements fail
+  clearly and never change shared-parent mount options.
+- A conflicting existing Node publish target returns `AlreadyExists` and is
+  never remounted in place; target creation, rollback, and cleanup are bounded
+  to the validated kubelet path.
+- Node publish proves the exact staging/source/parent mount graph, and node
+  unpublish/unstage never unmount a foreign, aliased, or stacked mount.
+- Node stage validates but never creates or removes the CO-owned staging
+  directory; node publish owns only its validated target directory.
+- Fixed node parent and kubelet paths are disjoint after normalization and
+  symlink resolution, and the chart requires the dedicated privileged Pod
+  Security namespace explicitly.
+- Unknown, transitional, locked, or unreadable Scaleway Instance states never
+  count as a safe process fence, and a deleted Instance does not hide a regional
+  orphan attachment.
+- Missing parent file systems fail clearly.
+- Pool full errors are clear and actionable.
+- Actual parent free-space reserve errors are clear and actionable.
+- An unexpected observed parent-size regression fails closed for new placement
+  without tearing down existing mounts; Scaleway shrink is never advertised or
+  tested as a supported operation.
+- At the default overcommit ratio, accepted logical reservations exclude the
+  configured byte/percentage safety reserve.
+- Repeated CSI calls are idempotent.
+- Shared-parent capacity is monitored and alerted, because v1 PVC sizes are
+  logical reservations rather than hard filesystem quotas.
+
+### 15.3 Open Source Quality
+
+- MIT license present.
+- README usable by someone outside URLab.
+- No private URLab paths or names in code.
+- No private registry references.
+- Public chart and image references are versioned and installable.
+- Versioned `csi-admin` binaries are public, checksum-verifiable, and protocol
+  compatible with the matching release.
+- Production chart images are pinned by immutable digest.
+- No hardcoded production domains.
+- CI passes.
+- E2E scripts are documented and cleanup-safe.
+
+## 16. Guidance for the Development Agent
+
+Before writing code:
+
+1. Read the normative Scaleway provider appendix in section 6.6 and preserve its
+   API, IAM, node identity, attachment polling, mount, and coexistence contracts.
+2. Read the official Scaleway File Storage CSI driver at the pinned reference
+   commit and record any intentional divergence in code comments and tests.
+3. Read the Kubernetes CSI developer documentation.
+4. Read `csi-driver-nfs` and `nfs-subdir-external-provisioner` only for the
+   subdirectory provisioning pattern.
+5. Read the Scaleway File Storage documentation for Kapsule, mount, resize,
+   and Instance selection constraints.
+6. Do not copy private URLab code.
+7. Do not use private product-specific names in the public codebase.
+8. Do not depend on undocumented NFS behavior.
+
+Implementation approach:
+
+1. Scaffold the Go module, Dockerfile, Makefile, Helm chart, and CI first.
+2. Implement pure packages first: handle parsing, allocation records,
+   ownership records, path safety, and pool accounting.
+3. Add fake Scaleway and fake mounter clients.
+4. Implement CSI Identity.
+5. Implement Controller create/delete with fake clients.
+6. Implement Node stage/publish with fake mounter.
+7. Add CSI sanity tests.
+8. Add Helm chart tests.
+9. Implement real Scaleway client integration.
+10. Run a minimal real Scaleway smoke test before adding broader operational
+    features.
+11. Run the full e2e suite on a real Scaleway test project before any
+    production-ready release.
+
+Engineering principles:
+
+- keep the code simple;
+- keep files focused;
+- do not introduce a CRD unless the PV-based accounting model proves
+  insufficient;
+- use allocation records as the durable source of truth; use Kubernetes PVs and
+  CSI volume handles as projections and recovery inputs only;
+- prefer explicit failures over best-effort silent behavior;
+- document every non-obvious storage safety decision in code comments;
+- do not ship without e2e evidence on a real Kapsule cluster.
