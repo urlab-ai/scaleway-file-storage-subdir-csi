@@ -11,9 +11,9 @@ import (
 	"net"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/internal/strictjson"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
 )
 
 const (

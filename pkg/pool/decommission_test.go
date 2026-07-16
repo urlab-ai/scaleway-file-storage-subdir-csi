@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
@@ -14,13 +14,13 @@ const (
 
 func decommissionCompactPair(t *testing.T) (*volume.CompactDeletedAllocationRecord, *volume.CompactDeletedOwnershipRecord) {
 	t.Helper()
-	logicalID, err := volume.LogicalVolumeID("sfs-subdir.csi.example.com", "pvc-decommissioned")
+	logicalID, err := volume.LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "pvc-decommissioned")
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}
 	ownership, err := (volume.CompactDeletedOwnershipRecord{
 		SchemaVersion: volume.SchemaVersionV1, RecordKind: volume.OwnershipRecordCompactDeleted,
-		Revision: 4, DriverName: "sfs-subdir.csi.example.com",
+		Revision: 4, DriverName: "file-storage-subdir.csi.urlab.ai",
 		InstallationID:   "22222222-2222-4222-8222-222222222222",
 		ActiveClusterUID: "33333333-3333-4333-8333-333333333333",
 		VolumeHandleHash: "vh-" + strings.Repeat("a", 32), LogicalVolumeID: logicalID,

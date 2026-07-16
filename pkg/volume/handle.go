@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
 )
 
 const handlePrefix = "sfs1"

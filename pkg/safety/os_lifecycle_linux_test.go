@@ -199,7 +199,11 @@ func runPrivilegedOSDurableLateNestedMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenOSDurableFS() error = %v", err)
 	}
-	defer filesystem.Close()
+	defer func() {
+		if err := filesystem.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
 
 	mounted := false
 	mountAfterProof := func(operation string) {

@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"scaleway-sfs-subdir-csi/internal/admincli"
-	"scaleway-sfs-subdir-csi/internal/version"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/admincli"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version"
 )
 
 func main() {

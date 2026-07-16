@@ -7,7 +7,7 @@ import (
 	"path"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const parentLayoutMode uint32 = 0o700

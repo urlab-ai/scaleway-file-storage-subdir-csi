@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"maps"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // ControllerUninstallWorkflow owns only the controller-local phases. The

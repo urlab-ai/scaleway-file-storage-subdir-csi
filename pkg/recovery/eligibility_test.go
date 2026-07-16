@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
-	eligibilityDriver       = "sfs-subdir.csi.example.com"
+	eligibilityDriver       = "file-storage-subdir.csi.urlab.ai"
 	eligibilityInstallation = "11111111-1111-4111-8111-111111111111"
 	eligibilityCluster      = "22222222-2222-4222-8222-222222222222"
 	eligibilityParent       = "33333333-3333-4333-8333-333333333333"

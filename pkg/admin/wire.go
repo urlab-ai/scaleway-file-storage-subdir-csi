@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"scaleway-sfs-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
 
 const (

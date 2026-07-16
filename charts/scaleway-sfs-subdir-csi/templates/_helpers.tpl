@@ -135,7 +135,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- if contains "\"requiredDuringSchedulingIgnoredDuringExecution\":" $nodeAffinityJSON }}{{ fail "production node affinity must not narrow the all-schedulable-Linux-node set" }}{{ end -}}
 {{- $controllerPlacementJSON := dict "nodeSelector" $v.controller.nodeSelector "affinity" $v.controller.affinity | toJson -}}
 {{- if contains "kubernetes.io/hostname" $controllerPlacementJSON }}{{ fail "production controller placement must not pin kubernetes.io/hostname" }}{{ end -}}
-{{- if eq $v.driver.name "sfs-subdir.csi.example.com" }}{{ fail "production requires a final globally unique CSI driver name" }}{{ end -}}
+{{- if or (hasSuffix ".example.com" $v.driver.name) (hasSuffix ".example.org" $v.driver.name) }}{{ fail "production requires a final globally unique CSI driver name" }}{{ end -}}
 {{- if or (eq $v.scaleway.projectId "00000000-0000-4000-8000-000000000000") (hasPrefix "00000000-0000-4000-8000-" (first (keys $parentIDs | sortAlpha))) }}{{ fail "production values contain synthetic provider identifiers" }}{{ end -}}
 {{- if or $v.installation.generateForDevelopmentOnly (not $v.scheduling.allSchedulableLinuxNodesAreEligible) (not $v.scheduling.requireHomogeneousEligibleNodes) $v.scheduling.skipNodePreflightForDevelopmentOnly }}{{ fail "production requires external identity and homogeneous all-Linux-node preflight" }}{{ end -}}
 {{- if ne $v.node.parentMountRoot "/var/lib/scaleway-sfs-subdir-csi/parents" }}{{ fail "production node.parentMountRoot is fixed" }}{{ end -}}

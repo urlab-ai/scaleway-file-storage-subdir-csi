@@ -6,7 +6,7 @@ import (
 	"maps"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func validCheckpointExportPackage(t *testing.T) CheckpointExportPackage {

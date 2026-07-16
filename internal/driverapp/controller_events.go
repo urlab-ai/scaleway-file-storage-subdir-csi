@@ -11,9 +11,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
 )
 
 const maxParentEventMessageBytes = 1024

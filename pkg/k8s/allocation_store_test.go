@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
-	testDriverName     = "sfs-subdir.csi.example.com"
+	testDriverName     = "file-storage-subdir.csi.urlab.ai"
 	testInstallationID = "11111111-1111-4111-8111-111111111111"
 	testClusterUID     = "22222222-2222-4222-8222-222222222222"
 )

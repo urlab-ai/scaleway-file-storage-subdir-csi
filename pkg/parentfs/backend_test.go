@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const parentFSTimestamp = "2026-07-13T12:00:00Z"
@@ -95,7 +95,7 @@ func TestOwnershipOperationIDIsStablePerLogicalRevision(t *testing.T) {
 func parentFSRecords(t *testing.T) (*volume.DetailedAllocationRecord, *volume.DetailedOwnershipRecord) {
 	t.Helper()
 	const (
-		driverName  = "sfs-subdir.csi.example.com"
+		driverName  = "file-storage-subdir.csi.urlab.ai"
 		requestName = "pvc-parentfs"
 	)
 	logicalID, err := volume.LogicalVolumeID(driverName, requestName)

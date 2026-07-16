@@ -3,7 +3,7 @@ package recovery
 import (
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 )
 
 const checkpointDataKey = "checkpoint.json"

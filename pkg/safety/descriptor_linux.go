@@ -71,12 +71,12 @@ func openDirectoryBeneathNoFollow(root *os.File, rootPath, relative string, fina
 	return os.NewFile(uintptr(current), path.Join(rootPath, relative)), nil
 }
 
-func requireTrustedRootPath(root *os.File, rootPath string) error {
+func requireTrustedRootPath(root *os.File, rootPath string) (returnErr error) {
 	current, err := openTrustedRoot(rootPath)
 	if err != nil {
 		return fmt.Errorf("reopen trusted directory root %q: %w", rootPath, err)
 	}
-	defer current.Close()
+	defer func() { returnErr = errors.Join(returnErr, current.Close()) }()
 	expectedInfo, err := root.Stat()
 	if err != nil {
 		return err
@@ -91,7 +91,7 @@ func requireTrustedRootPath(root *os.File, rootPath string) error {
 	return nil
 }
 
-func ensureDirectoryBeneathNoFollow(root *os.File, rootPath, relative string, mode fs.FileMode, finalSameMount bool) (*os.File, bool, error) {
+func ensureDirectoryBeneathNoFollow(root *os.File, rootPath, relative string, mode fs.FileMode, finalSameMount bool) (returnFile *os.File, created bool, returnErr error) {
 	parent, leaf := path.Split(relative)
 	parent = strings.TrimSuffix(parent, "/")
 	if leaf == "" {
@@ -101,8 +101,15 @@ func ensureDirectoryBeneathNoFollow(root *os.File, rootPath, relative string, mo
 	if err != nil {
 		return nil, false, err
 	}
-	defer parentFile.Close()
-	created := false
+	defer func() {
+		if closeErr := parentFile.Close(); closeErr != nil {
+			returnErr = errors.Join(returnErr, closeErr)
+			if returnFile != nil {
+				returnErr = errors.Join(returnErr, returnFile.Close())
+				returnFile = nil
+			}
+		}
+	}()
 	if err := unix.Mkdirat(int(parentFile.Fd()), leaf, uint32(mode.Perm())); err != nil {
 		if !errors.Is(err, unix.EEXIST) {
 			return nil, false, err
@@ -110,14 +117,14 @@ func ensureDirectoryBeneathNoFollow(root *os.File, rootPath, relative string, mo
 	} else {
 		created = true
 	}
-	file, err := openDirectoryBeneathNoFollow(root, rootPath, relative, finalSameMount)
+	returnFile, err = openDirectoryBeneathNoFollow(root, rootPath, relative, finalSameMount)
 	if err != nil {
 		return nil, created, err
 	}
-	return file, created, nil
+	return returnFile, created, nil
 }
 
-func removeDirectoryBeneathNoFollowExpected(root *os.File, rootPath, relative string, expected *os.File) error {
+func removeDirectoryBeneathNoFollowExpected(root *os.File, rootPath, relative string, expected *os.File) (returnErr error) {
 	parent, leaf := path.Split(relative)
 	parent = strings.TrimSuffix(parent, "/")
 	if leaf == "" {
@@ -127,12 +134,12 @@ func removeDirectoryBeneathNoFollowExpected(root *os.File, rootPath, relative st
 	if err != nil {
 		return err
 	}
-	defer parentFile.Close()
+	defer func() { returnErr = errors.Join(returnErr, parentFile.Close()) }()
 	fd, err := unix.Openat(int(parentFile.Fd()), leaf, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(fd)) }()
 	var opened, named unix.Stat_t
 	if err := unix.Fstat(fd, &opened); err != nil {
 		return err

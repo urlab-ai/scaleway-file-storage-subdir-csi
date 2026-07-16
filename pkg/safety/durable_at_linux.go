@@ -38,12 +38,12 @@ func openDurableEntryAt(parent *os.File, name string, requireDirectory bool) (*o
 	return file, nil
 }
 
-func linkRegularFileNoReplaceAt(parent *os.File, source, destination string) error {
+func linkRegularFileNoReplaceAt(parent *os.File, source, destination string) (returnErr error) {
 	sourceFD, err := unix.Openat(int(parent.Fd()), source, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer unix.Close(sourceFD)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(sourceFD)) }()
 	var stat unix.Stat_t
 	if err := unix.Fstat(sourceFD, &stat); err != nil {
 		return err

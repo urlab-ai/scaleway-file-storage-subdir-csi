@@ -7,8 +7,8 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 
-	"scaleway-sfs-subdir-csi/pkg/observability"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type csiLogContext struct {

@@ -8,8 +8,8 @@ import (
 	"path"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // OSNodeAuthorizationFilesystem reads authenticated metadata and applies only

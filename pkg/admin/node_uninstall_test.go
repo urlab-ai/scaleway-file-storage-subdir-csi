@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 )
 
 const nodeUninstallRoot = "/var/lib/scaleway-sfs-subdir-csi/parents"
@@ -124,7 +124,7 @@ func TestNodeUninstallInspectIsReadOnlyAndReportsChildTargets(t *testing.T) {
 	if err := mounter.MountParent(context.Background(), uninstallParentA, nodeUninstallRoot+"/"+uninstallParentA); err != nil {
 		t.Fatalf("MountParent() error = %v", err)
 	}
-	stage := "/var/lib/kubelet/plugins/kubernetes.io/csi/sfs-subdir.csi.example.com/volume/stage"
+	stage := "/var/lib/kubelet/plugins/kubernetes.io/csi/file-storage-subdir.csi.urlab.ai/volume/stage"
 	publish := "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/volume/mount"
 	mounter.Seed(mount.Entry{Kind: mount.KindPublish, Target: publish, ParentFilesystemID: uninstallParentA})
 	mounter.Seed(mount.Entry{Kind: mount.KindStage, Target: stage, ParentFilesystemID: uninstallParentA})

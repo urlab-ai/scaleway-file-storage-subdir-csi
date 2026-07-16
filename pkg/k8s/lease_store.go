@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 )
 
 const ControllerLeaseName = "scaleway-sfs-subdir-csi-controller"

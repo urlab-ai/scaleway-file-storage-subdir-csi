@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	inventoryDriver  = "sfs-subdir.csi.example.com"
+	inventoryDriver  = "file-storage-subdir.csi.urlab.ai"
 	inventoryNodeID  = "fr-par-1/11111111-1111-4111-8111-111111111111"
 	inventoryNode    = "worker-a"
 	inventoryNS      = "scaleway-sfs-subdir-csi"

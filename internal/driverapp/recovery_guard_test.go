@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type fakeRecoveryLeadership struct {
@@ -52,7 +52,7 @@ func (reconstructor *fakePVReconstructor) Reconstruct(context.Context, recovery.
 func compactRecoveryOwnership(t *testing.T) *volume.CompactDeletedOwnershipRecord {
 	t.Helper()
 	const (
-		driverName     = "sfs-subdir.csi.example.com"
+		driverName     = "file-storage-subdir.csi.urlab.ai"
 		requestName    = "pvc-recovery-guard"
 		installationID = "11111111-1111-4111-8111-111111111111"
 		clusterUID     = "22222222-2222-4222-8222-222222222222"

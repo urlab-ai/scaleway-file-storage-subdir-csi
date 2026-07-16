@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"scaleway-sfs-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
 )
 
 func newDecommissionBackendHarness(t *testing.T) (*kubernetesDecommissionBackend, *fake.Clientset, *fakePodExecutor) {

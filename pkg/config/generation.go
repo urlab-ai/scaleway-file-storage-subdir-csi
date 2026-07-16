@@ -5,10 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // NodeConfigGeneration returns the fixed lowercase SHA-256 generation shared

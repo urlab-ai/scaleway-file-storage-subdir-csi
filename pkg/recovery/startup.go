@@ -6,9 +6,9 @@ import (
 	"maps"
 	"slices"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // StartupInventorySnapshot is one complete read-only controller-startup view.

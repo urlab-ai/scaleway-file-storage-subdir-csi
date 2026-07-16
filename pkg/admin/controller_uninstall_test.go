@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/internal/strictjson"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 )
 
 type fakeControllerUninstallWorkflow struct {

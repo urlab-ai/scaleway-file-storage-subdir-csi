@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/e2ecleanup"
-	"scaleway-sfs-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 )
 
 type fakeBackend struct {

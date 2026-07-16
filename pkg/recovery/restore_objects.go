@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"maps"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/internal/strictjson"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // persistentVolumeRestoreProjection is the closed driver-authoritative portion

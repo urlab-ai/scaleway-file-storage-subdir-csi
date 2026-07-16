@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const uninstallRequestID = "11111111-1111-4111-8111-111111111111"
@@ -21,13 +21,13 @@ func validMutationRequest() MutationRequest {
 
 func validDeletedUnknown(t *testing.T) *volume.DeletedUnknownAllocationRecord {
 	t.Helper()
-	logicalID, err := volume.LogicalVolumeID("sfs-subdir.csi.example.com", "unknown-deleted")
+	logicalID, err := volume.LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "unknown-deleted")
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}
 	return &volume.DeletedUnknownAllocationRecord{
 		SchemaVersion: volume.SchemaVersionV1, RecordKind: volume.AllocationRecordDeletedUnknown,
-		RecordRevision: 1, DriverName: "sfs-subdir.csi.example.com",
+		RecordRevision: 1, DriverName: "file-storage-subdir.csi.urlab.ai",
 		InstallationID:   "22222222-2222-4222-8222-222222222222",
 		ActiveClusterUID: "33333333-3333-4333-8333-333333333333",
 		LogicalVolumeID:  logicalID, VolumeHandleHash: "vh-" + strings.Repeat("a", 32),

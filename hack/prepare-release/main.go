@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/internal/compatibility"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
 )
 
 type options struct {

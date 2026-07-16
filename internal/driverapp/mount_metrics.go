@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"scaleway-sfs-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 )
 
 type nodeMountErrorMetric interface {

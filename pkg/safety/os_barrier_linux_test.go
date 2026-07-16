@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // TestLinuxOSDurableFSBarrierRestart composes the production writer with the
@@ -109,7 +109,7 @@ func testLinuxDurableCreateBarriers(t *testing.T) {
 			}
 			assertAbsentOrExactFile(t, root, destination, expected)
 			backend = openDurableLinux(t, root)
-			defer backend.Close()
+			defer closeDurableLinuxTest(t, backend)
 			writer, _ = NewMetadataWriter(backend)
 			if err := writer.CreateOwnership(context.Background(), record.BasePath, safetyCreateID, &record); err != nil {
 				t.Fatalf("retry after barrier %d: %v", barrier, err)
@@ -152,7 +152,7 @@ func testLinuxDurableReplaceBarriers(t *testing.T) {
 				t.Fatalf("restart exposed partial generation %q, %v", got, err)
 			}
 			backend = openDurableLinux(t, root)
-			defer backend.Close()
+			defer closeDurableLinuxTest(t, backend)
 			writer, _ = NewMetadataWriter(backend)
 			if err := writer.UpdateOwnership(context.Background(), current.BasePath, "66666666-6666-4666-8666-666666666666", &current, &next); err != nil {
 				t.Fatalf("retry after barrier %d: %v", barrier, err)
@@ -180,7 +180,7 @@ func testLinuxDurableRemoveBarriers(t *testing.T) {
 				t.Fatal(err)
 			}
 			backend = openDurableLinux(t, root)
-			defer backend.Close()
+			defer closeDurableLinuxTest(t, backend)
 			writer, _ = NewMetadataWriter(backend)
 			if err := writer.RemoveBootstrapTemporary(context.Background(), safetyAttemptID); err != nil {
 				t.Fatalf("retry after barrier %d: %v", barrier, err)
@@ -265,7 +265,11 @@ func (filesystem *interruptDurableFS) after(err error) error {
 func durableLinuxRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, relative := range []string{"kubernetes-volumes", "kubernetes-volumes/.sfs-subdir-csi"} {
+	for _, relative := range []string{
+		"kubernetes-volumes",
+		"kubernetes-volumes/.sfs-subdir-csi",
+		"kubernetes-volumes/.sfs-subdir-csi/volumes",
+	} {
 		if err := os.Mkdir(filepath.Join(root, relative), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -280,6 +284,13 @@ func openDurableLinux(t *testing.T, root string) *OSDurableFS {
 		t.Fatal(err)
 	}
 	return backend
+}
+
+func closeDurableLinuxTest(t *testing.T, backend *OSDurableFS) {
+	t.Helper()
+	if err := backend.Close(); err != nil {
+		t.Errorf("Close() error = %v", err)
+	}
 }
 
 func lifecycleLinuxRoot(t *testing.T) string {

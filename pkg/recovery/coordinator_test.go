@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 )
 
 type fakeCheckpointLeadership struct{ err error }

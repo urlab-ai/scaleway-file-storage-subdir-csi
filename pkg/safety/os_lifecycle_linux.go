@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	drivermount "scaleway-sfs-subdir-csi/pkg/mount"
+	drivermount "github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 )
 
 const (

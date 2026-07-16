@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type staticBootstrapAllocations struct {
@@ -71,7 +71,7 @@ func TestKubernetesParentBootstrapEvidenceFailsClosedOnAmbiguousInventory(t *tes
 
 func bootstrapEvidencePV(t *testing.T, name, parentID string) k8s.DriverPersistentVolume {
 	t.Helper()
-	logicalID, err := volume.LogicalVolumeID("sfs-subdir.csi.example.com", "pvc-"+parentID[:8])
+	logicalID, err := volume.LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "pvc-"+parentID[:8])
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}

@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func validCommandMutationRequest() MutationRequest {
@@ -27,7 +27,7 @@ func validCommandMutationRequest() MutationRequest {
 func validAdminCheckpointCandidate(t *testing.T) recovery.CheckpointCandidate {
 	t.Helper()
 	const (
-		driverName     = "sfs-subdir.csi.example.com"
+		driverName     = "file-storage-subdir.csi.urlab.ai"
 		installationID = "11111111-1111-4111-8111-111111111111"
 		clusterUID     = "22222222-2222-4222-8222-222222222222"
 		parentID       = "33333333-3333-4333-8333-333333333333"
@@ -207,7 +207,7 @@ func (reconciler *fakeGCRequestReconciler) Reconcile(_ context.Context, logicalV
 }
 
 func TestGCCommandOperationStrictlySubmitsThenReconciles(t *testing.T) {
-	logicalID, err := volume.LogicalVolumeID("sfs-subdir.csi.example.com", "pvc-a")
+	logicalID, err := volume.LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "pvc-a")
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}

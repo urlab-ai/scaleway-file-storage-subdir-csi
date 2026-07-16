@@ -12,8 +12,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
 )
 
 const maxCSIMessageBytes = 4 << 20

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/internal/e2ecleanup"
-	"scaleway-sfs-subdir-csi/internal/e2eplan"
-	"scaleway-sfs-subdir-csi/internal/e2erunner"
-	"scaleway-sfs-subdir-csi/internal/releasequalification"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/releasequalification"
 )
 
 func TestCandidateAndQualificationVerifyExactArtifacts(t *testing.T) {

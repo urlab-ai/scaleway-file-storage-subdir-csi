@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/pkg/admin"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const testRequestID = "11111111-1111-4111-8111-111111111111"
@@ -372,7 +372,7 @@ func TestUsageDocumentsClosedCommandsAndPrivateUninstallPhases(t *testing.T) {
 
 func validUpgradeCandidate() admin.UpgradeCandidate {
 	return admin.UpgradeCandidate{
-		DriverName:                    "sfs-subdir.csi.example.com",
+		DriverName:                    "file-storage-subdir.csi.urlab.ai",
 		InstallationIDHash:            "sha256:" + strings.Repeat("a", 64),
 		ActiveClusterUID:              "22222222-2222-4222-8222-222222222222",
 		LeadershipLeaseName:           volume.LeadershipLeaseNameV1,

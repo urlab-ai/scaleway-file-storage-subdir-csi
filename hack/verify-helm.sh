@@ -116,7 +116,7 @@ require_text '--timeout=12m' 'controller sidecar timeout is missing'
 require_text '--worker-threads=5' 'controller sidecar worker bound is missing'
 require_text 'mountPropagation: Bidirectional' 'node mount propagation is missing'
 require_text 'fsGroupPolicy: None' 'CSIDriver fsGroupPolicy is not None'
-require_text '"nodeConfigGeneration": "16d1b53fedf5fde8a9bc10563ed0cd31dc54b04182079befbd52b6497b058cb5"' 'Helm and Go node generation fixtures disagree'
+require_text '"nodeConfigGeneration": "b3004500b09bedd836285b2d91c22bfb12fdc76f13bb15e4876dab92b0337440"' 'Helm and Go node generation fixtures disagree'
 if [ "$(grep -Fc 'mountPath: /run/scaleway-sfs-subdir-csi-mount-quarantine' "$RENDERED")" -ne 2 ] || \
    [ "$(grep -Ec '^[[:space:]]*- name: mount-quarantine$' "$RENDERED")" -ne 2 ]; then
   echo "Helm verification failed: each privileged driver needs one dedicated private mount-quarantine emptyDir" >&2
@@ -154,7 +154,7 @@ if ! "$JQ" -e '
   and .compatibility.qualifiedCommercialTypes == ["TEST-TYPE-1"]
   and .pools.standard.maxLogicalOvercommitRatio == "1.0"
   and .storageClasses[0].poolName == "standard"
-  and .nodeConfigGeneration == "16d1b53fedf5fde8a9bc10563ed0cd31dc54b04182079befbd52b6497b058cb5"
+  and .nodeConfigGeneration == "b3004500b09bedd836285b2d91c22bfb12fdc76f13bb15e4876dab92b0337440"
 ' "$RUNTIME_CONFIG" >/dev/null; then
   echo "Helm verification failed: runtime JSON projection is incomplete or disagrees with validated values" >&2
   exit 1

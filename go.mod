@@ -1,4 +1,4 @@
-module scaleway-sfs-subdir-csi
+module github.com/urlab-ai/scaleway-file-storage-subdir-csi
 
 go 1.26.0
 

@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"scaleway-sfs-subdir-csi/internal/driverapp"
-	"scaleway-sfs-subdir-csi/internal/version"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/driverapp"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version"
 )
 
 func main() {

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/internal/e2eplan"
-	"scaleway-sfs-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
 
 const maxInputBytes = 64 * 1024

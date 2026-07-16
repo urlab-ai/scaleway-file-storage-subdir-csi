@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
 )
 
 func TestNodeConfigGenerationMatchesCanonicalHelmProjection(t *testing.T) {
@@ -17,7 +17,7 @@ func TestNodeConfigGenerationMatchesCanonicalHelmProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeConfigGeneration() error = %v", err)
 	}
-	canonical := `{"accessModes":["SINGLE_NODE_WRITER","MULTI_NODE_MULTI_WRITER"],"driverName":"sfs-subdir.csi.example.com","kubeletPath":"/var/lib/kubelet","nodeParentMountRoot":"/var/lib/scaleway-sfs-subdir-csi/parents","ownershipSchema":"1","parents":{"33333333-3333-4333-8333-333333333333":{"basePath":"/kubernetes-volumes","pool":"standard"}},"qualifiedCommercialTypes":["TEST-TYPE-1"],"region":"fr-par"}`
+	canonical := `{"accessModes":["SINGLE_NODE_WRITER","MULTI_NODE_MULTI_WRITER"],"driverName":"file-storage-subdir.csi.urlab.ai","kubeletPath":"/var/lib/kubelet","nodeParentMountRoot":"/var/lib/scaleway-sfs-subdir-csi/parents","ownershipSchema":"1","parents":{"33333333-3333-4333-8333-333333333333":{"basePath":"/kubernetes-volumes","pool":"standard"}},"qualifiedCommercialTypes":["TEST-TYPE-1"],"region":"fr-par"}`
 	sum := sha256.Sum256([]byte(canonical))
 	want := hex.EncodeToString(sum[:])
 	if generation != want {
@@ -35,7 +35,7 @@ func TestNodeConfigGenerationMatchesDevelopmentChartFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeConfigGeneration(chart fixture) error = %v", err)
 	}
-	const want = "16d1b53fedf5fde8a9bc10563ed0cd31dc54b04182079befbd52b6497b058cb5"
+	const want = "b3004500b09bedd836285b2d91c22bfb12fdc76f13bb15e4876dab92b0337440"
 	if generation != want {
 		t.Fatalf("chart fixture generation = %q, want %q", generation, want)
 	}

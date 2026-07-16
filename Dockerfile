@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-# The release pipeline must override this development default with a base image
-# pinned by digest and record that digest in release provenance.
-ARG GO_IMAGE=golang:1.26.0-alpine3.23
-ARG RUNTIME_IMAGE=alpine:3.23
+# Release and development builds share the reviewed multi-architecture base
+# image indexes pinned here by immutable digest.
+ARG GO_IMAGE=golang:1.26.0-alpine3.23@sha256:d4c4845f5d60c6a974c6000ce58ae079328d03ab7f721a0734277e69905473e5
+ARG RUNTIME_IMAGE=alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 FROM ${GO_IMAGE} AS build
 
 # VERSION is unprefixed SemVer because CSI exposes it as vendor_version. The
@@ -18,10 +18,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X scaleway-sfs-subdir-csi/internal/version.Version=${VERSION} -X scaleway-sfs-subdir-csi/internal/version.Commit=${COMMIT} -X scaleway-sfs-subdir-csi/internal/version.BuildDate=${BUILD_DATE} -X scaleway-sfs-subdir-csi/internal/version.QualifiedCommercialTypes=${QUALIFIED_COMMERCIAL_TYPES}" \
+    -ldflags "-s -w -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Version=${VERSION} -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Commit=${COMMIT} -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.BuildDate=${BUILD_DATE} -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.QualifiedCommercialTypes=${QUALIFIED_COMMERCIAL_TYPES}" \
     -o /out/scaleway-sfs-subdir-csi ./cmd/scaleway-sfs-subdir-csi \
     && CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X scaleway-sfs-subdir-csi/internal/version.Version=${VERSION} -X scaleway-sfs-subdir-csi/internal/version.Commit=${COMMIT} -X scaleway-sfs-subdir-csi/internal/version.BuildDate=${BUILD_DATE} -X scaleway-sfs-subdir-csi/internal/version.QualifiedCommercialTypes=${QUALIFIED_COMMERCIAL_TYPES}" \
+    -ldflags "-s -w -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Version=${VERSION} -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Commit=${COMMIT} -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.BuildDate=${BUILD_DATE} -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.QualifiedCommercialTypes=${QUALIFIED_COMMERCIAL_TYPES}" \
     -o /out/csi-admin ./cmd/csi-admin \
     && /out/scaleway-sfs-subdir-csi --version \
     && /out/csi-admin --version

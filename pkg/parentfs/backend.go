@@ -9,10 +9,10 @@ import (
 	"path"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // MountedParentAccess returns only after the exact configured parent is

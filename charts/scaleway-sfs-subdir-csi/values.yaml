@@ -14,7 +14,7 @@ integrationTest:
     binaryPath: /usr/local/bin/csi-kind-fake
 
 driver:
-  name: sfs-subdir.csi.example.com
+  name: file-storage-subdir.csi.urlab.ai
   logLevel: info
 
 installation:

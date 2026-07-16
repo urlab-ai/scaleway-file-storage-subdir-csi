@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // NodePathLayout is the complete node-local path authority that must be proven

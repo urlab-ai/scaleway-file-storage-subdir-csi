@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type staticDeletePVs struct{ values []k8s.DriverPersistentVolume }
@@ -77,7 +77,7 @@ func TestMissingDeleteResolverRejectsForeignParentClaimBeforeAbsence(t *testing.
 func missingDeleteResolverHarness(t *testing.T) (*missingDeleteResolver, volume.Handle, *staticDeletePVs, *fakeDeleteOwnershipReader) {
 	t.Helper()
 	const (
-		driverName     = "sfs-subdir.csi.example.com"
+		driverName     = "file-storage-subdir.csi.urlab.ai"
 		installationID = "11111111-1111-4111-8111-111111111111"
 		clusterUID     = "22222222-2222-4222-8222-222222222222"
 		parentID       = "33333333-3333-4333-8333-333333333333"

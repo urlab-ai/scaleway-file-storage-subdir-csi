@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/internal/e2ecleanup"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 )
 
 type shortWriter struct {

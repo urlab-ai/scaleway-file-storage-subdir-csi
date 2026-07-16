@@ -7,7 +7,7 @@ func TestNodePathPolicyAcceptsOnlyExactKubeletTrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewNodePathPolicy() error = %v", err)
 	}
-	if err := policy.ValidateStagingPath("/var/lib/kubelet/plugins/kubernetes.io/csi/sfs-subdir.csi.example.com/volume/globalmount"); err != nil {
+	if err := policy.ValidateStagingPath("/var/lib/kubelet/plugins/kubernetes.io/csi/file-storage-subdir.csi.urlab.ai/volume/globalmount"); err != nil {
 		t.Fatalf("ValidateStagingPath(valid) error = %v", err)
 	}
 	if err := policy.ValidatePublishPath("/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~csi/pv-a/mount"); err != nil {

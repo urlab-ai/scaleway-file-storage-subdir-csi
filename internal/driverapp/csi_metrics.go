@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
 )
 
 // controllerCSIObserver couples the generic code-labelled CSI metrics with the

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
 )
 
 type fakeMountErrorMetric struct {

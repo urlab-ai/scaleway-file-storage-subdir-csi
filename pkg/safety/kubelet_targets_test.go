@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	drivermount "scaleway-sfs-subdir-csi/pkg/mount"
+	drivermount "github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 )
 
-const kubeletTargetDriver = "sfs-subdir.csi.example.com"
+const kubeletTargetDriver = "file-storage-subdir.csi.urlab.ai"
 
 func openTestKubeletTargets(t *testing.T) (*KubeletTargetManager, string) {
 	t.Helper()

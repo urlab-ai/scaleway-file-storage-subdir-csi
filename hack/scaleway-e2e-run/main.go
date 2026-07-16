@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/e2ecleanup"
-	"scaleway-sfs-subdir-csi/internal/e2eplan"
-	"scaleway-sfs-subdir-csi/internal/e2erunner"
-	"scaleway-sfs-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
 
 const maximumRequestBytes = 1 << 20

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
 )
 
 type startupReservationJournalReconciler interface {

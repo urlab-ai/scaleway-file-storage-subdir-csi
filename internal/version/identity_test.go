@@ -68,9 +68,10 @@ func TestReleaseMetadataBindsTagRuntimeAndProvenance(t *testing.T) {
 		t.Fatalf("ReleaseMetadata.Validate(v tag) error = %v", err)
 	}
 	base.ReleaseTag = base.Version
-	if err := base.Validate(); err != nil {
-		t.Fatalf("ReleaseMetadata.Validate(unprefixed tag) error = %v", err)
+	if err := base.Validate(); err == nil {
+		t.Fatal("ReleaseMetadata.Validate(unprefixed tag) error = nil")
 	}
+	base.ReleaseTag = "v" + base.Version
 
 	tests := map[string]func(*ReleaseMetadata){
 		"unrelated tag":    func(value *ReleaseMetadata) { value.ReleaseTag = "release-1.2.3" },

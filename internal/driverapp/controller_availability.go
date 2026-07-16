@@ -7,8 +7,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
 )
 
 type controllerReadyMetric interface {

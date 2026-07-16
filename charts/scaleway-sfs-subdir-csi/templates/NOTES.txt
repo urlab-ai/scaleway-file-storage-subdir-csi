@@ -1,15 +1,15 @@
 {{- if eq .Values.release.mode "development" }}
-WARNING: this is a development-only chart render. Its CSI driver name,
-synthetic Scaleway IDs, local driver image, and unpinned sidecar tags are not a
-production release and are expected to remain non-serving.
+WARNING: this is a development-only chart render. Its synthetic Scaleway IDs,
+local driver image, and unpinned sidecar tags are not a production release and
+are expected to remain non-serving.
 {{- end }}
 
 Before installing a release-qualified chart:
 
 1. label the dedicated namespace for the privileged Pod Security level;
 2. create the external installation identity and Scaleway credential Secrets;
-3. supply the final stable CSI driver name, real Project/parent IDs, and every
-   release image tag plus immutable sha256 digest;
+3. verify the frozen CSI driver name, supply real Project/parent IDs, and pin
+   every release image by tag plus immutable sha256 digest;
 4. verify every schedulable Linux node is compatible and can attach every
    configured parent;
 5. run the documented preflight.

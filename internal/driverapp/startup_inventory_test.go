@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/parentfs"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/parentfs"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type staticStartupParentRecords struct {
@@ -108,7 +108,7 @@ func TestStartupKubernetesRecoveryVerifierRequiresExactPVGenerationAndAbsence(t 
 	persistentVolume.ResourceVersion = "7"
 	evidence := recovery.PersistentVolumeEvidence{
 		Name: persistentVolume.Name, UID: persistentVolume.UID, ResourceVersion: persistentVolume.ResourceVersion,
-		DriverName: "sfs-subdir.csi.example.com", VolumeHandle: persistentVolume.VolumeHandle,
+		DriverName: "file-storage-subdir.csi.urlab.ai", VolumeHandle: persistentVolume.VolumeHandle,
 		VolumeContext: persistentVolume.VolumeContext,
 	}
 	getter := &staticStartupAllocationGetter{err: k8s.ErrNotFound}

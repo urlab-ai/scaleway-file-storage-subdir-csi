@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/scaleway"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
 )
 
 func TestFreshInstallationDiscoveryHandsExactSameProcessEvidenceToBootstrap(t *testing.T) {

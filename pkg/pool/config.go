@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"slices"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // SelectionPolicy is the closed placement strategy surface in v1.

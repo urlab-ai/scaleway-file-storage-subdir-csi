@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func mountMapping() volume.Mapping {
@@ -24,7 +24,7 @@ func mountCapability() volume.Capability {
 func exactMountTable() (Table, string, string, string) {
 	mapping := mountMapping()
 	parent := "/var/lib/scaleway-sfs-subdir-csi/parents/" + mapping.ParentFilesystemID
-	stage := "/var/lib/kubelet/plugins/kubernetes.io/csi/sfs-subdir.csi.example.com/volume/globalmount"
+	stage := "/var/lib/kubelet/plugins/kubernetes.io/csi/file-storage-subdir.csi.urlab.ai/volume/globalmount"
 	publish := "/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~csi/pv-a/mount"
 	backing := path.Join(mapping.BasePath, mapping.DirectoryName)
 	return Table{Entries: []Entry{

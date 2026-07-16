@@ -7,7 +7,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
 )
 
 // IdentityServer exposes the same immutable identity core on controller and

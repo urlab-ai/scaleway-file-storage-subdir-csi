@@ -3,7 +3,7 @@ package version
 import (
 	"fmt"
 
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
 )
 
 // QualifiedCommercialTypes is set by release builds to the canonical

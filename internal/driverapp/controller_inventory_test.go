@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/observability"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/scaleway"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type fakeControllerAttachmentInventory struct {

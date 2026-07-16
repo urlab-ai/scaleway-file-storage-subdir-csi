@@ -5,14 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/observability"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/scaleway"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type staticNodeInventory struct {

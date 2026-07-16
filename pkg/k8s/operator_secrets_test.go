@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 )
 
 func TestReadOperatorApprovalProjectsExactImmutableSecret(t *testing.T) {

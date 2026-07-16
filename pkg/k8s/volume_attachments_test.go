@@ -13,7 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const attachmentTestHandle = "sfs1:lv-11111111111111111111111111111111:mh-22222222222222222222222222222222"

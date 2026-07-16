@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
@@ -24,7 +24,7 @@ func safetyParentOwner(t *testing.T) volume.ParentOwnerRecord {
 	record, err := (volume.ParentOwnerRecord{
 		SchemaVersion:       volume.SchemaVersionV1,
 		Revision:            1,
-		DriverName:          "sfs-subdir.csi.example.com",
+		DriverName:          "file-storage-subdir.csi.urlab.ai",
 		InstallationID:      "11111111-1111-4111-8111-111111111111",
 		ActiveClusterUID:    "22222222-2222-4222-8222-222222222222",
 		ParentFilesystemID:  "33333333-3333-4333-8333-333333333333",
@@ -45,7 +45,7 @@ func safetyParentOwner(t *testing.T) volume.ParentOwnerRecord {
 func safetyOwnership(t *testing.T) volume.DetailedOwnershipRecord {
 	t.Helper()
 	const (
-		driverName  = "sfs-subdir.csi.example.com"
+		driverName  = "file-storage-subdir.csi.urlab.ai"
 		requestName = "pvc-safety"
 	)
 	logicalID, err := volume.LogicalVolumeID(driverName, requestName)

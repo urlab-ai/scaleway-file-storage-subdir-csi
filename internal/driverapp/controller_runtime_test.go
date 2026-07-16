@@ -18,16 +18,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	internaluuid "scaleway-sfs-subdir-csi/internal/uuid"
-	"scaleway-sfs-subdir-csi/pkg/admin"
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	internaluuid "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/uuid"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func controllerShellStartup(t *testing.T) Startup {
@@ -37,7 +37,7 @@ func controllerShellStartup(t *testing.T) Startup {
 		t.Fatalf("ParseRatio() error = %v", err)
 	}
 	runtime := config.Runtime{
-		Mode: config.ModeDevelopment, DriverName: "sfs-subdir.csi.example.com",
+		Mode: config.ModeDevelopment, DriverName: "file-storage-subdir.csi.urlab.ai",
 		Installation: config.Installation{
 			ExistingSecretName: "driver-identity", IDKey: "installationID",
 			ID: "11111111-1111-4111-8111-111111111111",
@@ -450,7 +450,7 @@ func TestValidateRecoveryCheckpointIdentityRequiresExactParentsAndInstallation(t
 	manifest := recovery.CheckpointManifest{
 		SchemaVersion:       volume.SchemaVersionV1,
 		CheckpointRequestID: "11111111-1111-4111-8111-111111111111",
-		DriverName:          "sfs-subdir.csi.example.com", BackupTimestamp: "2026-07-13T10:00:00Z",
+		DriverName:          "file-storage-subdir.csi.urlab.ai", BackupTimestamp: "2026-07-13T10:00:00Z",
 		ActiveClusterUID:   "22222222-2222-4222-8222-222222222222",
 		InstallationIDHash: recovery.SHA256Digest([]byte("33333333-3333-4333-8333-333333333333")),
 		ChartVersion:       "1.0.0", Images: []recovery.ImageDigest{{Name: "driver", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},

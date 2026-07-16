@@ -6,8 +6,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	buildversion "scaleway-sfs-subdir-csi/internal/version"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	buildversion "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // PluginCapability is the closed CSI plugin capability set.

@@ -10,8 +10,8 @@ import (
 	"path"
 	"strings"
 
-	drivermount "scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	drivermount "github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // KubeletTargetManager confines node staging validation and pod-target

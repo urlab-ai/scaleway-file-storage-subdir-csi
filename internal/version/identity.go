@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
 )
 
 const developmentVersion = "0.0.0-dev"
@@ -64,9 +64,8 @@ func ValidateBuildIdentity() error {
 	return nil
 }
 
-// Validate checks release tag/version correspondence and complete immutable
-// build provenance fields. The still-undecided public tag policy may choose
-// either VERSION or vVERSION, but cannot choose an unrelated tag.
+// Validate checks the frozen v-prefixed release tag/version correspondence and
+// complete immutable build provenance fields.
 func (metadata ReleaseMetadata) Validate() error {
 	if err := ValidateSemanticVersion(metadata.Version); err != nil {
 		return err
@@ -74,8 +73,8 @@ func (metadata ReleaseMetadata) Validate() error {
 	if metadata.Version == developmentVersion {
 		return fmt.Errorf("development version %q cannot identify a release artifact", metadata.Version)
 	}
-	if metadata.ReleaseTag != metadata.Version && metadata.ReleaseTag != "v"+metadata.Version {
-		return fmt.Errorf("release tag must equal VERSION or vVERSION")
+	if metadata.ReleaseTag != "v"+metadata.Version {
+		return fmt.Errorf("release tag must equal vVERSION")
 	}
 	if err := validateCommit(metadata.Commit); err != nil {
 		return err

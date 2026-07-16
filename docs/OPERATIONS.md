@@ -1,9 +1,11 @@
 # Operations Guide
 
-This repository is a development build, not a qualified production release.
-The chart rejects `release.mode=production` until final public coordinates,
-immutable image metadata, supported versions, and real-provider evidence are
-approved. The CSI runtime and checkpoint export/restore, parent decommission,
+This repository contains the frozen public identities for the
+`v0.1.0-rc.1` candidate, but it is not yet a qualified production release. The
+source chart rejects `release.mode=production`; only an exact promoted chart
+copy with immutable image metadata may enable it. Supported versions and
+real-provider evidence still require approval. The CSI runtime and checkpoint
+export/restore, parent decommission,
 GC, upgrade preflight, and safe-uninstall operator workflows are implemented
 and locally testable. The automated disposable kind chart-install/PVC/restart
 suite is implemented and runs without Scaleway access. Privileged Linux, exact

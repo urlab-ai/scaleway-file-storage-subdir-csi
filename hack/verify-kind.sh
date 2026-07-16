@@ -130,7 +130,7 @@ CLUSTER_CREATED=true
 
 "$KUBECTL" --context "kind-$CLUSTER_NAME" -n "$NAMESPACE" rollout status deployment/kind-scaleway-sfs-subdir-csi-controller --timeout=180s
 "$KUBECTL" --context "kind-$CLUSTER_NAME" -n "$NAMESPACE" rollout status daemonset/kind-scaleway-sfs-subdir-csi-node --timeout=180s
-"$KUBECTL" --context "kind-$CLUSTER_NAME" get csidriver sfs-subdir.csi.example.com >/dev/null
+"$KUBECTL" --context "kind-$CLUSTER_NAME" get csidriver file-storage-subdir.csi.urlab.ai >/dev/null
 "$KUBECTL" --context "kind-$CLUSTER_NAME" get storageclass sfs-subdir-rwx >/dev/null
 
 CONTROLLER_GENERATION=$("$KUBECTL" --context "kind-$CLUSTER_NAME" -n "$NAMESPACE" get deployment/kind-scaleway-sfs-subdir-csi-controller -o jsonpath='{.spec.template.metadata.annotations.scaleway-sfs-subdir-csi\.io/node-config-generation}')

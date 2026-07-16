@@ -10,9 +10,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (

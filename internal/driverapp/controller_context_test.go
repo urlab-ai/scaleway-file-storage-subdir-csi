@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
 )
 
 type adminContextProbe struct {

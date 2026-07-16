@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/scaleway"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type fakeParentBootstrapLeadership struct {
@@ -380,7 +380,7 @@ func TestParentBootstrapReadOnlyRecoveryDiscoveryRequiresClaim(t *testing.T) {
 func parentBootstrapTestManager(t *testing.T) (*parentBootstrapManager, *fakeParentBootstrapLeadership, *fakeParentBootstrapAccess, *fakeParentBootstrapFilesystem, *fixedBootstrapIDs, string) {
 	t.Helper()
 	configured, provider, inventory, localNodeID, _, parentID := controllerParentFixture(t)
-	configured.Runtime.DriverName = "sfs-subdir.csi.example.com"
+	configured.Runtime.DriverName = "file-storage-subdir.csi.urlab.ai"
 	configured.Runtime.Installation.ID = "11111111-1111-4111-8111-111111111111"
 	configured.ControllerNamespace = "driver-system"
 	configured.HelmReleaseName = "driver-release"

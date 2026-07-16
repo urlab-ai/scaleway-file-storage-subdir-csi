@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // ParentTargetManager owns only the direct mount-target directories below one

@@ -19,18 +19,18 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
-	"scaleway-sfs-subdir-csi/internal/canonicaljson"
-	"scaleway-sfs-subdir-csi/pkg/admin"
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
 	operatorNamespace      = "driver-system"
 	operatorRelease        = "driver"
-	operatorDriverName     = "sfs-subdir.csi.example.com"
+	operatorDriverName     = "file-storage-subdir.csi.urlab.ai"
 	operatorInstallationID = "11111111-1111-4111-8111-111111111111"
 	operatorParentID       = "33333333-3333-4333-8333-333333333333"
 	operatorInstanceID     = "55555555-5555-4555-8555-555555555555"

@@ -9,8 +9,8 @@ import (
 	"math"
 	"syscall"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 )
 
 // OSStatFSSampler anchors fstatfs(2) to a no-follow directory descriptor so a

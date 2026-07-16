@@ -78,10 +78,10 @@ safe subdirectory allocation inside existing Scaleway File Storage parents.
 
 ### 4.1 Repository
 
-Recommended repository name:
+The public repository name is:
 
 ```text
-scaleway-sfs-subdir-csi
+scaleway-file-storage-subdir-csi
 ```
 
 Rationale:
@@ -115,15 +115,15 @@ Required files:
 The CSI driver name must be globally unique and must not use a domain owned by
 Scaleway unless Scaleway explicitly adopts or approves the project.
 
-Recommended development placeholder:
+The immutable public CSI driver name is:
 
 ```text
-sfs-subdir.csi.example.com
+file-storage-subdir.csi.urlab.ai
 ```
 
-Before any public release, including `v0.x`, maintainers must choose a CSI
-driver name under a domain they control or under a domain explicitly approved by
-the domain owner.
+URLab controls the `urlab.ai` domain. This name is frozen before the first real
+Kapsule release-candidate run and must not change while any PV, allocation,
+ownership record, checkpoint, or parent claim created under it exists.
 
 Do not use a Scaleway-owned or Scaleway-branded domain unless Scaleway approves
 the project identity.
@@ -134,16 +134,26 @@ name breaks existing PersistentVolumes.
 
 ### 4.4 Public Artifacts and Versioning
 
-Before the first public preview, maintainers must choose and document:
+The public artifact coordinates are:
 
-- GitHub organization and repository URL;
-- final CSI driver name;
-- public container image registry path;
-- public Helm chart distribution path;
-- public `csi-admin` binary distribution path and supported operator platforms;
-- semantic versioning policy;
-- release tag format;
-- supported Kubernetes and Kapsule versions.
+- source and issues: `https://github.com/urlab-ai/scaleway-file-storage-subdir-csi`;
+- Go module: `github.com/urlab-ai/scaleway-file-storage-subdir-csi`;
+- CSI driver name: `file-storage-subdir.csi.urlab.ai`;
+- controller/node image: `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
+- Helm OCI chart: `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`;
+- `csi-admin` Linux `amd64` and Linux `arm64` binaries: matching GitHub Release
+  assets in the source repository.
+
+Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
+with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
+`vendor_version`, chart `version`, and chart `appVersion` omit the leading `v`.
+The first frozen candidate is `v0.1.0-rc.1`. It is not a production support
+claim until the exact candidate passes every Linux, kind, CSI, Helm, and real
+Kapsule qualification gate. Supported Kubernetes and Kapsule versions remain
+limited to the exact versions retained in that qualification evidence.
+`DEV1-M` is the sole proposed commercial type for this first qualification; it
+does not enter the supported allowlist unless that exact run and its cleanup
+evidence pass.
 
 The v1 controller and node images support Linux `amd64` and Linux `arm64`.
 Release CI must compile both architectures, and the real-provider support matrix
@@ -164,11 +174,8 @@ release metadata must record the exact rendered digests.
 Runtime and artifact versions are distinct typed values. `VERSION` is strict
 SemVer 2.0 without a leading `v`; it is linked into both binaries and is the
 exact CSI `vendor_version` and admin protocol build version. `RELEASE_TAG` is
-the human Git/artifact tag. Until maintainers choose the final public tag
-policy, release tooling accepts only `RELEASE_TAG=VERSION` or
-`RELEASE_TAG=vVERSION`; it does not silently choose between them and never
-embeds the optional `v` in CSI identity. An unrelated tag/version pair fails
-before compilation.
+the human Git/artifact tag and must equal `vVERSION`; the leading `v` is never
+embedded in CSI identity. Any other tag/version pair fails before compilation.
 
 Every non-development binary also embeds a complete lowercase 40-character
 SHA-1 or 64-character SHA-256 Git object ID and a canonical second-precision
@@ -231,12 +238,11 @@ kubectl -n scaleway-sfs-subdir-csi create secret generic scaleway-sfs-subdir-csi
 Then the administrator installs the CSI driver:
 
 ```bash
-helm repo add scaleway-sfs-subdir-csi https://<org>.github.io/scaleway-sfs-subdir-csi
-helm repo update
-
 helm upgrade --install scaleway-sfs-subdir-csi \
-  scaleway-sfs-subdir-csi/scaleway-sfs-subdir-csi \
+  oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi \
+  --version <qualified-version> \
   --namespace scaleway-sfs-subdir-csi \
+  --values /absolute/path/release-values.yaml \
   --set scaleway.region=fr-par \
   --set scaleway.defaultZone=fr-par-1 \
   --set scaleway.projectId=<project-id> \
@@ -279,7 +285,7 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: sfs-subdir-rwx
-provisioner: sfs-subdir.csi.example.com
+provisioner: file-storage-subdir.csi.urlab.ai
 parameters:
   poolName: standard
   directoryMode: "0770"
@@ -1076,7 +1082,7 @@ The owner record must contain:
 {
   "schemaVersion": "1",
   "revision": 1,
-  "driverName": "sfs-subdir.csi.example.com",
+  "driverName": "file-storage-subdir.csi.urlab.ai",
   "installationID": "...",
   "activeClusterUID": "...",
   "parentFilesystemID": "...",
@@ -1698,7 +1704,7 @@ The ownership record must contain:
 {
   "schemaVersion": "1",
   "recordKind": "detailed",
-  "driverName": "sfs-subdir.csi.example.com",
+  "driverName": "file-storage-subdir.csi.urlab.ai",
   "installationID": "...",
   "activeClusterUID": "...",
   "volumeHandle": "...",
@@ -2740,7 +2746,7 @@ The Helm chart must expose a clear `values.yaml`:
 
 ```yaml
 driver:
-  name: sfs-subdir.csi.example.com
+  name: file-storage-subdir.csi.urlab.ai
   logLevel: info
 
 installation:
@@ -3811,7 +3817,7 @@ Required v1 manifest:
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
-  name: sfs-subdir.csi.example.com
+  name: file-storage-subdir.csi.urlab.ai
 spec:
   attachRequired: true
   podInfoOnMount: false
@@ -5754,13 +5760,13 @@ Required label schema:
 
 ```text
 app.kubernetes.io/name=scaleway-sfs-subdir-csi
-sfs-subdir.csi.example.com/installation-id=<bounded installation id>
-sfs-subdir.csi.example.com/logical-volume-id=<bounded logical volume id>
-sfs-subdir.csi.example.com/request-name-hash=<hash>
-sfs-subdir.csi.example.com/volume-handle-hash=<hash>
-sfs-subdir.csi.example.com/pool-name-hash=<hash>
-sfs-subdir.csi.example.com/parent-filesystem-id-hash=<hash>
-sfs-subdir.csi.example.com/state=<bounded state>
+file-storage-subdir.csi.urlab.ai/installation-id=<bounded installation id>
+file-storage-subdir.csi.urlab.ai/logical-volume-id=<bounded logical volume id>
+file-storage-subdir.csi.urlab.ai/request-name-hash=<hash>
+file-storage-subdir.csi.urlab.ai/volume-handle-hash=<hash>
+file-storage-subdir.csi.urlab.ai/pool-name-hash=<hash>
+file-storage-subdir.csi.urlab.ai/parent-filesystem-id-hash=<hash>
+file-storage-subdir.csi.urlab.ai/state=<bounded state>
 ```
 
 Raw CSI names, parent filesystem IDs, pool names, and paths must be stored in

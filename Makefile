@@ -10,9 +10,9 @@ COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 REPOSITORY_URL ?=
 LDFLAGS := -s -w \
-	-X scaleway-sfs-subdir-csi/internal/version.Version=$(VERSION) \
-	-X scaleway-sfs-subdir-csi/internal/version.Commit=$(COMMIT) \
-	-X scaleway-sfs-subdir-csi/internal/version.BuildDate=$(BUILD_DATE)
+	-X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Version=$(VERSION) \
+	-X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Commit=$(COMMIT) \
+	-X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.BuildDate=$(BUILD_DATE)
 
 .PHONY: all build release-binaries test-release-binaries test-release-manifest verify test test-race test-csi-sanity test-e2e-safety test-install-preflight test-kind test-linux-privileged test-linux-cross-compile vet fmt-check lint helm-lint helm-test docker-build clean
 

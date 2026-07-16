@@ -6,15 +6,15 @@ import (
 	"reflect"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func validFakeOptions() Options {
 	return Options{
 		Component: config.ComponentNode, CSIEndpointPath: "/csi/csi.sock",
-		DriverName: "sfs-subdir.csi.example.com", NodeName: "kind-control-plane",
+		DriverName: "file-storage-subdir.csi.urlab.ai", NodeName: "kind-control-plane",
 		DataRoot:    "/var/lib/scaleway-sfs-subdir-csi/parents/.kind-fake-data",
 		KubeletPath: "/var/lib/kubelet", LiveAddress: ":9811",
 	}

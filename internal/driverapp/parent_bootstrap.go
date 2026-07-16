@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	internaluuid "scaleway-sfs-subdir-csi/internal/uuid"
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/parentfs"
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/scaleway"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	internaluuid "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/uuid"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/parentfs"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 type parentBootstrapLeadership interface {

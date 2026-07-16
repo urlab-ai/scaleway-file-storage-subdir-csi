@@ -10,7 +10,7 @@ import (
 	"sync"
 	"syscall"
 
-	"scaleway-sfs-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 )
 
 type linuxNodeMounts struct {

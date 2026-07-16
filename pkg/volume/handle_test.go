@@ -7,7 +7,7 @@ import (
 
 func testMapping(t *testing.T) Mapping {
 	t.Helper()
-	logicalVolumeID, err := LogicalVolumeID("sfs-subdir.csi.example.com", "pvc-123")
+	logicalVolumeID, err := LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "pvc-123")
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}
@@ -21,11 +21,11 @@ func testMapping(t *testing.T) Mapping {
 }
 
 func TestLogicalVolumeIDCompatibilityFixture(t *testing.T) {
-	got, err := LogicalVolumeID("sfs-subdir.csi.example.com", "pvc-123")
+	got, err := LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "pvc-123")
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}
-	const want = "lv-cba6af669a8d67780b6f36aecd3c58af"
+	const want = "lv-39e9ec9ac82376c0041ab4e4777cb760"
 	if got != want {
 		t.Fatalf("LogicalVolumeID() = %q, want %q", got, want)
 	}
@@ -36,7 +36,7 @@ func TestMappingHashCompatibilityFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MappingHash() error = %v", err)
 	}
-	const want = "mh-379da0315b81cc0bcf0e4c6d131f48ac"
+	const want = "mh-0968782b757208235a1acb0e453aaa37"
 	if got != want {
 		t.Fatalf("MappingHash() = %q, want %q", got, want)
 	}

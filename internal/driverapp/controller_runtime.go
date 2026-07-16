@@ -14,23 +14,23 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/internal/csiadapter"
-	internaluuid "scaleway-sfs-subdir-csi/internal/uuid"
-	buildversion "scaleway-sfs-subdir-csi/internal/version"
-	"scaleway-sfs-subdir-csi/pkg/admin"
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/health"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/observability"
-	"scaleway-sfs-subdir-csi/pkg/parentfs"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/scaleway"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/csiadapter"
+	internaluuid "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/uuid"
+	buildversion "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/health"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/parentfs"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
 )
 
 const (
@@ -87,14 +87,14 @@ func runController(ctx context.Context, startup Startup) (returnErr error) {
 	go func() { serveResult <- runtime.serve(processCtx, startup.Options) }()
 	buildResult := make(chan error, 1)
 	go func() {
-		client, buildErr := k8s.NewInClusterClientset("scaleway-sfs-subdir-csi/" + buildversion.Version)
+		client, buildErr := k8s.NewInClusterClientset("github.com/urlab-ai/scaleway-file-storage-subdir-csi/" + buildversion.Version)
 		configured := startup.Config.Runtime
 		if buildErr == nil {
 			var provider scaleway.API
 			provider, buildErr = scaleway.NewSDKAPI(scaleway.SDKOptions{
 				Region: configured.Provider.Region, ProjectID: configured.Provider.ProjectID,
 				Zone: configured.Provider.DefaultZone, AccessKey: os.Getenv("SCW_ACCESS_KEY"),
-				SecretKey: os.Getenv("SCW_SECRET_KEY"), UserAgent: "scaleway-sfs-subdir-csi/" + buildversion.Version,
+				SecretKey: os.Getenv("SCW_SECRET_KEY"), UserAgent: "github.com/urlab-ai/scaleway-file-storage-subdir-csi/" + buildversion.Version,
 			})
 			if buildErr == nil {
 				var mounter mount.Interface

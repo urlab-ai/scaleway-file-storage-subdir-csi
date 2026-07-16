@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/e2ecleanup"
-	"scaleway-sfs-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
 
 const maxInventoryBytes = 128 * 1024

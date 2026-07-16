@@ -1,0 +1,6 @@
+[allowlist]
+description = "Allow the exact syntactically valid Scaleway SDK credential fixture used only by unit tests."
+regexTarget = "match"
+regexes = [
+  '''AccessKey:\s*"SCW1234567890ABCDEFG"''',
+]

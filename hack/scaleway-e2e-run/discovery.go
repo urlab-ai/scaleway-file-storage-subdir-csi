@@ -12,9 +12,9 @@ import (
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
-	"scaleway-sfs-subdir-csi/internal/e2ecleanup"
-	"scaleway-sfs-subdir-csi/internal/e2eplan"
-	"scaleway-sfs-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
 
 // seedInventory creates the crash-recovery ledger before any provider

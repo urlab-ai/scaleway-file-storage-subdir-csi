@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"slices"
 
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // NodeIdentity is the validated local unauthenticated metadata projection used

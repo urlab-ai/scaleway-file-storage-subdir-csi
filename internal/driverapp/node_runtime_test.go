@@ -3,8 +3,8 @@ package driverapp
 import (
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func TestNodeRuntimeInputsAreStableAndComplete(t *testing.T) {

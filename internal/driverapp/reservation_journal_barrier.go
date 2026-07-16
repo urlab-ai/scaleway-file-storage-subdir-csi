@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"slices"
 
-	"scaleway-sfs-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
 )
 
 // controllerReservationJournalBarrier projects the permanent journal store

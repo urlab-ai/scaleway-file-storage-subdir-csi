@@ -11,7 +11,7 @@ const recordTimestamp = "2026-07-12T12:00:00Z"
 func validDetailedAllocation(t *testing.T) *DetailedAllocationRecord {
 	t.Helper()
 	const (
-		driverName  = "sfs-subdir.csi.example.com"
+		driverName  = "file-storage-subdir.csi.urlab.ai"
 		requestName = "pvc-123"
 	)
 	logicalID, err := LogicalVolumeID(driverName, requestName)

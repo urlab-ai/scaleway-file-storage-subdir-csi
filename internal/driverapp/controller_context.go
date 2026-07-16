@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
 )
 
 // controllerOperationContext combines the caller lifetime with every

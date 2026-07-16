@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 )
 
 func validCheckpointManifest(t *testing.T) CheckpointManifest {
@@ -23,7 +23,7 @@ func validCheckpointManifest(t *testing.T) CheckpointManifest {
 		t.Fatalf("NewHolderEvidence() error = %v", err)
 	}
 	manifest, err := NewCheckpointManifest(
-		"77777777-7777-4777-8777-777777777777", "sfs-subdir.csi.example.com",
+		"77777777-7777-4777-8777-777777777777", "file-storage-subdir.csi.urlab.ai",
 		holder.InstallationID, holder.ActiveClusterUID, "1.0.0",
 		"88888888-8888-4888-8888-888888888888", holder,
 		time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC),

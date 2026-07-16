@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func testReservationJournal(t *testing.T, client ConfigMapClient) *ReservationJournalStore {
@@ -128,7 +128,7 @@ func TestReservationJournalRejectsDuplicateJSONKeys(t *testing.T) {
 }
 
 func TestReservationJournalV1CompatibilityFixtures(t *testing.T) {
-	journalFixture := []byte(`{"schemaVersion":"1","driverName":"sfs-subdir.csi.example.com","installationID":"11111111-1111-4111-8111-111111111111","activeClusterUID":"22222222-2222-4222-8222-222222222222","poolName":"standard","generation":7,"state":"Idle"}`)
+	journalFixture := []byte(`{"schemaVersion":"1","driverName":"file-storage-subdir.csi.urlab.ai","installationID":"11111111-1111-4111-8111-111111111111","activeClusterUID":"22222222-2222-4222-8222-222222222222","poolName":"standard","generation":7,"state":"Idle"}`)
 	journal, err := DecodeReservationJournalProjection(journalFixture)
 	if err != nil {
 		t.Fatalf("DecodeReservationJournalProjection(v1 fixture) error = %v", err)
@@ -137,7 +137,7 @@ func TestReservationJournalV1CompatibilityFixtures(t *testing.T) {
 		t.Fatalf("decoded v1 journal fixture = %#v", journal)
 	}
 
-	setFixture := []byte(`{"schemaVersion":"1","driverName":"sfs-subdir.csi.example.com","installationID":"11111111-1111-4111-8111-111111111111","activeClusterUID":"22222222-2222-4222-8222-222222222222","generation":3,"state":"Ready","pools":["standard"]}`)
+	setFixture := []byte(`{"schemaVersion":"1","driverName":"file-storage-subdir.csi.urlab.ai","installationID":"11111111-1111-4111-8111-111111111111","activeClusterUID":"22222222-2222-4222-8222-222222222222","generation":3,"state":"Ready","pools":["standard"]}`)
 	set, err := DecodeReservationJournalSetProjection(setFixture)
 	if err != nil {
 		t.Fatalf("DecodeReservationJournalSetProjection(v1 fixture) error = %v", err)

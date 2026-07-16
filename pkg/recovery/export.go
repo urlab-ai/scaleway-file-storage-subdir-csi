@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // ParentOwnershipExport is the exact live configured-parent evidence captured

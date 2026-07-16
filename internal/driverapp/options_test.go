@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	buildversion "scaleway-sfs-subdir-csi/internal/version"
-	"scaleway-sfs-subdir-csi/pkg/admin"
-	"scaleway-sfs-subdir-csi/pkg/config"
+	buildversion "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
 )
 
 func TestParseAcceptsClosedControllerAndNodeInvocations(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const preflightDriverName = "sfs-subdir.csi.example.com"
+const preflightDriverName = "file-storage-subdir.csi.urlab.ai"
 
 func TestPreflightNodePathsProvesResolvedAndKernelTopology(t *testing.T) {
 	layout := validNodePathLayout(t)

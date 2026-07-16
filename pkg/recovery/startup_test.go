@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func startupSnapshot(t *testing.T) (StartupInventorySnapshot, *volume.DetailedAllocationRecord, *volume.DetailedOwnershipRecord) {

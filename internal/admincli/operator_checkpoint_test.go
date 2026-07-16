@@ -11,16 +11,16 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/admin"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func validLocalCheckpointTicket(t *testing.T) recovery.CheckpointTicket {
 	t.Helper()
 	const (
-		driverName     = "sfs-subdir.csi.example.com"
+		driverName     = "file-storage-subdir.csi.urlab.ai"
 		installationID = "11111111-1111-4111-8111-111111111111"
 		clusterUID     = "22222222-2222-4222-8222-222222222222"
 		parentID       = "33333333-3333-4333-8333-333333333333"

@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const privilegedNodeHelperEnvironment = "SFS_SUBDIR_NODE_HELPER"
@@ -157,7 +157,7 @@ func runPrivilegedNodeServiceKernelLifecycle(t *testing.T) {
 	kubeletRoot := filepath.Join(root, "kubelet")
 	parentID := "11111111-1111-4111-8111-111111111111"
 	nodeID := "fr-par-1/22222222-2222-4222-8222-222222222222"
-	driverName := "sfs-subdir.csi.example.com"
+	driverName := "file-storage-subdir.csi.urlab.ai"
 	parentTarget := filepath.Join(parentRoot, parentID)
 	stageTarget := filepath.Join(kubeletRoot, "plugins/kubernetes.io/csi", driverName, "volume-a/globalmount")
 	publishParent := filepath.Join(kubeletRoot, "pods/pod-a/volumes/kubernetes.io~csi/pv-a")

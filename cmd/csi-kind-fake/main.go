@@ -11,8 +11,8 @@ import (
 	"strings"
 	"syscall"
 
-	"scaleway-sfs-subdir-csi/internal/kindfake"
-	"scaleway-sfs-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/kindfake"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
 )
 
 func main() {

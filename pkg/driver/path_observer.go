@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // FilesystemPathObserver converts authenticated durable lifecycle paths into

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/safety"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/safety"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func TestDecodeParentRecordEntriesReturnsFinalRecordsAndBoundTemporaries(t *testing.T) {
@@ -59,7 +59,7 @@ func TestDecodeParentRecordEntriesRejectsUnknownDuplicateAndMismatchedNames(t *t
 			}
 		})
 	}
-	otherLogicalID, err := volume.LogicalVolumeID("sfs-subdir.csi.example.com", "different-request")
+	otherLogicalID, err := volume.LogicalVolumeID("file-storage-subdir.csi.urlab.ai", "different-request")
 	if err != nil {
 		t.Fatalf("LogicalVolumeID() error = %v", err)
 	}

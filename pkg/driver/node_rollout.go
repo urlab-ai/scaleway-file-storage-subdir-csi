@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // NodeRolloutObservation is the coherent Kubernetes and live provider

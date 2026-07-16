@@ -8,9 +8,9 @@ import (
 	"slices"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/mount"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const localNodeID = "fr-par-1/44444444-4444-4444-8444-444444444444"
@@ -185,7 +185,7 @@ func newNodeHarness(t *testing.T, mode volume.AccessMode) *nodeHarness {
 		authorizer: &fakeNodeAuthorizer{ownership: owner},
 		targets:    &fakeNodeTargets{staging: make(map[string]bool), publish: make(map[string]bool)},
 		response:   response, owner: owner,
-		staging: "/var/lib/kubelet/plugins/kubernetes.io/csi/sfs-subdir.csi.example.com/volume-a/globalmount",
+		staging: "/var/lib/kubelet/plugins/kubernetes.io/csi/file-storage-subdir.csi.urlab.ai/volume-a/globalmount",
 		targetA: "/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~csi/pv-a/mount",
 		targetB: "/var/lib/kubelet/pods/pod-b/volumes/kubernetes.io~csi/pv-a/mount",
 	}

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/recovery"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
 )
 
 type orderedStartupJournal struct{ calls *[]string }
@@ -51,7 +51,7 @@ func TestControllerColdStartResolvesJournalBeforeInventoryAndLifecycle(t *testin
 	}
 	allocations, err := k8s.NewAllocationStore(
 		k8s.NewFakeConfigMapClient(), "driver-system",
-		"sfs-subdir.csi.example.com", "11111111-1111-4111-8111-111111111111",
+		"file-storage-subdir.csi.urlab.ai", "11111111-1111-4111-8111-111111111111",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestControllerColdStartResolvesJournalBeforeInventoryAndLifecycle(t *testin
 func TestCheckpointResumeResolvesJournalBeforeLifecycle(t *testing.T) {
 	allocations, err := k8s.NewAllocationStore(
 		k8s.NewFakeConfigMapClient(), "driver-system",
-		"sfs-subdir.csi.example.com", "11111111-1111-4111-8111-111111111111",
+		"file-storage-subdir.csi.urlab.ai", "11111111-1111-4111-8111-111111111111",
 	)
 	if err != nil {
 		t.Fatal(err)

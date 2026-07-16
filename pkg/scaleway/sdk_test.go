@@ -189,7 +189,8 @@ func TestSDKAPIMutationsUseExactTargetAndReturnMappedErrors(t *testing.T) {
 func TestNewSDKAPIValidatesAuthorityWithoutExposingSecrets(t *testing.T) {
 	base := SDKOptions{
 		Region: "fr-par", ProjectID: "44444444-4444-4444-8444-444444444444", Zone: "fr-par-2",
-		AccessKey: "SCW1234567890ABCDEFG", SecretKey: "7363616c-6577-6573-6862-6f7579616161", UserAgent: "sfs-subdir-test/1.0.0",
+		AccessKey: "SCW1234567890ABCDEFG", // gitleaks:allow -- syntactically valid SDK fixture, never sent to Scaleway.
+		SecretKey: "7363616c-6577-6573-6862-6f7579616161", UserAgent: "sfs-subdir-test/1.0.0",
 	}
 	if _, err := NewSDKAPI(base); err != nil {
 		t.Fatalf("NewSDKAPI() error = %v", err)

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/observability"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/observability"
 )
 
 func TestControllerCSIObserverRecordsGenericAndDedicatedCompletions(t *testing.T) {

@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	releasecompat "scaleway-sfs-subdir-csi/internal/compatibility"
-	"scaleway-sfs-subdir-csi/internal/version"
+	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version"
 )
 
 func main() {

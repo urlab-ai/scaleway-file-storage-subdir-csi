@@ -14,15 +14,15 @@ import (
 
 	"github.com/kubernetes-csi/csi-test/v5/pkg/sanity"
 
-	"scaleway-sfs-subdir-csi/internal/csiadapter"
-	"scaleway-sfs-subdir-csi/pkg/config"
-	"scaleway-sfs-subdir-csi/pkg/driver"
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/csiadapter"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/driver"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
-	sanityDriverName = "sfs-subdir.csi.example.com"
+	sanityDriverName = "file-storage-subdir.csi.urlab.ai"
 	sanityNodeID     = "fr-par-1/11111111-1111-4111-8111-111111111111"
 )
 

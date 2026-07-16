@@ -26,7 +26,7 @@ IDENTITY_JSON=$(
 
 mkdir -p "$DIST_DIR"
 DIST_DIR=$(CDPATH= cd -- "$DIST_DIR" && pwd)
-LDFLAGS="-s -w -X scaleway-sfs-subdir-csi/internal/version.Version=$VERSION -X scaleway-sfs-subdir-csi/internal/version.Commit=$COMMIT -X scaleway-sfs-subdir-csi/internal/version.BuildDate=$BUILD_DATE -X scaleway-sfs-subdir-csi/internal/version.QualifiedCommercialTypes=$QUALIFIED_COMMERCIAL_TYPES"
+LDFLAGS="-s -w -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Version=$VERSION -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Commit=$COMMIT -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.BuildDate=$BUILD_DATE -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.QualifiedCommercialTypes=$QUALIFIED_COMMERCIAL_TYPES"
 
 for arch in amd64 arm64; do
   for command in scaleway-sfs-subdir-csi csi-admin; do
@@ -70,4 +70,4 @@ else
 fi
 
 echo "release binaries, checksums, SPDX SBOM, and unsigned provenance subjects written to $DIST_DIR"
-echo "Signing/attestation, images, chart package, exact public coordinates, and publication remain separate mandatory release gates"
+echo "Signing/attestation, images, chart package, and publication remain separate mandatory release gates"

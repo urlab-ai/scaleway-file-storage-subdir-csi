@@ -7,12 +7,12 @@ import (
 	"slices"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
-	barrierTestDriverName     = "sfs-subdir.csi.example.com"
+	barrierTestDriverName     = "file-storage-subdir.csi.urlab.ai"
 	barrierTestInstallationID = "11111111-1111-4111-8111-111111111111"
 	barrierTestClusterUID     = "22222222-2222-4222-8222-222222222222"
 	barrierTestParentID       = "33333333-3333-4333-8333-333333333333"

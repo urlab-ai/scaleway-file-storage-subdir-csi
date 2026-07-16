@@ -50,7 +50,7 @@ func TestImmutableContextAcceptsOnlyExternalProvisionerDeliveryField(t *testing.
 	if err != nil {
 		t.Fatalf("Map() error = %v", err)
 	}
-	values[ExternalProvisionerIdentityKey] = "1783952485991-2771-sfs-subdir.csi.example.com"
+	values[ExternalProvisionerIdentityKey] = "1783952485991-2771-file-storage-subdir.csi.urlab.ai"
 	got, err := ParseImmutableContext(values)
 	if err != nil || got != want {
 		t.Fatalf("ParseImmutableContext(provisioner identity) = %#v, %v", got, err)

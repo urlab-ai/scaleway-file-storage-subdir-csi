@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // DeletePathObservation is a no-follow, mount-validated view of the persisted

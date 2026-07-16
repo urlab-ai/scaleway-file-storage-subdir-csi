@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
 )
 
 // OSStatFSSampler is unavailable outside Linux because production controller

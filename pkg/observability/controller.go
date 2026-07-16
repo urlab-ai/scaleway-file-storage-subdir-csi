@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // ControllerMetrics owns the controller metric registry and its immutable

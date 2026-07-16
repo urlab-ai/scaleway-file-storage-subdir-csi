@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/internal/e2eplan"
-	"scaleway-sfs-subdir-csi/internal/e2erunner"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
 )
 
 func testCandidate() CandidateManifest {

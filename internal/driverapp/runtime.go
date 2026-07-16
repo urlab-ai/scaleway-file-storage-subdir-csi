@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/config"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/config"
 )
 
 // Run constructs and serves the selected production component until the

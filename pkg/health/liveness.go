@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
 )
 
 const maxLivenessReasonBytes = 512

@@ -9,7 +9,7 @@ import (
 const (
 	mountInfoParentRoot = "/var/lib/scaleway-sfs-subdir-csi/parents"
 	mountInfoKubelet    = "/var/lib/kubelet"
-	mountInfoDriver     = "sfs-subdir.csi.example.com"
+	mountInfoDriver     = "file-storage-subdir.csi.urlab.ai"
 	mountInfoParentID   = "11111111-1111-4111-8111-111111111111"
 )
 

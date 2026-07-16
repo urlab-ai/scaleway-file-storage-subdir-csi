@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func checkpointJournalFixture(t *testing.T, snapshot StartupInventorySnapshot) []k8s.StoredReservationJournalObject {
@@ -36,7 +36,7 @@ func TestBuildRestoreKubernetesObjectSummaryIsStableAcrossServerGenerations(t *t
 	snapshot.PersistentVolumes[0].UID = "restored-pv-uid"
 	snapshot.PersistentVolumes[0].ResourceVersion = "restored-pv-generation"
 	snapshot.PersistentVolumes[0].VolumeContext = cloneStringMap(snapshot.PersistentVolumes[0].VolumeContext)
-	snapshot.PersistentVolumes[0].VolumeContext[volume.ExternalProvisionerIdentityKey] = "new-sidecar-instance-sfs-subdir.csi.example.com"
+	snapshot.PersistentVolumes[0].VolumeContext[volume.ExternalProvisionerIdentityKey] = "new-sidecar-instance-file-storage-subdir.csi.urlab.ai"
 	second, err := BuildRestoreKubernetesObjectSummary("driver-system", snapshot.Allocations, journals, snapshot.PersistentVolumes)
 	if err != nil {
 		t.Fatalf("BuildRestoreKubernetesObjectSummary(restored) error = %v", err)

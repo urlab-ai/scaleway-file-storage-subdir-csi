@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const privilegedMountTestEnvironment = "SFS_SUBDIR_PRIVILEGED_LINUX_TEST"
@@ -49,7 +49,7 @@ func runPrivilegedKernelMountAssertions(t *testing.T) {
 	kubeletRoot := filepath.Join(root, "kubelet")
 	quarantineRoot := filepath.Join(root, "quarantine")
 	parentID := "11111111-1111-4111-8111-111111111111"
-	driverName := "sfs-subdir.csi.example.com"
+	driverName := "file-storage-subdir.csi.urlab.ai"
 	parentTarget := filepath.Join(parentRoot, parentID)
 	backing := filepath.Join(parentTarget, "kubernetes-volumes", "tenant--claim--0123456789ab")
 	stageTarget := filepath.Join(kubeletRoot, "plugins", "kubernetes.io", "csi", driverName, "volume-a", "globalmount")

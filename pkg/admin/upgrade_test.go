@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func validUpgradeState() (UpgradeLiveState, UpgradeCandidate) {
@@ -13,7 +13,7 @@ func validUpgradeState() (UpgradeLiveState, UpgradeCandidate) {
 		PoolName:           "standard", BasePathHash: "bp-" + strings.Repeat("a", 32),
 	}
 	live := UpgradeLiveState{
-		DriverName:               "sfs-subdir.csi.example.com",
+		DriverName:               "file-storage-subdir.csi.urlab.ai",
 		InstallationIDHash:       "sha256:" + strings.Repeat("b", 64),
 		ActiveClusterUID:         "22222222-2222-4222-8222-222222222222",
 		LeadershipLeaseName:      volume.LeadershipLeaseNameV1,

@@ -11,7 +11,7 @@ import (
 
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
-	"scaleway-sfs-subdir-csi/internal/strictjson"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
 
 const (

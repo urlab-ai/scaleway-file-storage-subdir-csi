@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // KernelMounter is the Linux detached-mount and exact-unmount adapter backed by
@@ -214,7 +214,7 @@ func (mounter *KernelMounter) MountParent(ctx context.Context, parentFilesystemI
 // mountParentFilesystem keeps the production parent-mount protocol testable
 // on generic privileged Linux CI where virtiofs is unavailable. Production
 // calls it only with the fixed flagless virtiofs profile above.
-func (mounter *KernelMounter) mountParentFilesystem(ctx context.Context, parentFilesystemID, target, filesystemType, source, data string) error {
+func (mounter *KernelMounter) mountParentFilesystem(ctx context.Context, parentFilesystemID, target, filesystemType, source, data string) (returnErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func (mounter *KernelMounter) mountParentFilesystem(ctx context.Context, parentF
 	if err != nil {
 		return fmt.Errorf("open virtiofs parent target %q without following symlinks: %w", target, err)
 	}
-	defer unix.Close(targetFD)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(targetFD)) }()
 	if filesystemType == "" || strings.ContainsAny(filesystemType+source+data, "\x00\r\n") {
 		return fmt.Errorf("parent mount filesystem fixture is invalid")
 	}
@@ -239,7 +239,7 @@ func (mounter *KernelMounter) mountParentFilesystem(ctx context.Context, parentF
 		}
 		return fmt.Errorf("create detached %s parent %q: %w", filesystemType, parentFilesystemID, err)
 	}
-	defer unix.Close(mountFD)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(mountFD)) }()
 	generation, err := uniqueMountGenerationForFD(mountFD, 0)
 	if err != nil {
 		return fmt.Errorf("authenticate newly mounted virtiofs parent %q at %q: %w", parentFilesystemID, target, err)
@@ -341,7 +341,7 @@ func createDetachedFilesystem(filesystemType, source, data string) (mountFD int,
 // exposure when requested, and moves that exact object to the target. The
 // returned generation comes from the owned mount FD rather than a pathname
 // observation after a pathname mount, so rollback can never target a replacement.
-func (mounter *KernelMounter) Bind(ctx context.Context, request BindRequest) (BindResult, error) {
+func (mounter *KernelMounter) Bind(ctx context.Context, request BindRequest) (result BindResult, returnErr error) {
 	entry := request.Entry
 	if err := ctx.Err(); err != nil {
 		return BindResult{Mutation: BindMutationNone}, err
@@ -375,7 +375,7 @@ func (mounter *KernelMounter) Bind(ctx context.Context, request BindRequest) (Bi
 	if err != nil {
 		return BindResult{Mutation: BindMutationNone}, fmt.Errorf("duplicate authenticated bind source %q: %w", entry.SourcePath, err)
 	}
-	defer unix.Close(sourceFD)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(sourceFD)) }()
 	sourceGeneration, err := uniqueMountGenerationForFD(sourceFD, 0)
 	if err != nil {
 		return BindResult{Mutation: BindMutationNone}, fmt.Errorf("authenticate bind source %q: %w", entry.SourcePath, err)
@@ -390,7 +390,7 @@ func (mounter *KernelMounter) Bind(ctx context.Context, request BindRequest) (Bi
 	if err != nil {
 		return BindResult{Mutation: BindMutationNone}, fmt.Errorf("clone bind source %q as detached mount: %w", entry.SourcePath, err)
 	}
-	defer unix.Close(bindFD)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(bindFD)) }()
 	attribute := unix.MountAttr{Propagation: unix.MS_PRIVATE}
 	attributeDescription := "private"
 	if entry.ReadOnly {
@@ -408,7 +408,7 @@ func (mounter *KernelMounter) Bind(ctx context.Context, request BindRequest) (Bi
 	if err != nil {
 		return BindResult{Mutation: BindMutationNone}, fmt.Errorf("duplicate authenticated bind target %q: %w", entry.Target, err)
 	}
-	defer unix.Close(targetFD)
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(targetFD)) }()
 	if err := ctx.Err(); err != nil {
 		return BindResult{Mutation: BindMutationNone}, err
 	}

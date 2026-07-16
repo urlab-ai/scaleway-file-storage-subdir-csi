@@ -4,7 +4,7 @@ package mount
 
 import "fmt"
 
-import "scaleway-sfs-subdir-csi/pkg/volume"
+import "github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 
 // NewKernelMounter reports that the production mount adapter requires Linux.
 func NewKernelMounter(parentRoot, kubeletPath, driverName string) (Interface, error) {

@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/internal/clock"
-	"scaleway-sfs-subdir-csi/pkg/coordination"
-	"scaleway-sfs-subdir-csi/pkg/k8s"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 const (
-	driverTestName           = "sfs-subdir.csi.example.com"
+	driverTestName           = "file-storage-subdir.csi.urlab.ai"
 	driverTestInstallationID = "11111111-1111-4111-8111-111111111111"
 	driverTestClusterUID     = "22222222-2222-4222-8222-222222222222"
 )

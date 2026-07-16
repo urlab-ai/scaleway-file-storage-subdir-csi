@@ -1,4 +1,4 @@
-# Scaleway SFS Subdirectory CSI Driver
+# Scaleway File Storage Subdirectory CSI Driver
 
 This project is building a Kubernetes CSI driver that exposes isolated logical
 RWX volumes as subdirectories of a small, explicit pool of existing Scaleway
@@ -22,10 +22,19 @@ Supporting review and operations material:
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 - [`docs/ALERTS.md`](docs/ALERTS.md)
 
-The local Go module path, CSI driver name, chart coordinates, container registry,
-and compatibility matrix are development values. A public release is blocked
-until maintainers approve the final public coordinates and every release gate in
-the specification has concrete evidence.
+The public source, module, CSI, and artifact identities are frozen as:
+
+- `github.com/urlab-ai/scaleway-file-storage-subdir-csi`;
+- `file-storage-subdir.csi.urlab.ai`;
+- `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
+- `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`.
+
+The first candidate is `v0.1.0-rc.1`. These stable coordinates do not make it a
+production release: publication remains blocked until the exact candidate has
+concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
+`DEV1-M` is the sole proposed commercial type for that first qualification run;
+it is not supported or advertised until the retained real-provider evidence is
+complete.
 
 `TEST-TYPE-1` in the development values is a synthetic validation fixture, not
 a supported Scaleway Instance type. A release must replace it with the sorted
@@ -37,9 +46,9 @@ limit.
 The Helm chart now renders the intended controller, node plugin, CSI sidecars,
 RBAC, CSIDriver, StorageClasses, probes, metrics endpoint, and exact mount
 hostPaths for policy review. Its default values are deliberately synthetic and
-the chart rejects `release.mode=production`: the real CSI identity, pinned
-sidecar versions, and immutable public image digests have not been approved.
-Rendering the development chart is not an installation procedure.
+the source chart rejects `release.mode=production`. Release preparation promotes
+an exact copy with the frozen CSI identity and immutable driver/sidecar digests;
+rendering the source development chart is not an installation procedure.
 
 The driver executable validates the closed controller/node flag set, loads the
 exact Helm-rendered runtime projection, and assembles the production CSI,
@@ -135,9 +144,10 @@ does not call a Scaleway API, and does not publish release artifacts. Release
 preparation and publication remain explicit operator actions in v1; this keeps
 the automation small and prevents a repository workflow from provisioning or
 deleting billable cloud resources.
-`make test-release-manifest` independently proves that a
-release-candidate chart can render only the closed driver/sidecar set by
-immutable digest; it does not choose or publish the final public coordinates.
+`make test-release-manifest` independently proves that a release-candidate chart
+can render only the closed driver/sidecar set by immutable digest. The public
+coordinates above are fixed; the tool still never publishes artifacts by
+itself.
 
 Before using a published operator binary, download its matching release
 checksum manifest and every file listed by that manifest into an otherwise

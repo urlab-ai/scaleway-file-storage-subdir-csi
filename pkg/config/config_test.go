@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"scaleway-sfs-subdir-csi/pkg/pool"
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/pool"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 func validRuntime(t *testing.T) Runtime {
@@ -17,7 +17,7 @@ func validRuntime(t *testing.T) Runtime {
 	}
 	return Runtime{
 		Mode:       ModeProduction,
-		DriverName: "sfs-subdir.csi.example.com",
+		DriverName: "file-storage-subdir.csi.urlab.ai",
 		Installation: Installation{
 			ExistingSecretName: "scaleway-sfs-subdir-csi-identity",
 			IDKey:              "installationID",

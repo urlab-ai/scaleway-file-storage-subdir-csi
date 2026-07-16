@@ -3,7 +3,7 @@ package driver
 import (
 	"fmt"
 
-	"scaleway-sfs-subdir-csi/pkg/volume"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
 // ValidateLifecyclePairForStartup is the read-only authority for one
