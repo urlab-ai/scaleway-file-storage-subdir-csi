@@ -1,0 +1,21 @@
+{{- range $class := .Values.storageClasses }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $class.name }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" $ | nindent 4 }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: {{ $class.defaultClass | quote }}
+provisioner: {{ $.Values.driver.name }}
+reclaimPolicy: Delete
+allowVolumeExpansion: false
+volumeBindingMode: Immediate
+parameters:
+  poolName: {{ $class.poolName | quote }}
+  onDelete: {{ (index $.Values.pools $class.poolName).onDelete | quote }}
+  directoryMode: {{ (index $.Values.pools $class.poolName).directoryMode | quote }}
+  directoryUid: {{ (index $.Values.pools $class.poolName).directoryUid | quote }}
+  directoryGid: {{ (index $.Values.pools $class.poolName).directoryGid | quote }}
+---
+{{- end }}

@@ -1,0 +1,15 @@
+# Go build and coverage outputs.
+/bin/
+/dist/
+/coverage/
+*.coverprofile
+
+# Local editor and operating-system state.
+.DS_Store
+.idea/
+.vscode/
+
+# Local Kubernetes and end-to-end evidence may contain sensitive identifiers.
+/.kube/
+/artifacts/
+/e2e-inventory/

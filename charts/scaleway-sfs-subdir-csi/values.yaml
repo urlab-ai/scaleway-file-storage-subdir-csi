@@ -1,0 +1,183 @@
+# Development defaults render the complete chart but intentionally reference
+# synthetic provider IDs, external Secrets that do not exist, and unqualified
+# image tags. Production mode rejects every such placeholder and requires
+# immutable image digests.
+release:
+  mode: development
+
+# This switch is consumed only by the disposable kind chart-install suite. The
+# referenced binary is built into Dockerfile.kind and is deliberately absent
+# from release images. Helm validation forbids this mode in production.
+integrationTest:
+  fakeDriver:
+    enabled: false
+    binaryPath: /usr/local/bin/csi-kind-fake
+
+driver:
+  name: sfs-subdir.csi.example.com
+  logLevel: info
+
+installation:
+  existingSecretName: scaleway-sfs-subdir-csi-identity
+  idKey: installationID
+  generateForDevelopmentOnly: false
+
+scaleway:
+  region: fr-par
+  defaultZone: fr-par-1
+  projectId: 00000000-0000-4000-8000-000000000000
+  credentials:
+    existingSecretName: scaleway-sfs-subdir-csi-credentials
+    accessKeyKey: SCW_ACCESS_KEY
+    secretKeyKey: SCW_SECRET_KEY
+
+image:
+  repository: scaleway-sfs-subdir-csi
+  tag: 0.0.0-dev
+  digest: ""
+  pullPolicy: IfNotPresent
+
+sidecars:
+  operationTimeout: 12m
+  externalProvisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner
+    tag: development-unpinned
+    digest: ""
+    workerThreads: 5
+  externalAttacher:
+    image: registry.k8s.io/sig-storage/csi-attacher
+    tag: development-unpinned
+    digest: ""
+    workerThreads: 5
+  nodeDriverRegistrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: development-unpinned
+    digest: ""
+  livenessProbe:
+    image: registry.k8s.io/sig-storage/livenessprobe
+    tag: development-unpinned
+    digest: ""
+
+controller:
+  replicas: 1
+  leaderElection: true
+  updateStrategy: Recreate
+  maxConcurrentMutations: 10
+  shutdownDeadline: 90s
+  terminationGracePeriodSeconds: 120
+  progressDeadlineSeconds: 3900
+  leadership:
+    enabled: true
+    leaseDuration: 30s
+    renewDeadline: 20s
+    retryPeriod: 5s
+  attachReadyDeadline: 10m
+  metadataRefreshInterval: 5m
+  detailedTombstoneRetention: 720h
+  parentMountRoot: /var/lib/scaleway-sfs-subdir-csi/controller-parents
+  privilegedMounts: true
+  nodeSelector:
+    kubernetes.io/os: linux
+  affinity: {}
+  tolerations: []
+
+node:
+  parentMountRoot: /var/lib/scaleway-sfs-subdir-csi/parents
+  kubeletPath: /var/lib/kubelet
+  nodeSelector:
+    kubernetes.io/os: linux
+  affinity: {}
+  tolerations: []
+
+scheduling:
+  allSchedulableLinuxNodesAreEligible: true
+  requireHomogeneousEligibleNodes: true
+  skipNodePreflightForDevelopmentOnly: false
+
+# This synthetic development value is not a support claim. A release chart
+# replaces it with the exact real-E2E-qualified list embedded in its binaries.
+compatibility:
+  qualifiedCommercialTypes:
+    - TEST-TYPE-1
+
+pools:
+  standard:
+    basePath: /kubernetes-volumes
+    selectionPolicy: least-allocated
+    maxParentsPerEligibleNode: 2
+    maxLogicalOvercommitRatio: "1.0"
+    minFreeBytes: 10737418240
+    minFreePercent: 5
+    onDelete: archive
+    directoryMode: "0770"
+    directoryUid: "1000"
+    directoryGid: "1000"
+    filesystems:
+      - id: 00000000-0000-4000-8000-000000000001
+        name: sfs-subdir-pool-standard-01
+        state: active
+      - id: 00000000-0000-4000-8000-000000000002
+        name: sfs-subdir-pool-standard-02
+        state: active
+
+storageClasses:
+  - name: sfs-subdir-rwx
+    poolName: standard
+    defaultClass: false
+    reclaimPolicy: Delete
+    allowVolumeExpansion: false
+    volumeBindingMode: Immediate
+
+imagePullSecrets: []
+podLabels: {}
+podAnnotations: {}
+priorityClassName: system-cluster-critical
+
+serviceAccounts:
+  controller:
+    create: true
+    name: ""
+  node:
+    create: true
+    name: ""
+
+rbac:
+  create: true
+
+resources:
+  controllerDriver:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  externalProvisioner:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  externalAttacher:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  nodeDriver:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  nodeDriverRegistrar:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  livenessProbe:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 64Mi}
+
+probes:
+  startup:
+    periodSeconds: 10
+    failureThreshold: 360
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 20
+    failureThreshold: 3
+
+metrics:
+  enabled: true
+  port: 8080
+  service:
+    enabled: true
+    annotations: {}

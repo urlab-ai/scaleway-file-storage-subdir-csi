@@ -1,0 +1,58 @@
+name: CI
+
+# Local verification only: no Scaleway credentials, cloud API calls, release
+# publication, or persistent infrastructure are allowed in this workflow.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.0
+          cache: true
+      - name: Check formatting
+        run: make fmt-check
+      - name: Test
+        run: make test
+      - name: Race test
+        run: make test-race
+      - name: CSI sanity evidence
+        run: make test-csi-sanity
+      - name: Privileged Linux mount-namespace tests
+        run: sudo --preserve-env=PATH,GOCACHE,GOMODCACHE env GOWORK=off make test-linux-privileged
+      - name: Cross-compile Linux lifecycle safety tests
+        run: make test-linux-cross-compile
+      - name: Vet
+        run: make vet
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          version: v2.8.0
+      - name: Build development container image
+        run: make docker-build
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.18.3
+      - name: Lint chart
+        run: make helm-lint
+      - name: Verify chart policy
+        run: make helm-test
+      - name: Verify read-only installation preflight
+        run: make test-install-preflight
+      - name: Verify kind chart install and fake CSI lifecycle
+        run: make test-kind

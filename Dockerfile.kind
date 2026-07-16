@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.7
+
+# This image exists only for the disposable kind chart-install suite. Release
+# automation builds Dockerfile and must never publish or attest this image as a
+# driver artifact.
+ARG GO_IMAGE=golang:1.26.0-alpine3.23
+FROM ${GO_IMAGE} AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/csi-kind-fake ./cmd/csi-kind-fake
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/csi-admin ./cmd/csi-admin
+
+FROM scratch
+COPY --from=build /out/csi-kind-fake /usr/local/bin/csi-kind-fake
+COPY --from=build /out/csi-admin /usr/local/bin/csi-admin
+ENTRYPOINT ["/usr/local/bin/csi-kind-fake"]

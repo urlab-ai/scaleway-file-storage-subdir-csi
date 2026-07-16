@@ -1,0 +1,228 @@
+{{- if .Values.rbac.create }}
+# The cluster-scoped sidecar union remains separate from driver-owned reads so
+# release qualification can diff it against the pinned upstream manifests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-controller-sidecars
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-controller-sidecars
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-controller-sidecars
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Driver-specific cluster reads never authorize cluster-scoped mutation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-driver-read
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments", "csinodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-driver-read
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-driver-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Allocation records are permanent; delete is intentionally absent.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-allocations
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-allocations
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-allocations
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Kubernetes cannot resource-name constrain create, so creation is isolated in
+# its own rule. Every read/write after creation is fixed-name constrained.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-controller-leadership
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["scaleway-sfs-subdir-csi-controller"]
+    verbs: ["get", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-controller-leadership
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-controller-leadership
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Sidecar elections use their upstream-generated Lease names and therefore have
+# a separate namespace scope; delete remains unnecessary and forbidden.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-sidecar-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-sidecar-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-sidecar-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-operator-secrets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["sfs-subdir-controller-approval", "sfs-subdir-checkpoint"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-operator-secrets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-operator-secrets
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-node-pod-read
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-node-pod-read
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-node-pod-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scaleway-sfs-subdir-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

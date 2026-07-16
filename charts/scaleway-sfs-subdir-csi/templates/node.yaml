@@ -1,0 +1,205 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "scaleway-sfs-subdir-csi.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: node
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata:
+      labels:
+        {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 8 }}
+        app.kubernetes.io/component: node
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        scaleway-sfs-subdir-csi.io/node-config-generation: {{ include "scaleway-sfs-subdir-csi.nodeConfigGeneration" . | quote }}
+        scaleway-sfs-subdir-csi.io/driver-image-tag: {{ .Values.image.tag | quote }}
+        scaleway-sfs-subdir-csi.io/registrar-image-tag: {{ .Values.sidecars.nodeDriverRegistrar.tag | quote }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "scaleway-sfs-subdir-csi.nodeServiceAccount" . }}
+      automountServiceAccountToken: false
+      priorityClassName: {{ .Values.priorityClassName }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.node.nodeSelector | nindent 8 }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: driver
+          image: {{ include "scaleway-sfs-subdir-csi.driverImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.integrationTest.fakeDriver.enabled }}
+          command: [{{ .Values.integrationTest.fakeDriver.binaryPath | quote }}]
+          args:
+            - --mode=node
+            - --endpoint=unix:///csi/csi.sock
+            - --driver-name={{ .Values.driver.name }}
+            - --node-name=$(NODE_NAME)
+            - --data-root={{ .Values.node.parentMountRoot }}/.kind-fake-data
+            - --kubelet-path={{ .Values.node.kubeletPath }}
+            - --live-address=:9811
+          {{- else }}
+          args:
+            - --mode=node
+            - --endpoint=unix:///csi/csi.sock
+            - --admin-endpoint=unix:///run/scaleway-sfs-subdir-csi/admin.sock
+            - --config=/etc/scaleway-sfs-subdir-csi/config.json
+            - --live-address=:9811
+            {{- if .Values.metrics.enabled }}
+            - --metrics-address=:{{ .Values.metrics.port }}
+            {{- end }}
+          {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.installation.existingSecretName }}
+                  key: {{ .Values.installation.idKey }}
+          ports:
+            - {name: livez, containerPort: 9811, protocol: TCP}
+            - {name: csi-health, containerPort: 9809, protocol: TCP}
+            {{- if .Values.metrics.enabled }}
+            - {name: metrics, containerPort: {{ .Values.metrics.port }}, protocol: TCP}
+            {{- end }}
+          startupProbe:
+            httpGet: {path: /healthz, port: csi-health}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: csi-health}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet: {path: /livez, port: livez}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            seccompProfile: {type: Unconfined}
+          resources:
+            {{- toYaml .Values.resources.nodeDriver | nindent 12 }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: parent-root
+              mountPath: {{ .Values.node.parentMountRoot }}
+              mountPropagation: Bidirectional
+            - name: pods-dir
+              mountPath: {{ .Values.node.kubeletPath }}/pods
+              mountPropagation: Bidirectional
+            - name: kubelet-plugins
+              mountPath: {{ .Values.node.kubeletPath }}/plugins
+              mountPropagation: Bidirectional
+            - {name: config, mountPath: /etc/scaleway-sfs-subdir-csi, readOnly: true}
+            - {name: run, mountPath: /run}
+            - {name: tmp, mountPath: /tmp}
+            # This emptyDir is intentionally not a Bidirectional host mount.
+            # Exact unmount moves an authenticated mount here before detach;
+            # a container crash therefore destroys the private namespace
+            # reference instead of leaving a host-visible quarantine mount.
+            - {name: mount-quarantine, mountPath: /run/scaleway-sfs-subdir-csi-mount-quarantine}
+        - name: node-driver-registrar
+          image: {{ include "scaleway-sfs-subdir-csi.sidecarImage" .Values.sidecars.nodeDriverRegistrar }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ .Values.node.kubeletPath }}/plugins/{{ .Values.driver.name }}/csi.sock
+          # The registrar must create its registration socket directly in the
+          # shared kubelet plugins_registry hostPath. That upstream contract
+          # requires root ownership, but no capabilities or escalation.
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            {{- toYaml .Values.resources.nodeDriverRegistrar | nindent 12 }}
+          volumeMounts:
+            - {name: plugin-dir, mountPath: /csi}
+            - {name: registration-dir, mountPath: /registration}
+            - {name: tmp, mountPath: /tmp}
+        - name: liveness-probe
+          image: {{ include "scaleway-sfs-subdir-csi.sidecarImage" .Values.sidecars.livenessProbe }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port=9809
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            {{- toYaml .Values.resources.livenessProbe | nindent 12 }}
+          volumeMounts:
+            - {name: plugin-dir, mountPath: /csi}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}/plugins/{{ .Values.driver.name }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}/plugins_registry
+            type: Directory
+        - name: pods-dir
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}/pods
+            type: Directory
+        - name: kubelet-plugins
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}/plugins
+            type: Directory
+        - name: parent-root
+          hostPath:
+            path: {{ .Values.node.parentMountRoot }}
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-config
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        - name: mount-quarantine
+          emptyDir: {}

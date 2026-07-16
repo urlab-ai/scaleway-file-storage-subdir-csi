@@ -1,0 +1,10 @@
+.git
+.github
+.agents
+.codex
+artifacts
+bin
+coverage
+dist
+e2e-inventory
+.DS_Store

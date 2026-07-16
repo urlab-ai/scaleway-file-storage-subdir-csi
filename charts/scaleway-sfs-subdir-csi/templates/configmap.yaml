@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scaleway-sfs-subdir-csi.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "schemaVersion": "1",
+      "mode": {{ .Values.release.mode | toJson }},
+      "driverName": {{ .Values.driver.name | toJson }},
+      "logLevel": {{ .Values.driver.logLevel | toJson }},
+      "controllerNamespace": {{ .Release.Namespace | toJson }},
+      "helmReleaseName": {{ .Release.Name | toJson }},
+      "chartVersion": {{ .Chart.Version | toJson }},
+      "renderedImages": [
+        {"name":"driver","digest":{{ .Values.image.digest | toJson }}},
+        {"name":"external-attacher","digest":{{ .Values.sidecars.externalAttacher.digest | toJson }}},
+        {"name":"external-provisioner","digest":{{ .Values.sidecars.externalProvisioner.digest | toJson }}},
+        {"name":"liveness-probe","digest":{{ .Values.sidecars.livenessProbe.digest | toJson }}},
+        {"name":"node-driver-registrar","digest":{{ .Values.sidecars.nodeDriverRegistrar.digest | toJson }}}
+      ],
+      "nodeConfigGeneration": {{ include "scaleway-sfs-subdir-csi.nodeConfigGeneration" . | toJson }},
+      "installation": {{ .Values.installation | toJson }},
+      "scaleway": {
+        "region": {{ .Values.scaleway.region | toJson }},
+        "defaultZone": {{ .Values.scaleway.defaultZone | toJson }},
+        "projectId": {{ .Values.scaleway.projectId | toJson }},
+        "credentials": {{ .Values.scaleway.credentials | toJson }}
+      },
+      "controller": {
+        "replicas": {{ .Values.controller.replicas }},
+        "updateStrategy": {{ .Values.controller.updateStrategy | toJson }},
+        "maxConcurrentMutations": {{ .Values.controller.maxConcurrentMutations }},
+        "shutdownDeadlineSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.shutdownDeadline }},
+        "terminationGracePeriodSeconds": {{ .Values.controller.terminationGracePeriodSeconds }},
+        "progressDeadlineSeconds": {{ .Values.controller.progressDeadlineSeconds }},
+        "startupProbeBudgetSeconds": {{ mul (int .Values.probes.startup.periodSeconds) (int .Values.probes.startup.failureThreshold) }},
+        "attachReadyDeadlineSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.attachReadyDeadline }},
+        "metadataRefreshIntervalSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.metadataRefreshInterval }},
+        "detailedTombstoneRetentionSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.detailedTombstoneRetention }},
+        "parentMountRoot": {{ .Values.controller.parentMountRoot | toJson }},
+        "leadership": {
+          "enabled": {{ .Values.controller.leadership.enabled }},
+          "leaseName": "scaleway-sfs-subdir-csi-controller",
+          "leaseDurationSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.leadership.leaseDuration }},
+          "renewDeadlineSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.leadership.renewDeadline }},
+          "retryPeriodSeconds": {{ include "scaleway-sfs-subdir-csi.durationSeconds" .Values.controller.leadership.retryPeriod }}
+        }
+      },
+      "node": {
+        "parentMountRoot": {{ .Values.node.parentMountRoot | toJson }},
+        "kubeletPath": {{ .Values.node.kubeletPath | toJson }}
+      },
+      "scheduling": {{ .Values.scheduling | toJson }},
+      "compatibility": {
+        "qualifiedCommercialTypes": {{ .Values.compatibility.qualifiedCommercialTypes | sortAlpha | toJson }}
+      },
+      "pools": {{ .Values.pools | toJson }},
+      "storageClasses": {{ .Values.storageClasses | toJson }}
+    }
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ .Values.driver.name }}
+  labels:
+    {{- include "scaleway-sfs-subdir-csi.labels" . | nindent 4 }}
+spec:
+  attachRequired: true
+  podInfoOnMount: false
+  volumeLifecycleModes:
+    - Persistent
+  fsGroupPolicy: None

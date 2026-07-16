@@ -1,0 +1,275 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["release", "integrationTest", "driver", "installation", "scaleway", "image", "sidecars", "controller", "node", "scheduling", "compatibility", "pools", "storageClasses", "imagePullSecrets", "podLabels", "podAnnotations", "priorityClassName", "serviceAccounts", "rbac", "resources", "probes", "metrics"],
+  "properties": {
+    "release": {
+      "type": "object", "additionalProperties": false, "required": ["mode"],
+      "properties": {"mode": {"enum": ["development", "production"]}}
+    },
+    "integrationTest": {
+      "type": "object", "additionalProperties": false, "required": ["fakeDriver"],
+      "properties": {
+        "fakeDriver": {
+          "type": "object", "additionalProperties": false, "required": ["enabled", "binaryPath"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "binaryPath": {"$ref": "#/definitions/absolutePath"}
+          }
+        }
+      }
+    },
+    "driver": {
+      "type": "object", "additionalProperties": false, "required": ["name", "logLevel"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"},
+        "logLevel": {"enum": ["debug", "info", "warn", "error"]}
+      }
+    },
+    "installation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["existingSecretName", "idKey", "generateForDevelopmentOnly"],
+      "properties": {
+        "existingSecretName": {"$ref": "#/definitions/kubernetesName"},
+        "idKey": {"$ref": "#/definitions/secretDataKey"},
+        "generateForDevelopmentOnly": {"type": "boolean"}
+      }
+    },
+    "scaleway": {
+      "type": "object", "additionalProperties": false,
+      "required": ["region", "defaultZone", "projectId", "credentials"],
+      "properties": {
+        "region": {"type": "string", "pattern": "^[a-z]{2}-[a-z]+$"},
+        "defaultZone": {"type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$"},
+        "projectId": {"$ref": "#/definitions/uuid"},
+        "credentials": {
+          "type": "object", "additionalProperties": false,
+          "required": ["existingSecretName", "accessKeyKey", "secretKeyKey"],
+          "properties": {
+            "existingSecretName": {"$ref": "#/definitions/kubernetesName"},
+            "accessKeyKey": {"$ref": "#/definitions/secretDataKey"},
+            "secretKeyKey": {"$ref": "#/definitions/secretDataKey"}
+          }
+        }
+      }
+    },
+    "image": {"$ref": "#/definitions/image"},
+    "sidecars": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operationTimeout", "externalProvisioner", "externalAttacher", "nodeDriverRegistrar", "livenessProbe"],
+      "properties": {
+        "operationTimeout": {"$ref": "#/definitions/duration"},
+        "externalProvisioner": {"$ref": "#/definitions/workerImage"},
+        "externalAttacher": {"$ref": "#/definitions/workerImage"},
+        "nodeDriverRegistrar": {"$ref": "#/definitions/sidecarImage"},
+        "livenessProbe": {"$ref": "#/definitions/sidecarImage"}
+      }
+    },
+    "controller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["replicas", "leaderElection", "updateStrategy", "maxConcurrentMutations", "shutdownDeadline", "terminationGracePeriodSeconds", "progressDeadlineSeconds", "leadership", "attachReadyDeadline", "metadataRefreshInterval", "detailedTombstoneRetention", "parentMountRoot", "privilegedMounts", "nodeSelector", "affinity", "tolerations"],
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 1},
+        "leaderElection": {"type": "boolean"},
+        "updateStrategy": {"enum": ["Recreate"]},
+        "maxConcurrentMutations": {"type": "integer", "minimum": 1, "maximum": 10},
+        "shutdownDeadline": {"$ref": "#/definitions/duration"},
+        "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "progressDeadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "leadership": {
+          "type": "object", "additionalProperties": false,
+          "required": ["enabled", "leaseDuration", "renewDeadline", "retryPeriod"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "leaseDuration": {"$ref": "#/definitions/duration"},
+            "renewDeadline": {"$ref": "#/definitions/duration"},
+            "retryPeriod": {"$ref": "#/definitions/duration"}
+          }
+        },
+        "attachReadyDeadline": {"$ref": "#/definitions/duration"},
+        "metadataRefreshInterval": {"$ref": "#/definitions/duration"},
+        "detailedTombstoneRetention": {"$ref": "#/definitions/duration"},
+        "parentMountRoot": {"$ref": "#/definitions/absolutePath"},
+        "privilegedMounts": {"type": "boolean"},
+        "nodeSelector": {"$ref": "#/definitions/stringMap"},
+        "affinity": {"type": "object"},
+        "tolerations": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["parentMountRoot", "kubeletPath", "nodeSelector", "affinity", "tolerations"],
+      "properties": {
+        "parentMountRoot": {"$ref": "#/definitions/absolutePath"},
+        "kubeletPath": {"$ref": "#/definitions/absolutePath"},
+        "nodeSelector": {"$ref": "#/definitions/stringMap"},
+        "affinity": {"type": "object"},
+        "tolerations": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "scheduling": {
+      "type": "object", "additionalProperties": false,
+      "required": ["allSchedulableLinuxNodesAreEligible", "requireHomogeneousEligibleNodes", "skipNodePreflightForDevelopmentOnly"],
+      "properties": {
+        "allSchedulableLinuxNodesAreEligible": {"type": "boolean"},
+        "requireHomogeneousEligibleNodes": {"type": "boolean"},
+        "skipNodePreflightForDevelopmentOnly": {"type": "boolean"}
+      }
+    },
+    "compatibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["qualifiedCommercialTypes"],
+      "properties": {
+        "qualifiedCommercialTypes": {
+          "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9]([-A-Za-z0-9._]*[A-Za-z0-9])?$"}
+        }
+      }
+    },
+    "pools": {
+      "type": "object", "minProperties": 1, "maxProperties": 64,
+      "propertyNames": {"pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+      "additionalProperties": {"$ref": "#/definitions/pool"}
+    },
+    "storageClasses": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "items": {"$ref": "#/definitions/storageClass"}
+    },
+    "imagePullSecrets": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"$ref": "#/definitions/kubernetesName"}}}},
+    "podLabels": {"$ref": "#/definitions/stringMap"},
+    "podAnnotations": {"$ref": "#/definitions/stringMap"},
+    "priorityClassName": {"type": "string", "minLength": 1, "maxLength": 253},
+    "serviceAccounts": {
+      "type": "object", "additionalProperties": false, "required": ["controller", "node"],
+      "properties": {
+        "controller": {"$ref": "#/definitions/serviceAccount"},
+        "node": {"$ref": "#/definitions/serviceAccount"}
+      }
+    },
+    "rbac": {"type": "object", "additionalProperties": false, "required": ["create"], "properties": {"create": {"type": "boolean"}}},
+    "resources": {
+      "type": "object", "additionalProperties": false,
+      "required": ["controllerDriver", "externalProvisioner", "externalAttacher", "nodeDriver", "nodeDriverRegistrar", "livenessProbe"],
+      "properties": {
+        "controllerDriver": {"$ref": "#/definitions/resources"},
+        "externalProvisioner": {"$ref": "#/definitions/resources"},
+        "externalAttacher": {"$ref": "#/definitions/resources"},
+        "nodeDriver": {"$ref": "#/definitions/resources"},
+        "nodeDriverRegistrar": {"$ref": "#/definitions/resources"},
+        "livenessProbe": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "probes": {
+      "type": "object", "additionalProperties": false, "required": ["startup", "readiness", "liveness"],
+      "properties": {
+        "startup": {"$ref": "#/definitions/probe"},
+        "readiness": {"$ref": "#/definitions/probe"},
+        "liveness": {"$ref": "#/definitions/probe"}
+      }
+    },
+    "metrics": {
+      "type": "object", "additionalProperties": false, "required": ["enabled", "port", "service"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1024, "maximum": 65535},
+        "service": {
+          "type": "object", "additionalProperties": false, "required": ["enabled", "annotations"],
+          "properties": {"enabled": {"type": "boolean"}, "annotations": {"$ref": "#/definitions/stringMap"}}
+        }
+      }
+    }
+  },
+  "definitions": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "kubernetesName": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"},
+    "duration": {"type": "string", "minLength": 2, "maxLength": 7, "pattern": "^[1-9][0-9]*(s|m|h)$"},
+    "secretDataKey": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[-._A-Za-z0-9]+$"},
+    "absolutePath": {"type": "string", "minLength": 2, "maxLength": 256, "pattern": "^/.*[^/]$"},
+    "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "image": {
+      "type": "object", "additionalProperties": false, "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1, "maxLength": 512},
+        "tag": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"enum": ["latest"]}},
+        "digest": {"type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "sidecarImage": {
+      "type": "object", "additionalProperties": false, "required": ["image", "tag", "digest"],
+      "properties": {
+        "image": {"type": "string", "minLength": 1, "maxLength": 512},
+        "tag": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"enum": ["latest"]}},
+        "digest": {"type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$"}
+      }
+    },
+    "workerImage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "tag", "digest", "workerThreads"],
+      "properties": {
+        "image": {"type": "string", "minLength": 1, "maxLength": 512},
+        "tag": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"enum": ["latest"]}},
+        "digest": {"type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$"},
+        "workerThreads": {"type": "integer", "minimum": 1, "maximum": 10}
+      }
+    },
+    "pool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["basePath", "selectionPolicy", "maxParentsPerEligibleNode", "maxLogicalOvercommitRatio", "minFreeBytes", "minFreePercent", "onDelete", "directoryMode", "directoryUid", "directoryGid", "filesystems"],
+      "properties": {
+        "basePath": {"$ref": "#/definitions/absolutePath"},
+        "selectionPolicy": {"enum": ["least-allocated"]},
+        "maxParentsPerEligibleNode": {"type": "integer", "minimum": 1, "maximum": 64},
+        "maxLogicalOvercommitRatio": {"type": "string", "maxLength": 19, "pattern": "^([1-9][0-9]*|0)\\.[0-9]+$"},
+        "minFreeBytes": {"type": "integer", "minimum": 0},
+        "minFreePercent": {"type": "integer", "minimum": 0, "maximum": 100},
+        "onDelete": {"enum": ["archive", "delete", "retain"]},
+        "directoryMode": {"type": "string", "pattern": "^0[0-7]{3}$"},
+        "directoryUid": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,9})$"},
+        "directoryGid": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,9})$"},
+        "filesystems": {
+          "type": "array", "minItems": 1, "maxItems": 64,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "name", "state"],
+            "properties": {
+              "id": {"$ref": "#/definitions/uuid"},
+              "name": {"type": "string", "minLength": 1, "maxLength": 128},
+              "state": {"enum": ["active", "draining"]}
+            }
+          }
+        }
+      }
+    },
+    "storageClass": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "poolName", "defaultClass", "reclaimPolicy", "allowVolumeExpansion", "volumeBindingMode"],
+      "properties": {
+        "name": {"$ref": "#/definitions/kubernetesName"},
+        "poolName": {"type": "string", "minLength": 1, "maxLength": 63},
+        "defaultClass": {"type": "boolean"},
+        "reclaimPolicy": {"enum": ["Delete"]},
+        "allowVolumeExpansion": {"enum": [false]},
+        "volumeBindingMode": {"enum": ["Immediate"]}
+      }
+    },
+    "serviceAccount": {
+      "type": "object", "additionalProperties": false, "required": ["create", "name"],
+      "properties": {"create": {"type": "boolean"}, "name": {"type": "string", "maxLength": 253}}
+    },
+    "resources": {
+      "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+      "properties": {
+        "requests": {"type": "object", "additionalProperties": false, "required": ["cpu", "memory"], "properties": {"cpu": {"type": ["string", "number"]}, "memory": {"type": "string"}}},
+        "limits": {"type": "object", "additionalProperties": false, "required": ["cpu", "memory"], "properties": {"cpu": {"type": ["string", "number"]}, "memory": {"type": "string"}}}
+      }
+    },
+    "probe": {
+      "type": "object", "additionalProperties": false, "required": ["periodSeconds", "failureThreshold"],
+      "properties": {
+        "periodSeconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "failureThreshold": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    }
+  }
+}

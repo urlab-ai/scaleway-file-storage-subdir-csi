@@ -1,0 +1,9 @@
+apiVersion: v2
+name: scaleway-sfs-subdir-csi
+description: Community CSI driver for logical subdirectory volumes on Scaleway File Storage
+type: application
+version: 0.0.0-dev
+appVersion: 0.0.0-dev
+kubeVersion: ">=1.29.0-0"
+annotations:
+  scaleway-sfs-subdir-csi.io/release-status: development-only

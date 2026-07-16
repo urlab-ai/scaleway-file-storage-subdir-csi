@@ -145,12 +145,50 @@ Before the first public preview, maintainers must choose and document:
 - release tag format;
 - supported Kubernetes and Kapsule versions.
 
+The v1 controller and node images support Linux `amd64` and Linux `arm64`.
+Release CI must compile both architectures, and the real-provider support matrix
+must retain evidence for every advertised architecture and Instance type. A
+different Linux architecture is unsupported until its descriptor-relative
+filesystem syscalls, mount-identity checks, image, and Kapsule behavior pass the
+same release gates; it must fail clearly rather than use a weaker path-based
+fallback. Operator-side `csi-admin` platforms remain a separate release-matrix
+decision.
+
 Every released chart must reference public images by immutable digest. Tags
 remain required as human-readable release metadata, but production manifests
 must render `repository@sha256:<digest>` for the driver and every CSI sidecar.
 Tag-only images, `latest`, development-only image names, private registries, and
 placeholder Helm repository URLs are not acceptable in a public release. The
 release metadata must record the exact rendered digests.
+
+Runtime and artifact versions are distinct typed values. `VERSION` is strict
+SemVer 2.0 without a leading `v`; it is linked into both binaries and is the
+exact CSI `vendor_version` and admin protocol build version. `RELEASE_TAG` is
+the human Git/artifact tag. Until maintainers choose the final public tag
+policy, release tooling accepts only `RELEASE_TAG=VERSION` or
+`RELEASE_TAG=vVERSION`; it does not silently choose between them and never
+embeds the optional `v` in CSI identity. An unrelated tag/version pair fails
+before compilation.
+
+Every non-development binary also embeds a complete lowercase 40-character
+SHA-1 or 64-character SHA-256 Git object ID and a canonical second-precision
+UTC build timestamp, plus the canonical sorted, unique, comma-linked commercial
+Instance type allowlist qualified by that release's real E2E matrix. The only
+identity allowed to retain `unknown` source fields and an empty embedded
+allowlist is the exact `0.0.0-dev` development build. Both executables validate
+their linked identity before runtime operation and before returning a successful
+`--version`. Release cross-compilation emits a per-binary JSON identity sidecar
+whose `commercialTypes` array exposes the same list, and a Go module manifest.
+The same invocation requires the deliberately configured public repository URL,
+emits an SPDX 2.3 SBOM plus unsigned SLSA provenance subjects for those twelve
+files. The SBOM describes the project artifacts and deduplicates every embedded
+Go module/version reported by the four binaries as a `DEPENDS_ON` package; an
+empty dependency inventory is a release error. The invocation covers all
+fourteen files in the SHA-256 manifest. It never guesses
+release coordinates. Container builds execute both binaries' version validation
+in the build stage. Signing/attestation, image and chart publication, and the
+final cross-artifact provenance remain separate mandatory release gates; an
+unsigned local statement must never be presented as a signed attestation.
 
 ## 5. Target User Experience
 
@@ -221,6 +259,16 @@ Security Admission policy before Helm installation and fail with an actionable
 message when privileged pods would be rejected. Rights to create Pods or
 workloads in this namespace must be restricted to the platform administrators
 and the Helm release process.
+
+The shipped operator-side installation preflight must remain non-persistent:
+it reads the namespace and required external Secret key names, including the
+exact configurable `installation.idKey`,
+`scaleway.credentials.accessKeyKey`, and
+`scaleway.credentials.secretKeyKey` values used by the same Helm render, uses a
+server-side dry-run privileged Pod to exercise effective admission, and reads
+the exact Kapsule cluster through the Scaleway CLI to verify Project, region,
+Kapsule type, and the cluster-level `scw-filestorage-csi` tag. It must not print
+Secret values, install Helm objects, or mutate Scaleway resources.
 
 ### 5.2 StorageClass Flow
 
@@ -405,7 +453,10 @@ cluster has three or more nodes. The chart and operations guide must not pin the
 singleton controller to one node. This provides rescheduling capacity for a
 graceful drain or maintenance event without claiming automatic takeover after
 an unfenced crash. Preflight reports and rejects a production installation with
-fewer than two controller candidates.
+fewer than two controller candidates. Those candidates may all be in the same
+Scaleway zone: v1 requires node-level rescheduling capacity, not a multi-zone
+cluster. Multi-zone placement is an operator availability choice and is not an
+installation prerequisite.
 
 A narrower storage-only node set is not production-supported in v1. An
 acknowledgement flag is not an enforcement mechanism, and `Immediate` binding
@@ -441,6 +492,9 @@ Storage `ListAttachments` API for every configured parent:
   `SCW_DEFAULT_ZONE`;
 - reconcile every attachment resource ID, resource type, and zone against the
   current controller Instance and known workload Instances;
+- preserve the exact known `server ID -> zone` mapping from Node/CSINode
+  evidence; an ID match in a different zone is an inventory disagreement, not
+  an authorization match;
 - fail closed when an attachment is unreadable, has an unknown resource type,
   or belongs to an Instance outside the active installation;
 - compare the deduplicated result count with the parent metadata's
@@ -526,6 +580,15 @@ atomic no-overwrite race; the losing installation must not detach the shared
 provider attachment. The controller must never infer bootstrap ownership merely
 because an attachment points to its current Instance.
 
+Before clearing a completed attempt, the controller removes only its exact
+attempt-bound temporary claim and syncs the parent root, including on an
+already-absent retry. The immutable final claim then becomes the sole parent
+authority, the exact Lease journal is cleared, and the root-owned `0700` base
+path and reserved layout are established through the ordinary claimed-parent
+path. A crash after journal cleanup but before layout completion therefore
+retries only descriptor-confined claimed-parent directory creation; it never
+reopens the empty-parent adoption boundary or replaces the claim.
+
 `Server.Filesystems` remains the authoritative source for the transitional
 state of an attachment on a known Instance. `ListAttachments` is the
 installation-wide inventory that discovers attachments to Instances the
@@ -538,6 +601,12 @@ configured Project and region. A cordoned or temporarily unschedulable Node
 remains known until its Node object is removed, which allows normal drain
 operations without reclassifying a warm attachment as foreign. An Instance
 without that evidence is unknown even if its name or tags look familiar.
+
+The implementation must therefore keep two distinct sets: Ready schedulable
+Node/CSINode identities eligible for a new publish target, and all existing
+matching Linux Node/CSINode identities recognized for regional attachment
+inventory. The latter includes cordoned or temporarily unschedulable nodes.
+Membership in the broader known set never authorizes a new attachment.
 
 In the pinned SDK, `ListAttachments` fills an omitted request zone from the
 client's default zone. The implementation must therefore use a dedicated
@@ -571,8 +640,10 @@ The implementation must use checked integer or exact decimal arithmetic. It
 must not let floating-point rounding, integer overflow, or a size refresh make
 logical capacity negative or wrap around.
 
-`maxLogicalOvercommitRatio` defaults to `1.0`. A value greater than `1.0` is an
-operator decision to overcommit logical reservations on top of the observed
+`maxLogicalOvercommitRatio` is a positive non-exponent exact decimal containing
+at most 18 digits in total, with no non-canonical leading zero, and defaults to
+`1.0`. A value greater than `1.0` is
+an operator decision to overcommit logical reservations on top of the observed
 usable parent size. At the default ratio, workloads that remain within their
 logical reservations cannot consume the configured safety reserve solely
 because too many reservations were accepted. A ratio greater than `1.0`
@@ -656,6 +727,42 @@ Recommended default refresh interval:
 
 The interval must be configurable.
 
+In v1, `controller.metadataRefreshInterval` is also the single bounded
+controller-maintenance cadence. One non-overlapping pass revalidates the
+homogeneous Node/CSINode/node-plugin generation and live Instance attachment
+limits, reads every configured parent's complete paginated regional attachment
+inventory, refreshes parent metadata and the size-regression tracker, reads the
+permanent allocation inventory once under stable pool locking, samples every
+already-mounted parent with descriptor-anchored `statfs`, runs the state-driven
+lifecycle crash-window reconciler, and then selects eligible detailed Deleted
+tombstones for bounded in-place compaction. Reusing one cadence keeps the
+operator contract and API load bounded; v1 does not expose independently tuned
+background loops. One pass compacts at most 100 tombstones so a large retained
+history cannot monopolize mutation admission or Kubernetes/provider budgets.
+It reads the complete allocation list once for selection; already compact and
+`deletedUnknown` records cause no follow-up API or filesystem read.
+
+Every lifecycle resume of `Reserved` or `CreatingDirectory`, including a
+periodic maintenance resume, must first read the permanent pool journal. A
+matching `Pending` intent may be completed only from the exact canonical
+`Reserved` allocation; `CreatingDirectory` with its own matching journal still
+`Pending` is a fatal inconsistency. An `Idle` journal, or a newer `Pending`
+generation for another logical volume, proves the older allocation already
+crossed its reservation barrier. No filesystem creation or allocation-state
+advance is allowed before this check.
+
+The first complete pass is part of cold startup. Later passes require active
+leadership. Their authorization/inventory publication enters the global
+mutation gate, and each lifecycle repair independently follows the normal gate
+and logical-volume lock order. A checkpoint quiesce skips a scheduled pass and
+does not become a maintenance failure. An unreadable global inventory removes
+readiness and blocks new CreateVolume and ControllerPublishVolume work, but is
+retried on the next interval without failing shallow liveness. A successful
+complete pass restores that maintenance condition and advances both the
+attachment-inventory and reconciliation success timestamps. An internal
+metrics-registry or leadership failure terminates the controller through its
+supervisor rather than being retried as provider unavailability.
+
 The driver must not automatically resize parent file systems in v1. Resizing is
 an infrastructure operation controlled by the operator through Scaleway Console,
 CLI, Terraform, Pulumi, or API.
@@ -678,6 +785,14 @@ unpublish and cleanup may continue only when their normal ownership, mount, and
 state checks succeed. The condition clears automatically only after a fresh
 authoritative observation is at least the previous accepted size; v1 has no
 acknowledgement flag that suppresses the anomaly.
+
+The v1 high-water mark is a process-local defensive observation, not a durable
+capacity-authority record. A controller restart rebuilds placement from fresh
+provider metadata, complete allocation accounting, and `statfs`; it does not
+invent a previous accepted size. Persisting this extra diagnostic value is
+deferred until real `virtiofs` qualification demonstrates that it materially
+improves safety. Durable allocation records and the physical-space guardrail,
+not this alerting high-water, remain authoritative across restart.
 
 Unit tests with the fake provider must cover the defensive size-regression path
 and recovery. Real-provider tests must cover upward growth and verify that a
@@ -711,6 +826,11 @@ Required APIs and identity contract:
 - the node plugin obtains its Instance ID, zone, region, and commercial type
   from the local unauthenticated Scaleway metadata service, matching the
   official driver behavior;
+- every metadata field is untrusted input: region and zone must be normalized,
+  the zone must belong to the reported region, the Instance ID and resulting
+  node ID must satisfy the exact closed syntax, and the commercial type must be
+  bounded single-line UTF-8 without a path separator before the value is used
+  or advertised;
 - `NodeGetInfo.NodeId` is exactly `<zone>/<serverID>`;
 - the controller parses and validates that node ID and always performs zonal
   Instance operations in the parsed target zone. `SCW_DEFAULT_ZONE` is SDK
@@ -720,6 +840,20 @@ Required APIs and identity contract:
   Instance belongs to the configured Project and region;
 - the node plugin may access the local metadata service but must not receive
   Scaleway credentials or call authenticated public Scaleway APIs.
+
+An authorized offline detach receives a non-empty exact, deduplicated Instance
+target set. Before the first mutation it reads the complete unfiltered regional
+inventory and every target's complete `Server.Filesystems`, rejects an
+attachment outside that set or any disagreement, and accepts only understood
+stable Instance states. It issues at most one detach call per observed target,
+then always rereads both inventory surfaces, including after an ambiguous API
+error. A committed ambiguous result is success only after conclusive absence;
+transient inventory unavailability before or after the call is retried inside
+the same deadline without issuing another detach. A definite detach error is
+returned after the mandatory reread unless that reread already proves absence.
+Otherwise bounded backoff with jitter continues until both views agree on
+absence or the detach deadline expires. Unknown, orphaned, duplicated,
+cross-zone, unavailable, or stale evidence never becomes absence.
 
 The controller must normalize the pinned SDK's complete
 `FileSystem.Status` enum. The matrix is closed: any future or unreadable value
@@ -738,6 +872,16 @@ already-mounted workloads unavailable. The controller must emit a bounded
 Kubernetes Event and metric on status transitions. It may resume blocked work
 only after a fresh authoritative read returns `available` and all normal
 ownership, attachment, mount, and capacity checks pass.
+
+The same parent-local containment applies to a provider metadata read failure,
+invalid parent identity, attachment-inventory anomaly, controller mount
+failure, `statfs` failure, or parent-specific capacity/physical-space failure.
+Periodic inventory must return an explicit degraded observation for that
+parent, continue observing every other configured parent, and keep new
+placement available on independently healthy parents. A Kubernetes node
+authorization failure, an invalid or incomplete allocation inventory, a
+cluster-wide attachment-budget/exclusivity failure, or cancellation remains a
+global failure because it cannot be attributed safely to one parent.
 
 The controller must normalize the pinned SDK's Instance state before any new
 attachment or recovery decision. The v1 state matrix is closed and fail-safe:
@@ -760,14 +904,22 @@ published-node evidence, or recovery blocks, the controller must also obtain a
 fresh paginated regional inventory and prove that the relevant parent
 attachment is absent. An orphan attachment to a deleted Instance remains
 fail-closed and requires the documented Scaleway support escalation path.
+Provider fencing first validates that the durable CSI node zone belongs to the
+configured region and that the parent ID is syntactically valid. Malformed or
+cross-region evidence is rejected before a provider read; an Instance
+`NotFound` in an unrelated zone cannot be converted into fencing proof.
 
 Attachment inventory and idempotency contract:
 
 1. List every regional File Storage attachment for the target parent, across
    all pages and zones, and reject any attachment outside the active
    installation.
-2. Read the target server with the Instance API and inspect
-   `Server.Filesystems`.
+2. Immediately before an attach, read every known server with the Instance API
+   in its exact evidenced zone and reconcile each `Server.Filesystems` view
+   with the complete regional inventory. A disagreement on a different known
+   server blocks this parent mutation just as a disagreement on the target
+   does; the periodic reconciliation is not a substitute for this
+   pre-mutation proof.
 3. Treat every filesystem in `attaching`, `available`, or `detaching` state as
    consuming one physical attachment slot. Unknown states fail closed.
 4. Enforce section 6.3 by rejecting non-configured live attachments on
@@ -781,6 +933,17 @@ Attachment inventory and idempotency contract:
 9. If it is absent and the union fits within
    `ServerType.Capabilities.MaxFileSystems`, call `AttachServerFileSystem` once,
    then poll until the target becomes `available`.
+
+The one-call rule spans the complete driver operation, including a lost or
+ambiguous Attach response. A transient `Unavailable`/deadline observation
+before or after that call is retried with bounded backoff inside the same
+ten-minute deadline. After Attach has been issued, an immediate reread that is
+still absent is treated as possible propagation and never authorizes a second
+Attach call. Permission, identity, argument, quota, and definite precondition
+failures remain immediate failures. HTTP `409 Conflict` is kept distinct from
+a definite `412 Precondition Failed`: the conflict follows the
+ambiguous-result reread path and never authorizes a second Attach call in the
+same operation.
 10. After conflict, timeout, connection loss, or any ambiguous API result,
     re-read both the regional attachment inventory and the target server before
     deciding whether to retry or return success.
@@ -843,6 +1006,10 @@ Release-time compatibility contract:
   membership and live `ServerType.Capabilities.MaxFileSystems > 0`; a non-zero
   limit alone does not qualify an untested type. Extending the production
   allowlist requires a new tested release, not an operator acknowledgement;
+- the chart projects that canonical sorted allowlist into the closed runtime
+  document, but production startup requires byte-for-byte set equality with the
+  independently embedded binary list. An operator may not add, remove, reorder,
+  duplicate, or acknowledge a type around that comparison;
 - every advertised commercial Instance type must pass real Kapsule E2E and
   appear in the release compatibility table;
 - the Kapsule cluster must carry the `scw-filestorage-csi` tag at cluster level
@@ -882,6 +1049,21 @@ logical driver installation; the cluster UID proves which Kubernetes cluster is
 currently authorized to operate its parents. A copied identity Secret must not
 authorize a second cluster.
 
+The node plugin has no Kubernetes API permission and therefore does not derive
+an independent cluster UID. Before authorizing a new stage or publish, it must
+instead require byte-for-byte equality of `activeClusterUID` across the
+immutable CSI `volume_context`, the mounted parent-global claim, and the
+per-volume ownership record. Cleanup derives the expected value from the
+authenticated ownership record and requires the parent claim to agree. A
+mismatch in any direction fails closed; neither context nor a directory name
+alone authorizes access.
+
+Every side-effecting controller path must revalidate the loaded allocation's
+`driverName`, `installationID`, and `activeClusterUID` against the current
+runtime immediately after the durable read and before provider, fencing,
+filesystem, or durable-record mutation. Startup ownership checks remain
+mandatory but are not a substitute for this per-operation anti-copy boundary.
+
 Each parent must have one root-level parent-global claim record:
 
 ```text
@@ -916,9 +1098,14 @@ Rules:
 - a parent claimed by one installation must not be configured by another
   installation, imported through the official CSI driver, or modified by
   another provisioner;
-- `basePath` must be an absolute, normalized, non-root path;
+- `basePath` must be an absolute, normalized, non-root path and its first
+  component must not use the reserved `.sfs-subdir-csi-owner` namespace used
+  by the immutable root claim and bootstrap temporary files;
 - after the parent-global claim is established, the controller may create a
   missing base path and reserved subdirectories with driver-only ownership;
+  every component in that managed layout is root-owned with mode `0700`, and
+  each created or repaired inode and containing directory is synced before the
+  controller serves logical-volume mutations;
 - a previously unclaimed v1 parent must be dedicated and empty: the fixed claim
   file, configured base path, and logical-volume metadata paths must be absent,
   and no unrelated user entry may exist on the parent. The one exception is the
@@ -1057,7 +1244,11 @@ Before detaching the parent, the decommission validator must compare every
 remaining compact ownership tombstone with its Kubernetes allocation tombstone
 and reject any missing, conflicting, malformed, or non-terminal pair. This is
 the last online validation that reads the decommissioned parent's compact
-ownership inventory.
+ownership inventory. Readable workload, PV, VolumeAttachment, published-fence,
+staging, target, and child-mount references are reported together in stable
+order so the operator can remove every normal blocker; malformed, duplicated,
+one-sided, or conflicting durable evidence remains a fail-closed error and is
+never presented as an operator-removable blocker.
 
 The procedure must then:
 
@@ -1068,6 +1259,20 @@ The procedure must then:
 4. call the explicit detach operation and poll both `ListAttachments` and
    `Server.Filesystems` until the attachment is absent everywhere;
 5. remove the parent from Helm values only after those checks succeed.
+
+The operator coordinator exposes a read-only dry-run and an execute mode over
+one immutable normalized plan. Execute must repeat the complete Kubernetes,
+node-mount, allocation, and ownership blocker inventory after the controller
+owns the drained quiesce barrier and before any node parent unmount. The parent,
+release workload UIDs, node targets, mount roots, and version identities must
+remain equal to the initial plan. It then orders target-only node unmount,
+node-plugin stop, target-only controller unmount/detach and fresh dual-inventory
+proof, graceful controller release, and controller stop. Cleanup evidence is
+validated before release and the final audit is validated before it can
+authorize the separate Helm-values update. A crash-sensitive implementation
+must persist request-bound progress before deleting the node DaemonSet or
+scaling the controller, using the same no-ambiguity and exact-UID principles as
+safe uninstall.
 
 Removing a parent from values does not release its permanent parent-global claim
 or make cross-installation reuse supported in v1. The operations guide must not
@@ -1183,6 +1388,18 @@ onDelete
 logicalVolumeID
 ```
 
+The list above is the complete driver-owned context. The pinned Kubernetes
+external-provisioner adds its own non-empty bounded
+`storage.kubernetes.io/csiProvisionerIdentity` field to the resulting PV and
+replays that field to later Controller and Node calls. The driver must never
+emit, hash, persist as allocation identity, or authorize from that sidecar
+value. Inbound parsing accepts and strips exactly that one CO-owned key after
+applying the same wire-size validation; every other unknown key, and an empty
+provisioner identity, fails closed. Checkpoint and restore-stable PV projections
+contain only the 13 driver-owned fields, while exact source-generation checks
+may retain the complete live Kubernetes map to detect a changed PV during one
+recovery attempt.
+
 `logicalVolumeID` must use the exact deterministic algorithm above. It must not
 be random. This is the key idempotency invariant for repeated CSI `CreateVolume`
 calls with the same name.
@@ -1214,9 +1431,10 @@ a newer logical volume with the same deterministic ID.
 
 Node staging and publishing operations must receive these immutable
 `volume_context` fields from the PV. They must recompute the mapping hash,
-validate it against the parsed handle, and fail closed on missing, unknown, or
-mismatched fields. One shared immutable-context validator must compare every
-normalized context field, not only the mapping hash:
+validate it against the parsed handle, strip only the documented
+external-provisioner delivery identity, and fail closed on missing, other
+unknown, or mismatched fields. One shared immutable-context validator must
+compare every normalized driver-owned context field, not only the mapping hash:
 
 - `ControllerPublishVolume` compares it with the allocation and detailed
   ownership record before provider attach or durable publish-fence mutation;
@@ -1230,9 +1448,16 @@ normalized context field, not only the mapping hash:
 is read-only and the upstream CSI sanity contract may omit `volume_context`, an
 empty map is resolved from the handle plus authoritative allocation and
 ownership records. When the map is present, every field must match exactly.
-Missing context remains an error for `ControllerPublishVolume`,
-`NodeStageVolume`, and `NodePublishVolume` because those calls have provider,
-durable, or filesystem side effects.
+Missing context remains an error for `ControllerPublishVolume` before any
+repair, provider call, filesystem action, or durable mutation. The CSI sanity
+unknown-volume and unknown-node probes may receive a conclusive `NotFound`
+first because those requests deliberately omit `volume_context`. The
+unknown-node decision is restricted to the already-observed Kubernetes node
+inventory and performs no provider lookup, attach, mount, repair, or durable
+write. A known node, unavailable read, or ambiguous absence does not bypass
+context validation.
+Missing context is also always an error for `NodeStageVolume` and
+`NodePublishVolume` because those calls have filesystem side effects.
 
 The mapping hash remains the compact path-identity proof; field-by-field
 validation protects the complete v1 context. The "no `volumeContext`" recovery
@@ -1331,20 +1556,57 @@ The driver must manage directory lifecycle at the CSI controller level.
 7. collect fresh `statfs` data for candidate parents;
 8. choose a parent that satisfies logical capacity, actual free-space reserve,
    lifecycle, and node-compatibility requirements;
-9. atomically create the allocation record named from `logicalVolumeID` in
-   `Reserved` state, including the selected parent, selected capacity,
-   normalized immutable parameters, and request hash;
-10. if create returns `AlreadyExists` or an ambiguous API result, re-read that
-    same deterministic record and follow step 4; never perform a second
-    placement;
-11. move the allocation record to `CreatingDirectory`;
-12. create the logical volume data directory;
-13. write the driver-owned ownership record outside the mounted data directory;
-14. apply ownership and mode to the logical data directory;
-15. verify the ownership record, data directory, ownership, and mode;
-16. move the allocation record to `Ready`;
-17. return a CSI volume handle and volume context containing the immutable
+9. immediately before the selected-pool reservation, advance the generation of
+   every currently `Idle` journal in the committed journal-set. This
+   installation-wide CAS fence makes any older ambiguous `Begin` against a
+   different pool conflict before a fresh placement can become durable;
+10. while retaining the pool lock, CAS the permanent fixed-name journal for the
+   selected pool from `Idle` to `Pending`; the journal contains a monotonic
+   generation and the complete exact `Reserved` allocation about to be created;
+   no allocation POST may be emitted until this transition is conclusively
+   observed;
+11. atomically create the allocation record named from `logicalVolumeID` in
+    `Reserved` state, including the selected parent, selected capacity,
+    normalized immutable parameters, and request hash;
+12. if create returns `AlreadyExists` or an ambiguous API result, re-read that
+    same deterministic record and follow step 4; a single immediate `NotFound`
+    after an ambiguous create is not conclusive because the original request
+    may still commit, so retry the exact create-if-absent operation a small
+    bounded number of times while retaining the pool lock; never perform a
+    second placement or reserve a different parent; after the first possibly
+    emitted mutation, use an internal resolution context bound to the current
+    leadership generation and process shutdown, not solely to the CSI caller;
+    if bounded resolution still cannot prove the record present or absent,
+    leave the journal `Pending`, mark that pool unresolved, and reject all new
+    placements on it; once an earlier create is
+    unresolved, a later `Forbidden`, invalid request, or other apparently
+    definitive retry result does not clear that marker because it says nothing
+    about whether the earlier POST can still commit; every successor must
+    resolve the exact `Pending` intent before serving or admitting another
+    placement on the pool;
+13. only after the exact allocation is conclusively present, CAS the journal
+    back to `Idle`; an ambiguous completion remains conservatively `Pending`;
+14. move the allocation record to `CreatingDirectory`;
+15. create the logical volume data directory;
+16. write the driver-owned ownership record outside the mounted data directory;
+17. apply ownership and mode to the logical data directory;
+18. verify the ownership record, data directory, ownership, and mode;
+19. move the allocation record to `Ready`;
+20. return a CSI volume handle and volume context containing the immutable
     mapping.
+
+A retry that finds no allocation but finds its own exact `Pending` intent must
+reissue only the journal's canonical allocation and must not perform placement
+again. Before any new placement, this lookup covers every journal in the
+committed installation-wide journal-set, not only the pool supplied by the
+retry. A matching intent with incompatible immutable parameters is rejected,
+and multiple `Pending` intents for one `logicalVolumeID` are corruption that
+fails closed. Once an exact allocation and an `Idle` journal are conclusively
+observed, whether the final journal CAS was performed by this call or merely
+observed after a lost response, the controller removes the process-local pool
+marker under the pool lock. Startup, checkpoint resume, and quiesced terminal
+reconciliation apply the same rule after proving every configured journal
+`Idle`; the marker is never retained after the ambiguity it guards has ended.
 
 If `CreateVolume` is retried while the allocation record is `Reserved` or
 `CreatingDirectory`, the driver must resume and repair the operation. It must
@@ -1825,6 +2087,13 @@ Required behavior:
 - anchor destructive traversal under an already-open trusted `basePath`
   directory and use no-follow, descriptor-relative operations where the Go/Linux
   implementation allows it;
+- resolve every kubelet, parent-target, and logical-directory component with
+  `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)` or an
+  equivalent `openat(O_NOFOLLOW)` walk; `os.Root` confinement alone is not a
+  no-symlink guarantee because it follows links that remain beneath the root;
+- retain the final descriptor until the mount, metadata update, or
+  descriptor-relative removal completes; reopening a pathname is not
+  authority;
 - never overwrite an existing archive target;
 - make archive target names collision-resistant by including volume ID,
   timestamp, and a random suffix;
@@ -1833,6 +2102,123 @@ Required behavior:
 - implement `delete` as a two-step flow:
   1. move the verified directory to a driver-owned quarantine directory;
   2. recursively remove only that verified quarantined directory.
+
+On Linux, lifecycle traversal must use descriptor-relative `*at` operations and
+`O_NOFOLLOW`. The opened parent mount's device and live kernel mount ID are the
+boundary for every directory descriptor; checking only `st_dev` is insufficient
+because a bind mount can use the same device. Mount IDs read from
+`/proc/self/mountinfo` or fdinfo are namespace-local and may be reused after an
+unmount, so they are not a durable mount generation. Every exact unmount proof
+must additionally obtain `STATX_MNT_ID_UNIQUE` through an `O_PATH|O_NOFOLLOW`
+descriptor, verify that the descriptor's fdinfo mount ID still equals the
+coherent mountinfo entry, and compare the non-reusable statx generation
+immediately before the destructive action. The final Linux unmount must remain
+anchored to that authenticated mount object: v1 opens it with `open_tree(2)`
+without `OPEN_TREE_CLONE`, revalidates both identities on the returned mount FD,
+and moves that exact mount object with `move_mount(2)` to a generation-named
+directory under the fixed private
+`/run/scaleway-sfs-subdir-csi-mount-quarantine` mount. The chart supplies that
+root as a dedicated `emptyDir` mounted only in the privileged driver container,
+with no mount propagation. It is deliberately outside the parent and kubelet
+mount roots.
+
+Linux shared-propagation ancestry can reject `move_mount` of an attached
+kubelet mount with `EINVAL`. After that failed, non-mutating move, v1 repeats
+the complete exact-generation and no-descendant proof and may atomically apply
+`MNT_DETACH` directly to `/proc/self/fd/<authenticated-mount-fd>`. This fallback
+never uses the public pathname as action authority and creates no
+post-syscall quarantine state; any other move error fails closed. The normal
+non-propagated path still uses the recoverable private quarantine protocol.
+The same `EINVAL` fallback is permitted when rolling back a detached parent or
+bind mount that this exact call created and still owns by its non-reusable
+mount-generation FD. That rollback repeats the generation proof and never
+selects a mount through a pathname.
+
+The generation name is deterministic (`mnt-` plus the fixed-width hexadecimal
+`STATX_MNT_ID_UNIQUE` value). If the process receives an error or is interrupted
+after `move_mount`, the next preflight in the same container namespace scans
+only that fixed private root, validates each closed-format name against the
+mount generation observed through a no-follow descriptor, and detaches only an
+exact match. Plain, malformed, stacked, mismatched, or unreadable entries fail
+closed, except that a correctly named plain directory left after a container
+restart is removed only after proving it is on the unchanged quarantine root.
+A container restart destroys its private mount namespace, so a moved mount
+cannot remain propagated into the host namespace; the Pod's `emptyDir` content
+may persist as that now-unmounted deterministic directory. The original CSI
+target pathname is never used after the FD proof. Lazy detach through the
+authenticated quarantine mount FD is required
+because the live mount FD itself pins the object; it detaches only that exact
+mount while existing file references drain normally. The deterministic
+directory is removed only after detach is proven complete.
+
+Quarantine recovery is a precondition of normal retries, not only startup.
+Before `NodeUnpublishVolume`, `NodeUnstageVolume`, parent cleanup, or any
+provider detach treats an absent public target as success, the mutating mount
+boundary authenticates and completes every recoverable quarantine entry.
+Read-only inventories report a non-empty quarantine and fail closed; they never
+clean it implicitly. Any malformed, stacked, foreign, or unreadable quarantine
+keeps the component non-serving and blocks provider detach.
+
+Mount inventories used for Node cleanup, decommission, and safe uninstall
+retain every mount at or below the driver-protected parent, staging, publish,
+and quarantine roots. Unknown descendants are classified as foreign and block
+the destructive workflow; they are never filtered before the safety decision.
+
+Immediately before `move_mount`, one final coherent mount-table and unique-ID
+comparison may only veto the operation; it never changes which mount FD is the
+action authority. After the move, the private quarantine must contain exactly
+one layer with the expected generation. If a foreign top layer was stacked in
+the syscall-sized interval and moved as a child of the authenticated mount, the
+driver never detaches that tree: it moves the intact tree back to the empty
+original target and fails closed. A failed restoration remains visible in the
+private quarantine and prevents serving rather than deleting a foreign layer.
+
+The v1 threat model covers kubelet, CSI calls, retries, crashes, and cooperating
+driver generations serialized by Kubernetes rollout and the driver's locks. It
+does not claim to defeat an unrelated, non-cooperating process with node-root
+mount privileges that inserts a new mount in the syscall-sized interval between
+the final proof and `move_mount`: such a process already has authority to
+unmount or replace every workload mount on the node. The driver still detects
+and restores a concurrent stack whenever it remains alive, and the privileged
+Linux gate exercises that path. Deployments that permit arbitrary root mount
+mutation outside kubelet and this driver are outside the v1 security model.
+
+The production durable-record backend applies the same descriptor rule to
+metadata mutation. The descriptor that proves the parent directory's device
+and mount ID remains open through `openat`, `linkat`, `renameat2`, `unlinkat`,
+and the required directory `fsync`; it is never closed and replaced by a
+second pathname walk before the action. Privileged Linux tests inject a late
+nested mount at that boundary, and real-backend barrier tests close and reopen
+the store after each file/link/rename/directory-sync interruption to prove that
+only an old or new complete generation is accepted.
+
+Absence of kernel support for `open_tree(2)`, `move_mount(2)`,
+`mount_setattr(2)`, `fsopen(2)`, `fsconfig(2)`, `fsmount(2)`, procfs mount-FD resolution, or
+`STATX_MNT_ID_UNIQUE`, a zero/missing result, or disagreement between the two
+identities keeps the node and controller non-serving and never falls back to
+reusable mount IDs or pathname unmount. Startup performs a real scratch probe
+inside the private quarantine mount and recovers any exact interrupted entry
+before serving. Rename uses atomic
+`renameat2(RENAME_NOREPLACE)` and fails closed if the kernel or filesystem does
+not provide that primitive. Recursive removal unlinks symlinks and other
+non-directory entries as entries, never follows them, revalidates directory
+identity before removal, rejects any mount at or below the tree, honors context
+cancellation between bounded directory batches, and enforces a bounded open
+descriptor/depth limit. `os.RemoveAll` cannot satisfy this contract and must not
+be used for lifecycle data.
+
+The persisted v1 archive and quarantine target is derived exactly as:
+
+```text
+<basePath>/<.archived-or-.deleted>/<directoryName>-<logicalVolumeID>-<operationTimestamp>-<operationID>
+```
+
+`operationTimestamp` is the matching canonical UTC `deletePreparedAt` or
+`gcStartedAt` value lowercased with `-`, `:`, and `.` removed. The record reader
+must recompute this path from the immutable directory/logical identity and the
+persisted operation ID and time. Merely finding an arbitrary direct child under
+`.archived` or `.deleted` is not ownership proof and must fail closed. Retain
+uses the exact original `<basePath>/<directoryName>` as both source and target.
 
 Required reserved directories under the pool base path:
 
@@ -1864,6 +2250,21 @@ helper:
 6. read back and validate the complete record before advancing the Kubernetes
    allocation state.
 
+Crash retry uses the same deterministic operation-bound temporary path. It may
+resume an existing temporary file or an already-installed destination only when
+its complete canonical bytes exactly equal the generation prepared by that
+operation. An exact completed destination causes the redundant temporary entry
+to be unlinked and the metadata directory to be synced before success. Any
+different bytes, unreadable entry, symlink, or unexpected generation fails
+closed without replacing the destination.
+
+For per-volume ownership records, the temporary operation ID is a deterministic
+UUID derived from the logical volume ID and the destination ownership revision.
+An exact retry of one transition therefore resumes the same temporary name
+instead of creating an unbounded sequence of random orphan temporaries. The
+root-level parent-claim temporary remains bound to the separately journaled
+bootstrap attempt ID.
+
 The implementation must never rewrite the only valid metadata generation in
 place. Initial record creation uses no-overwrite semantics. Controlled updates
 must verify the expected prior revision before replacement. Crash-point tests and
@@ -1882,7 +2283,10 @@ ownership state to the next durable phase:
 - after recursively removing a quarantine directory, sync `.deleted` before
   writing terminal `Deleted` state or releasing capacity;
 - after removing a bootstrap temporary claim during rollback, sync the parent
-  filesystem root before clearing the bootstrap journal;
+  filesystem root before clearing the bootstrap journal. A retry after an
+  acknowledged or ambiguous root sync may accept only descriptor-confined,
+  conclusive absence of that exact attempt-bound temporary, sync the root again,
+  and then continue; an unreadable or ambiguous lookup is not absence;
 - archive and GC use the same barriers as normal delete; no separate weaker
   path is allowed.
 
@@ -1899,7 +2303,24 @@ post-restart source/target and durable-state pairing.
 ### 6.16 Mount Model
 
 The node plugin must mount parent file systems and then bind-mount subdirectories
-to individual CSI volume targets.
+to individual CSI volume targets. A new parent is constructed as a detached
+mount with `fsopen("virtiofs")`, an exact `source=<filesystemID>`
+`fsconfig`, and `fsmount`; it is moved only to the already-opened target FD.
+The detached generation remains owned through post-move graph validation, so a
+renamed/replaced target rolls back only that new generation. There is no legacy
+`mount(2)` pathname fallback.
+
+A new bind is not attributed from a pathname
+snapshot after `mount(MS_BIND)`: the implementation opens the authenticated
+source, creates a detached clone with `open_tree(OPEN_TREE_CLONE)`, applies
+private propagation and read-only state with `mount_setattr` before exposure
+when requested, compares the source FD's unique generation with the already
+validated parent/staging generation, obtains the clone's unique generation
+from its owned FD, and
+uses `move_mount` to install that exact object at the already-opened target.
+Post-move validation must still match the requested parent, logical root, kind,
+generation, filesystem, and read-only state. A replacement or other ambiguity
+preserves the foreign mount and forbids destructive rollback.
 
 Expected node flow:
 
@@ -1925,12 +2346,15 @@ NodeStageVolume:
       exact logical-directory source, supported capability, and filesystem
       type; otherwise return `AlreadyExists`
   11. bind-mount the logical directory to the per-volume staging path; on
-      failure, undo only mounts created by this call and leave the CO-owned
+      failure, use a cancellation-independent five-second cleanup context to
+      re-read the mount table and undo only an exact authenticated mount created
+      by this call; leave a foreign, replaced, or stacked mount and the CO-owned
       directory intact
 
 NodePublishVolume:
-  1. parse the handle, acquire the same per-logical-volume node lock, and
-     revalidate the Ready ownership record and local published node ID
+  1. parse the handle, acquire the same per-logical-volume node lock followed by
+     the lock for the normalized target path, and revalidate the Ready ownership
+     record and local published node ID
   2. inspect the live mount table and prove the staging path is the exact
      logical-directory bind mount backed by the expected configured parent
      `virtiofs` mount; an unmounted, replaced, stacked, or foreign staging path
@@ -1940,28 +2364,40 @@ NodePublishVolume:
      target remains idempotent
   4. validate that the target is an absolute path under the kubelet-managed
      plugin target tree, and create the target directory when absent
-  5. if the target is already mounted from the exact requested staging path
-     with the same supported capability and read-only mode, return success; if
-     any of those properties differ, return `AlreadyExists` without remounting
+  5. if the target is already mounted with the same kernel-observable backing
+     identity as the exact validated staging mount, the same supported durable
+     capability, and the same read-only mode, return success; if any of those
+     properties differ, return `AlreadyExists` without remounting
   6. bind-mount the staging path to the pod target path
   7. respect `NodePublishVolumeRequest.readonly`; read-only requests must result
      in a read-only bind mount
-  8. if mounting fails, remove the target directory only when this call created
-     it and only after proving that it is not mounted and is empty
+  8. if mounting or post-mount verification fails, use the same bounded
+     cancellation-independent cleanup to unmount only an exact publish graph;
+     remove the target directory only when this call created it and only after
+     proving that it is not mounted and is empty
 
 NodeUnpublishVolume:
-  1. parse the handle, acquire the same per-logical-volume node lock, and
-     validate with no-follow resolution that the absolute target is under this
-     driver's exact kubelet pod CSI target subtree
-  2. when mounted, inspect the live mount table and prove the target source is
-     this volume's validated staging mount and ultimately the expected parent
-     and logical directory; a foreign, stacked, aliased, or mismatched mount
-     returns `FailedPrecondition` without unmounting
-  3. unmount the pod target path when ownership is proven; an absent or
-     already-unmounted
-     target is an idempotent success
-  4. remove the driver-created target directory after proving it is unmounted
-     and empty; tolerate `NotFound`, but surface any other cleanup failure
+  1. parse the handle, acquire the same per-logical-volume node lock followed by
+     the lock for the normalized target path, and validate with no-follow
+     resolution that the absolute target is under this driver's exact kubelet
+     pod CSI target subtree
+  2. when mounted, inspect the live mount table and prove that exactly one
+     validated staging mount and the target share this volume's expected parent
+     `virtiofs` source, device identity, and logical-directory root; a foreign,
+     stacked, aliased, or mismatched mount returns `FailedPrecondition` without
+     unmounting
+  3. reconcile the private exact-unmount quarantine, then unmount the pod
+     target when ownership is proven; an absent target is idempotent success
+     only after the quarantine is proven empty and authenticated
+  4. while the target lock still excludes every cooperating Publish/Unpublish,
+     exact-unmount opens the now-visible underlying target with a no-follow
+     descriptor and returns its device/inode identity; remove only that same
+     empty inode through its authenticated parent descriptor. A historically
+     absent mount does not authorize removal of an unrelated empty directory,
+     and any replacement preserves the replacement and fails closed. Tolerate
+     `NotFound`, but surface any other cleanup failure. The Node lock order is
+     always volume, target, then parent; no path may acquire these locks in
+     reverse
 
 NodeUnstageVolume:
   1. parse the handle, acquire the same per-logical-volume node lock, and
@@ -1971,12 +2407,32 @@ NodeUnstageVolume:
      requested logical directory under the expected configured parent; a
      foreign, stacked, aliased, or mismatched mount returns
      `FailedPrecondition` without unmounting
-  3. unmount the per-volume staging path when ownership is proven; absent or
-     already-unmounted is an
-     idempotent success
+  3. reconcile the private exact-unmount quarantine, then unmount the
+     per-volume staging path when ownership is proven; absence is idempotent
+     success only after the quarantine is proven empty and authenticated
   4. leave creation and removal of the staging directory to Kubernetes
   5. keep the parent mounted unless safe cleanup is implemented
 ```
+
+Linux mountinfo retains the bind mount's filesystem/device identity, root within
+that filesystem, target, and mount options, but it does not retain the source
+pathname originally passed to the bind-mount syscall. Node validation must use
+the kernel-observable identity above and must not invent or trust a reconstructed
+`sourcePath`. The exact staging target is validated independently, and both
+mounts must resolve to the same configured parent and logical root. The complete
+CSI capability is checked against the authenticated ownership record; the
+read-only property is additionally checked in the live publish mount options.
+The parser bounds the complete snapshot to 64 MiB in addition to its per-line
+and entry-count limits. An empty mountinfo read is never interpreted as an empty
+mount namespace, and duplicate mount IDs cannot form a coherent snapshot;
+either condition fails closed before any absence or mount-boundary decision.
+For every unstacked driver target, the runtime opens the exact target without
+following, matches the descriptor fdinfo mount ID to that snapshot, and records
+the non-reusable `STATX_MNT_ID_UNIQUE` generation. Unpublish, unstage, rollback,
+and uninstall compare that generation, not the reusable mountinfo ID. A stacked
+target is rejected before generation comparison. This kernel primitive is a
+mandatory v1 node compatibility requirement; release qualification must prove
+it on every supported Kapsule/kernel line.
 
 Parent mounts can remain mounted on the node. The pool is intentionally small,
 and keeping parent mounts warm avoids unnecessary attach/mount churn.
@@ -2105,6 +2561,12 @@ that all schedulable Linux workload nodes and the controller node satisfy the
 homogeneous contract. Otherwise the controller must remain unready and refuse
 new CSI mutations. A development-only skip flag may bypass preflight, but the
 chart and README must state that this mode is unsupported for production.
+For each eligible node, the coherent preflight projection includes its exact
+CSINode ID, live provider commercial type, and positive live
+`MaxFileSystems`. The node ID zone must belong to the configured region, the
+commercial type must be in the release-qualified list, and a missing or zero
+live limit keeps the controller non-serving even when Kubernetes readiness and
+registration are otherwise healthy.
 
 The node DaemonSet must target `kubernetes.io/os=linux` and cover the same
 workload-node set. Preflight must verify that every eligible node is Ready, has a
@@ -2114,8 +2576,9 @@ controller serves provisioning or publish operations.
 Readiness alone does not prove that a rolling DaemonSet has the same parent
 allowlist and schema contract as the controller. The chart must compute a
 `nodeConfigGeneration` as SHA-256 over canonical node-relevant configuration:
-driver name, region, complete parent ID and base-path mapping, node mount roots,
-supported access modes, and ownership schema reader/writer generation. It
+driver name, region, complete parent ID and base-path mapping, exact sorted
+commercial-type allowlist, node mount roots, supported access modes, and
+ownership schema reader/writer generation. It
 writes the bounded hash to a fixed Pod
 annotation on both controller and node-plugin Pods. Before serving create or
 publish, the controller must require one Ready node-plugin Pod with the exact
@@ -2134,6 +2597,14 @@ periodic interval. If the eligible node set becomes invalid, the controller must
 expose a clear degraded condition, keep existing mounts safe, and refuse new
 operations that depend on the homogeneous-node invariant until the operator
 fixes placement or capacity.
+
+V1 uses the configured controller metadata-refresh interval for that periodic
+fallback. Every successful pass also validates that each eligible Instance has
+no File Storage attachment outside the configured parent set, recomputes its
+deduplicated configured-parent slot budget from the live `MaxFileSystems`
+value, and publishes aggregate used/limit and ready/expected metrics. Event-
+driven informer acceleration may be added later but cannot replace this bounded
+full reread or weaken its fail-closed result.
 
 If a future version supports heterogeneous topology-aware pools, it must add:
 
@@ -2198,6 +2669,12 @@ Validation results are RPC-specific, as required by CSI:
 The implementation may share parsing and normalization, but it must not share
 one hard-coded gRPC result across these RPCs. Tests assert the exact status and
 the `ValidateVolumeCapabilitiesResponse` shape.
+
+Malformed or foreign driver handles and non-empty immutable contexts with
+missing, unknown, non-canonical, mismatched, or over-limit fields are request
+validation errors and map to `InvalidArgument`, never `Internal`. The
+`DeleteVolume` foreign-ID success rule remains its deliberate RPC-specific
+exception and is resolved before generic error mapping.
 
 For a second `NodePublishVolume` target, `SINGLE_NODE_WRITER` returns
 `FailedPrecondition` whether the remaining arguments match or not.
@@ -2320,7 +2797,7 @@ pools:
     basePath: /kubernetes-volumes
     selectionPolicy: least-allocated
     maxParentsPerEligibleNode: 2
-    maxLogicalOvercommitRatio: 1.0
+    maxLogicalOvercommitRatio: "1.0"
     minFreeBytes: 10737418240
     minFreePercent: 5
     onDelete: archive
@@ -2358,7 +2835,9 @@ but is not a storage fence. The chart must reject production values that narrow
 the node-plugin/workload eligible set, disable the homogeneous-node preflight,
 or remove `kubernetes.io/os=linux`. Compatible controller-only placement
 constraints remain supported only when they leave at least two Ready candidate
-nodes and do not bind the controller to one hostname or one failure domain.
+nodes and do not bind the controller to one hostname. They may select a single
+zone when the cluster itself is single-zone, provided at least two compatible
+candidate nodes remain.
 
 `node.parentMountRoot` is fixed to
 `/var/lib/scaleway-sfs-subdir-csi/parents` in production v1. A development
@@ -2368,6 +2847,99 @@ disjoint from the fixed parent root. Node startup resolves symlinks and rejects
 equality or ancestor/descendant overlap between the parent root and kubelet,
 plugin socket, registry, pod, staging, or target trees before enabling
 Bidirectional propagation.
+
+The startup proof resolves every currently existing component of those paths.
+For a dynamic path that does not exist yet, it resolves the deepest existing
+ancestor and appends only the normalized missing suffix; a dangling symlink,
+permission error, non-directory ancestor, or unreadable component is not
+absence and fails startup. The parent root, kubelet root, CSI socket directory,
+driver plugin directory, and pod target root must already exist as directories.
+The registry and per-driver staging trees may be absent, but every existing
+component is still resolved and checked. Per-RPC descriptor-relative no-follow
+validation remains mandatory because startup evidence cannot authorize a path
+created or replaced later.
+
+Lexical and symlink resolution alone cannot detect two different container
+paths backed by overlapping hostPath bind sources. The node therefore parses
+one fresh bounded `/proc/self/mountinfo` snapshot before serving. It requires
+exactly one mount entry—never zero or a stack—for the parent root, kubelet
+`plugins` root, kubelet `pods` root, and CSI socket directory. The parent,
+plugins, and pods entries must carry a `shared:<peer-group>` optional field,
+proving the chart's Bidirectional propagation contract reached the process
+mount namespace. For each protected anchor, the process compares the kernel
+major/minor device identity and normalized mountinfo filesystem root against
+the parent root. Equal or ancestor/descendant source roots on the same device
+are an alias and fail startup even when their container target strings are
+disjoint. A different device remains a distinct source. Missing, malformed, or
+ambiguous mount identity keeps the node CSI endpoint non-serving. The startup
+snapshot also probes `statx(STATX_MNT_ID_UNIQUE)` through the opened parent-root
+anchor. Before either privileged CSI endpoint becomes ready, the kernel mount
+preflight uses the chart-provided private quarantine to exercise `open_tree`,
+detached bind cloning, `mount_setattr`, `move_mount`, mount-FD identity, and
+exact detach on driver-owned scratch directories, then removes those
+directories. A kernel, runtime security profile, or container configuration
+that blocks any required primitive is not compatible with v1 even if ordinary
+mountinfo parsing succeeds.
+
+#### 7.1.1 Runtime Configuration Projection
+
+The chart renders one non-secret `config.json` key in its ConfigMap and mounts
+that same file read-only into the controller and node driver containers. JSON is
+deliberate: the process can use the standard library plus the driver's strict
+duplicate-key decoder without adding a YAML parser to the runtime dependency or
+supply-chain surface.
+
+The runtime document has closed `schemaVersion: "1"`, is limited to 1 MiB before
+decode, and contains the complete process configuration projection: mode,
+driver/log identity, controller namespace and Helm release, exact chart version,
+the sorted rendered-image commitment described below, installation Secret
+reference, non-secret provider scope, credential Secret/key references,
+controller deadlines and leadership timing as positive integer seconds, node
+paths, scheduling contract, pools, StorageClasses, and the exact
+`nodeConfigGeneration`. Unknown or duplicate fields, trailing JSON, malformed
+types, non-canonical UID/GID or ratio values, overflowed durations, an unfixed
+Lease name, and a generation mismatch all fail before Kubernetes, provider, or
+filesystem mutation.
+
+`renderedImages` is a closed sorted array with the exact names `driver`,
+`external-attacher`, `external-provisioner`, `liveness-probe`, and
+`node-driver-registrar`. Production requires a lowercase immutable
+`sha256:<64 hex>` digest for every entry. Development rendering may project an
+empty digest so local chart structure can be tested, but such a runtime is not
+checkpoint- or recovery-eligible. The controller uses this independently
+rendered projection, rather than environment guesses or mutable tags, when it
+creates and verifies checkpoint manifests.
+
+Secret values never enter the ConfigMap or the decoded configuration object.
+Both components inject `INSTALLATION_ID` from the external identity Secret. The
+controller additionally requires non-empty `SCW_ACCESS_KEY` and
+`SCW_SECRET_KEY` and requires the environment-projected project, region, and
+default zone to exactly equal the decoded Helm projection, preventing a
+one-sided Deployment/ConfigMap change from selecting another provider scope.
+The node process fails startup if either authenticated Scaleway credential
+environment key is present. Runtime errors describe only the missing or
+mismatched key and never include credential values.
+
+Helm tests must extract the rendered JSON, validate its closed projection, and
+load that exact file through both production decoder modes. Unit tests cover
+ConfigMap-style symlink projection, size bounds, cancellation, strict JSON,
+environment authority, duration conversion, and generation tampering.
+
+The driver process command line is closed and has no implicit runtime defaults:
+
+```text
+scaleway-sfs-subdir-csi --mode=<controller|node> --endpoint=unix:///absolute/csi.sock --admin-endpoint=unix:///run/scaleway-sfs-subdir-csi/admin.sock --config=/absolute/config.json --live-address=<numeric-host:port> [--metrics-address=<numeric-host:port>]
+```
+
+Every required flag appears exactly once. Positional arguments, short aliases,
+duplicates, unknown flags, empty or multi-line values, TCP CSI endpoints,
+relative/non-normalized/overlong Unix paths, a non-fixed admin endpoint, and
+DNS listener names are rejected before opening the configuration. The CSI and
+admin sockets must use different directories, and live/metrics listeners must
+use distinct non-zero canonical numeric ports. After flag validation, the
+process loads the bounded configuration with the selected component's
+credential boundary before constructing a listener or adapter. `--version`
+and `--help` are the only standalone invocations.
 
 ### 7.2 StorageClass Parameters
 
@@ -2425,6 +2997,12 @@ region, and default zone must not also be accepted from that Secret, because two
 configuration authorities could select the wrong Project or region. The chart
 must render non-secret scope directly from validated values and must never put
 credentials in ConfigMaps.
+
+`installation.idKey`, `scaleway.credentials.accessKeyKey`, and
+`scaleway.credentials.secretKeyKey` must each contain 1 to 128 characters from
+the Kubernetes Secret data-key set `[-._A-Za-z0-9]`. Credential key names must
+also be distinct. Invalid projections are rejected by both Helm schema and
+runtime validation before any Secret read or provider operation.
 
 Scaleway File Storage parent metadata is regional. Instance attachment
 operations are node-specific and must use the zone of the target Scaleway
@@ -2557,7 +3135,7 @@ ranges, plus template validation for cross-field rules. It must reject at least:
 - empty project, region, driver name, pool name, parent ID, or StorageClass name;
 - duplicate parent filesystem IDs across pools;
 - a missing pool referenced by a StorageClass;
-- root, relative, non-normalized, or reserved base paths;
+- root, relative, non-normalized, or reserved parent-owner-namespace base paths;
 - a production `node.parentMountRoot` different from the fixed dedicated path,
   or any kubelet/socket/registry/pod/staging path that is relative,
   non-normalized, equal to, an ancestor of, or a descendant of that root;
@@ -2580,6 +3158,22 @@ ranges, plus template validation for cross-field rules. It must reject at least:
   startup-probe budget plus a five-minute margin;
 - empty version tags or missing/malformed `sha256` digests for the controller
   or any sidecar in release values.
+
+Every chart duration uses the canonical string form `[1-9][0-9]{0,5}(s|m|h)`.
+The six-digit bound keeps Helm integer conversion, unit multiplication, the
+rendered positive-seconds projection, and Go `time.Duration` conversion inside
+their common non-overflowing range. Longer values are rejected by schema before
+template arithmetic; they must never wrap into zero or a negative runtime
+deadline.
+
+Lexical path validation compares each configured path with its POSIX-cleaned
+form. This includes terminal `/.` and `/..` components, not only traversal
+components surrounded by slashes. In production, required node affinity is
+rejected because it can narrow the asserted all-schedulable-Linux-node set.
+Controller placement rejects a standard hostname pin because it leaves no
+rescheduling candidate. Zone and region topology constraints are allowed: they
+remain subject to the runtime startup proof of at least two distinct Ready
+compatible candidate nodes, and all those candidates may be in one zone.
 
 Resource requests and limits are required separately for every controller and
 node container. The defaults above are conservative starting points and remain
@@ -2614,6 +3208,26 @@ Before v1, the release notes must include a compatibility table with:
 - minimum and maximum tested sidecar versions;
 - upgrade test coverage from the previous released chart to the candidate chart.
 
+The v1 implementation baseline is pinned to the dependency set used by the
+official Scaleway File Storage CSI reference at commit
+`2ede1238d63cf03b575eacee2ef1449be9106387`, except for this driver's newer Go
+toolchain requirement:
+
+| Contract | Pinned development baseline |
+| --- | --- |
+| Go toolchain | `1.26.0` |
+| CSI specification Go module | `github.com/container-storage-interface/spec v1.12.0` |
+| CSI sanity module | `github.com/kubernetes-csi/csi-test/v5 v5.4.0` |
+| gRPC Go | `google.golang.org/grpc v1.80.0` |
+| Kubernetes Go modules | `k8s.io/api`, `k8s.io/apimachinery`, and `k8s.io/client-go v0.35.3` |
+| Scaleway SDK | `github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36` |
+
+This table pins source and test contracts; it is not by itself a claim that a
+Kubernetes or Kapsule release is supported. The public support matrix still
+requires the kind, Kapsule, sidecar, upgrade, and real-provider evidence listed
+in this specification. Updating any row is a deliberate compatibility change
+that must update the retained test evidence in the same release.
+
 Production releases must pin explicit image tags and non-empty immutable image
 digests. Operators may override images, but release mode must reject a tag-only
 override and the README must state that untested sidecar/image combinations are
@@ -2641,14 +3255,28 @@ this workflow.
    target remains;
 3. quiesce the controller through the same global barrier used by checkpoint;
    the active uninstall request owns the barrier and is the only admin mutation
-   allowed to execute the remaining ordered cleanup;
+   allowed to execute the remaining ordered cleanup. Under that drained
+   barrier, resolve every exact `Pending` intent, require the exact committed
+   journal set and every permanent pool journal to be `Idle`, and then rebuild
+   the allocation/provider target inventory. A reservation resolved to
+   `Reserved` is a normal uninstall blocker;
 4. invoke the node-local admin command with `kubectl exec` on every eligible
-   node-plugin Pod, prove no child bind mount remains, and unmount only the exact
-   configured driver parent roots;
-5. scale the node DaemonSet to zero while its RBAC still exists, wait for every
-   node-plugin Pod to terminate, and retain the successful exact per-node
-   unmount inventory from step 4. With workloads removed and node plugins
-   stopped, no driver component can remount a parent;
+   node-plugin Pod. Each mutating node prepare first removes Node readiness,
+   closes one process-wide Node mutation gate, and waits for every admitted
+   `NodeStageVolume`, `NodePublishVolume`, `NodeUnpublishVolume`, and
+   `NodeUnstageVolume` call to finish. Only then may it inspect the final mount
+   graph, prove no child bind mount remains, and unmount the exact configured
+   driver parent roots. The gate remains closed for that Pod; normal service
+   requires a fresh node-plugin process;
+5. delete the exact node DaemonSet with a Kubernetes UID precondition while its
+   RBAC still exists, wait for every node-plugin Pod selected by that exact Helm
+   release to terminate, and retain the successful exact per-node unmount
+   inventory from step 4. Kubernetes does not expose a `scale` subresource for
+   DaemonSets; exact preconditioned deletion is therefore the v1 stop primitive.
+   A retry validates the name and UID frozen in the same request's progress,
+   accepts absence only after the controller is quiesced for that request, and
+   still proves that no matching Pod survives. With workloads removed and node
+   plugins stopped, no driver component can remount a parent;
 6. unmount the controller's exact parent roots, detach each configured parent
    from every installation Instance, and poll both paginated regional and
    Instance inventories to conclusive absence. This is the only normal
@@ -2667,11 +3295,32 @@ pre-delete hook; the explicit command keeps operator authorization and audit
 outside the runtime driver. Reinstall requires the same identity Secret and
 validates all retained claims before serving.
 
+After the controller accepts quiesce, the operator binary persists one bounded,
+closed-schema progress ConfigMap named from a SHA-256 of namespace, Helm release,
+and request ID. It records only immutable workload identities and already
+validated phase evidence; it contains no kubeconfig, credential, Secret value,
+or workload data. Every update uses `resourceVersion` compare-and-swap. A retry
+must strictly validate the ConfigMap, its request/release labels, and its sole
+ownerReference to the exact controller Deployment UID before using cached
+evidence. The caller's Kubernetes authorization, not a runtime ServiceAccount,
+creates and updates this object. The ownerReference retains progress while the
+controller is scaled to zero and lets Kubernetes garbage-collect it only when
+the audited later Helm removal deletes that exact Deployment.
+
 The uninstall audit result must record the request ID, chart/driver/admin
 versions, fixed Lease name and UID, exact nodes and Instances checked, unmounted
 paths, detached parent IDs, final inventory hashes, and completion timestamp.
 Retries with the same request ID resume from observed state and never skip a
 previously incomplete proof.
+
+Every node and controller unmount result binds one configured parent ID to the
+exact normalized `<configured-parent-mount-root>/<parentID>` path. A bare list
+of parent IDs or paths is insufficient because it cannot prove which identity
+was cleared. The final audit carries the configured node and controller roots,
+the complete parent set, per-node bound unmount evidence, controller bound
+unmount evidence, and the exact checked node-to-Instance projection. Repeated
+path strings on different nodes remain distinct per-node evidence rather than
+being collapsed into an ambiguous installation-wide path list.
 
 ### 7.6 Admin CLI Release Contract
 
@@ -2686,10 +3335,242 @@ same major admin protocol and an explicitly declared compatible minor range; an
 unknown or incompatible protocol fails before quiesce, GC, checkpoint, upgrade,
 or uninstall changes state. Audit output records both versions.
 
+The controller/node-local v1 wire protocol uses a Unix socket only; it is never
+exposed by a Kubernetes Service or TCP listener. Each connection carries
+exactly one request and one response, framed by a four-byte unsigned big-endian
+payload length followed by closed-schema UTF-8 JSON. Empty frames and frames
+larger than 2 MiB are rejected before JSON allocation. The 2 MiB limit permits
+the maximum 1 MiB checkpoint manifest plus its bounded prepare-result envelope;
+detailed inventories never cross this control channel. The request command set
+is closed to `handshake`, `checkpoint.prepare`, `checkpoint.resume`,
+`decommission.inspect`, `decommission.prepare`, `decommission.quiesce`,
+`decommission.cleanup`, `decommission.release`, `gc.submit`,
+`upgrade.preflight`, `uninstall.inspect`, `uninstall.prepare`,
+`uninstall.quiesce`, `uninstall.cleanup`, and `uninstall.release`.
+`uninstall.inspect` is the node-local read-only mount inventory used by
+dry-run. `uninstall.prepare` is the node-local exact-unmount phase. The
+remaining uninstall commands are separate controller-local phases; separation
+is required because the controller ServiceAccount deliberately has neither Pod
+exec nor workload-write authority. GC and upgrade carry one command-specific
+JSON object. Every decommission phase carries only the same exact
+`parentFilesystemID` object; all other v1 commands carry no payload. Unknown commands, fields,
+duplicate keys, non-object command payloads, mixed handshake/mutation
+envelopes, and trailing JSON are rejected before a workflow handler runs.
+
+The fixed in-container endpoint is
+`unix:///run/scaleway-sfs-subdir-csi/admin.sock` for both controller and node
+driver processes. `/run` is an `emptyDir` mounted only into the driver
+container; the admin socket must never be placed in the CSI socket volume,
+kubelet plugin hostPath, or a sidecar mount. The driver creates its private
+subdirectory with mode `0700` and socket with mode `0600`, rejects symlink or
+non-socket replacement, revalidates the socket inode immediately before
+unlink, and unlinks only its exact stale socket inside that private directory.
+The released in-image `/usr/local/bin/csi-admin` internal
+command connects locally after an operator-authorized `kubectl exec`; the
+operator-side CLI owns kubeconfig use and multi-Pod orchestration. Neither
+endpoint is an authentication substitute for Kubernetes exec authorization or
+the protocol/leadership checks below.
+
+The controller additionally creates the private controller-only streaming
+socket
+`unix:///run/scaleway-sfs-subdir-csi/checkpoint-export.sock` in the same
+`0700` directory with mode `0600`. It is not a second control endpoint: it
+accepts only a negotiated checkpoint-export prelude containing the exact
+prepared ticket, then emits one bounded archive stream. Node Pods never create
+this socket. The stream server serializes package construction with prepare
+and resume through the same coordinator operation lock, so resume cannot open
+the mutation gate during an export reread.
+
+The closed in-container client grammar is:
+
+```text
+csi-admin local [--endpoint=unix:///run/scaleway-sfs-subdir-csi/admin.sock] [--timeout=30s] handshake
+csi-admin local [global flags] checkpoint prepare --request-id=<uuid>
+csi-admin local [global flags] checkpoint export --request-id=<uuid> --ticket-stdin=true
+csi-admin local [global flags] checkpoint resume --request-id=<uuid>
+csi-admin local [global flags] decommission inspect --request-id=<uuid> --parent-filesystem-id=<uuid>
+csi-admin local [global flags] decommission prepare --request-id=<uuid> --parent-filesystem-id=<uuid>
+csi-admin local [global flags] decommission quiesce --request-id=<uuid> --parent-filesystem-id=<uuid>
+csi-admin local [global flags] decommission cleanup --request-id=<uuid> --parent-filesystem-id=<uuid>
+csi-admin local [global flags] decommission release --request-id=<uuid> --parent-filesystem-id=<uuid>
+csi-admin local [global flags] gc submit --request-id=<uuid> --logical-volume-id=<id> --mode=<dry-run|execute> --expected-state=<Archived|Retained>
+csi-admin local [global flags] upgrade preflight --request-id=<uuid> --candidate-file=/absolute/candidate.json
+csi-admin local [global flags] upgrade preflight --request-id=<uuid> --candidate-stdin=true
+csi-admin local [global flags] uninstall inspect --request-id=<uuid>
+csi-admin local [global flags] uninstall prepare --request-id=<uuid>
+csi-admin local [global flags] uninstall quiesce --request-id=<uuid>
+csi-admin local [global flags] uninstall cleanup --request-id=<uuid>
+csi-admin local [global flags] uninstall release --request-id=<uuid>
+```
+
+Global flags precede the command. Control-channel I/O timeout is bounded from
+one second to five minutes. The checkpoint export stream alone accepts a
+timeout through one hour; it still performs its control handshake with a
+five-minute maximum before connecting to the separate stream socket. The
+grammar accepts only bounded single-line UTF-8 arguments and
+unique long-form flags from the closed command-specific set; short, duplicate,
+unknown, empty, or positional arguments are rejected rather than interpreted by
+last-value precedence. Direct local upgrade candidate input uses a clean
+absolute non-root path and must remain the same exact non-symlink regular file
+across open and bounded read. The private `candidate-stdin=true` variant is used
+only by the complete operator orchestrator under `kubectl exec -i`; it accepts
+one bounded canonical `UpgradePreflightPayload`, rejects every other stdin
+shape, and never accepts an operator path inside the Pod. Candidate input is no
+larger than the wire limit, is strictly decoded, and is validated before the
+mutation connection. The private checkpoint `ticket-stdin=true` variant
+likewise accepts only the exact bounded canonical `CheckpointTicket` returned
+by prepare; the stream server regenerates and compares that ticket before
+writing the first archive byte. The node-local decommission primitives accept
+only one configured parent ID: inspect reports only staging and workload mounts
+backed by that parent, and prepare first closes and drains the process-wide Node
+mutation gate, then unmounts only its exact parent root after those child sets
+are empty. Mounts for other configured parents are validated
+but neither reported as blockers nor unmounted. These are private building
+blocks for the complete offline operator workflow and do not by themselves
+authorize provider detach or Helm-value removal. The controller-local inspect
+phase accepts only a configured `draining` parent
+and returns the complete validated allocation/ownership/PV blocker set plus the
+fresh installation Instance targets without changing readiness, admission, an
+allocation ConfigMap, or a reservation journal. It reads the committed journal
+set only; any matching `Pending` intent is a blocker and inspect never repairs
+it. The controller-local quiesce phase is the only decommission phase allowed
+to reconcile a `Pending` journal after the global mutation gate has drained.
+The controller-local quiesce phase accepts only that configured `draining`
+parent, drains the global mutation gate, resolves every exact `Pending` journal,
+then rejects the resulting allocation when it targets that parent, rereads and
+validates the full startup inventory under that barrier, and
+captures exact Instance targets. Cleanup unmounts and detaches only that parent
+and proves fresh regional and per-Instance absence without rejecting other
+configured parent attachments. Release requires successful cleanup and writes
+the normal exact graceful-release marker. The complete operator must interleave
+these phases with its own repeated Kubernetes inventory and Pod-stop proof;
+calling the local phases alone remains unsupported. Successful
+output is the exact validated handshake or handler-owned JSON object followed
+by one newline. Command-line errors exit 2; transport, compatibility, remote,
+cancellation, and output failures exit 1.
+The local uninstall phases are private orchestration primitives: none emits a
+safe-uninstall completion audit or authorizes Helm deletion. The supported
+operator entry point is the complete multi-Pod command:
+
+```text
+csi-admin uninstall prepare --namespace=<namespace> --release=<helm-release> --request-id=<uuid> --mode=<dry-run|execute> [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=30m]
+```
+
+It loads the caller's kubeconfig, performs a compatible handshake through
+`kubectl exec` before every local phase, reads Kubernetes inventory with the
+caller's authorization, and is the only command that can emit the final audit.
+The caller therefore needs read access to cluster-scoped Nodes, CSINodes,
+StorageClasses, PVs, and VolumeAttachments; read access to Pods, PVCs, the
+release ConfigMap, and the installation identity Secret; Pod exec on the exact
+release Pods; create/get/update access to the request progress ConfigMap;
+preconditioned delete access to the exact node DaemonSet; and get/update scale
+access to the exact controller Deployment. These permissions are never added
+to the driver ServiceAccounts.
+Calling a local phase directly is unsupported and can only leave the driver
+fail-closed or partially prepared; it never constitutes permission to run
+`helm uninstall`.
+
+The supported operator-side parent-decommission entry point is:
+
+```text
+csi-admin decommission prepare --namespace=<namespace> --release=<helm-release> --request-id=<uuid> --parent-filesystem-id=<id> --mode=<dry-run|execute> [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=30m]
+```
+
+Dry-run performs complete caller-authorized Kubernetes inventory, target-bound
+node mount inspection, and a controller read-only inspection of allocation,
+ownership, PV, and provider-target evidence. Execute repeats the complete view
+after the controller owns the quiesce barrier. Only then may it mark the
+post-quiesce proof complete in a bounded closed-schema progress ConfigMap,
+owned solely by the exact controller Deployment UID and updated by
+`resourceVersion` compare-and-swap. The progress binds the request, target
+parent, runtime ConfigMap, Deployment, DaemonSet, controller Pod, every node
+Pod/UID, node/Instance projection, mount roots, and version identities.
+Target-parent unmount evidence is persisted before the node DaemonSet is
+deleted; controller target-only cleanup and graceful-release evidence are
+persisted before the controller is scaled to zero. A retry with the same
+request validates surviving identities or exact absence evidence and resumes
+without reissuing a completed destructive phase. A different request or target
+cannot adopt the progress. The final audit, not a local phase or an incomplete
+progress object, is the only evidence that permits the separate Helm-values
+removal.
+
+A dry-run that encounters durable progress from an interrupted execute request
+may validate and report that progress, but it never updates
+`postQuiesceValidated` or any other recovery field. Only the execute path that
+currently owns the quiesce authority may advance durable progress.
+
+The supported operator-side online-upgrade entry point is:
+
+```text
+csi-admin upgrade preflight --namespace=<namespace> --release=<helm-release> --request-id=<uuid> --candidate-file=/absolute/candidate.json [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=10m]
+```
+
+It validates and freezes the caller's exact non-symlink candidate inode before
+cluster access, sends only the canonical bounded payload through `kubectl exec
+-i`, and relies on the in-Pod client to perform the mandatory handshake before
+the controller-local live comparison. No candidate file is copied into the
+read-only driver image.
+
+The supported operator-side manual-GC entry point is:
+
+```text
+csi-admin gc submit --namespace=<namespace> --release=<helm-release> --request-id=<uuid> --logical-volume-id=<id> --mode=<dry-run|execute> --expected-state=<Archived|Retained> [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=30m]
+```
+
+It discovers exactly one running controller Pod for the release and invokes the
+existing local command through `kubectl exec`. The local client handshakes
+before submitting the durable request. The operator client strictly validates
+that the returned typed audit has the same request ID, logical volume ID, mode,
+and expected predecessor state; retries retain the same request ID and rely on
+the controller's persisted state machine rather than client-side filesystem
+assumptions.
+
+The CLI uses a separate connection for the handshake before every mutation.
+The mutation envelope repeats the CLI build version and protocol version, and
+the server independently negotiates that envelope again immediately before
+dispatch, so writing a mutation frame directly cannot bypass compatibility.
+Success results are bounded JSON objects. The transport validates but does not
+decode and re-encode handler-owned result objects: doing so could reorder a
+nested canonical durable artifact such as `checkpoint.json`. The typed command
+owner supplies those canonical bytes and the transport preserves them exactly.
+Failures use only the stable codes
+`invalid_argument`, `failed_precondition`, `unavailable`, and `internal`, with
+a single-line message bounded to 1,024 UTF-8 bytes; unclassified internal
+errors are redacted. The default server admits at most four concurrent local
+connections, permits a configured bound only from one through sixteen, applies
+bounded I/O deadlines, closes a connection before any I/O when its deadline
+cannot be installed, closes active connections on shutdown, and joins every
+connection goroutine before exit. Workflow leadership, quiesce, locking, and
+authorization checks remain mandatory after transport validation; a successful
+wire handshake is never mutation authority.
+
+The server freezes one typed owner per configured command route at startup;
+duplicate route owners fail startup and a missing route returns
+`failed_precondition` without fallback. `checkpoint.prepare` calls the quiesce
+coordinator and returns the bounded ticket defined in section 10.2;
+`checkpoint.resume` returns success only after its full reconciliation and gate
+resume complete. `gc.submit` accepts exactly `logicalVolumeID`, `mode`, and
+`expectedState`, persists the bounded request envelope through the active
+leader, and then invokes the state-driven GC reconciler. Its result must bind
+the request, logical volume, parent, previous/final state, target/quarantine
+paths, and completion status; a dry-run cannot carry mutation completion and an
+execute result must be a completed `Deleted` transition. `upgrade.preflight`
+validates the candidate declaration completely before any live-state read,
+then compares it with the authoritative live projection and returns both live
+and candidate node generations for audit. The safe-uninstall command is
+available as an operator-side command only when its complete Kubernetes and
+`kubectl exec` backend is present. Runtime endpoints register only the phases
+appropriate to their component: target-mount inspect/prepare on nodes and
+durable-record/provider-target inspect plus quiesce/cleanup/release on the
+controller. The same `decommission.inspect` wire command is deliberately
+component-specific; the complete operator validates both typed results and
+never substitutes one for the other.
+
 Release CI and the release-candidate E2E suite must download and verify the
-packaged binary, then use that exact artifact for checkpoint, GC, upgrade
-preflight, and safe uninstall. `go run`, an unversioned locally built binary, or
-direct record editing is not an accepted production procedure.
+packaged binary, then use that exact artifact for checkpoint export/restore,
+parent decommission, GC, upgrade preflight, and safe uninstall. `go run`, an
+unversioned locally built binary, or direct record editing is not an accepted
+production procedure.
 
 ## 8. Repository Structure
 
@@ -2772,7 +3653,6 @@ scaleway-sfs-subdir-csi/
   .github/
     workflows/
       ci.yaml
-      release.yaml
   Dockerfile
   Makefile
   README.md
@@ -2816,6 +3696,25 @@ in separate pods:
 - `GetPluginCapabilities` advertises exactly `CONTROLLER_SERVICE` in v1;
 - it does not advertise `VOLUME_ACCESSIBILITY_CONSTRAINTS` or another plugin
   capability that v1 does not implement.
+
+The CSI listener accepts only a clean absolute Unix path within the portable
+103-byte bound. Its directory must already exist, be a real directory with no
+symlink-resolved alias, become non-writable by group and other, and remain
+traversable by the non-root sidecars. Kubernetes may initially present the
+exact owned `emptyDir` or plugin hostPath directory as group/other writable;
+after proving its resolved identity, unchanged inode, directory type, and
+effective-UID ownership, the root driver may atomically narrow only those write
+bits through the opened directory descriptor. It never creates the directory,
+broadens a permission, or changes an aliased, replaced, or foreign directory.
+A pre-existing symlink, regular file, or directory at the socket
+path is foreign and fails startup. A live socket also fails startup. The only
+entry eligible for unlink is an exact Unix socket for which a bounded local dial
+conclusively returns connection refused and whose inode/type remain unchanged
+across the liveness check; every other dial result is ambiguous and fails
+closed. The listener owns unlink-on-close and verifies mode `0666` after bind.
+That mode is necessary because kubelet and the non-root CSI sidecars do not
+share the root driver process group; the dedicated pod/hostPath scopes the CSI
+endpoint. The private admin socket retains its stricter `0600` contract.
 
 The CSI sanity gate must use the split controller and node endpoints and assert
 that Controller tests actually ran. A suite that silently skipped Controller
@@ -2961,6 +3860,20 @@ Required v1 implementation:
   `mappingHash`, `reservesCapacity`, delete policy, UID/GID/mode, creation
   timestamp, and state;
 - use optimistic Kubernetes updates to avoid concurrent allocation races;
+- create one permanent fixed-name reservation-journal ConfigMap per configured
+  pool before serving; it uses schema version `1`, exact states `Idle` and
+  `Pending`, installation and active-cluster identity, a monotonic generation,
+  and, only while pending, the complete canonical `Reserved` allocation; its
+  name is derived from a bounded SHA-256 pool-name hash, it is never deleted or
+  reused, and malformed, missing-after-bootstrap, foreign, unavailable, or
+  mismatched journals keep the controller non-serving;
+- create one fixed installation-wide reservation-journal-set ConfigMap before
+  any fresh-install provider or filesystem mutation. It commits the sorted
+  permanent pool set with exact states `Initializing` and `Ready`. Fresh
+  bootstrap and an online pool addition first persist `Initializing` with the
+  pending pool names, create their generation-zero `Idle` journals, and only
+  then CAS the set to `Ready`. A committed journal that is absent is corruption,
+  never a bootstrap signal. Removing a committed pool online is unsupported;
 - keep terminal allocation records after `DeleteVolume` completes. `Deleted` is
   a non-reserving tombstone; `Archived` and `Retained` reserve capacity until
   manual garbage collection;
@@ -3034,7 +3947,13 @@ secrets.
 
 ### 9.7 Logging
 
-Logs must include:
+The driver emits structured JSON logs on standard output. Every completed CSI
+RPC is logged once with its operation, final gRPC code, and duration. Provider,
+mount, inventory, recovery, and parent-health failures are logged at warning or
+error level with their bounded operational context. Stable parent degradation
+and recovery are logged on transition rather than on every polling pass.
+
+Where relevant and available, logs include:
 
 - CSI operation name;
 - logical volume ID;
@@ -3064,6 +3983,11 @@ sfs_subdir_pool_parent_retained_reserved_bytes
 sfs_subdir_pool_parent_available_bytes
 sfs_subdir_pool_parent_actual_free_bytes
 sfs_subdir_pool_parent_actual_used_bytes
+sfs_subdir_pool_parent_observed_size_bytes
+sfs_subdir_pool_parent_statfs_block_size_bytes
+sfs_subdir_pool_parent_statfs_available_blocks
+sfs_subdir_pool_parent_physical_safety_threshold_bytes
+sfs_subdir_pool_parent_statfs_sample_timestamp_seconds
 sfs_subdir_pool_parent_volumes
 sfs_subdir_create_volume_total
 sfs_subdir_delete_volume_total
@@ -3097,14 +4021,54 @@ sfs_subdir_node_publish_volume_total
 sfs_subdir_mount_errors_total
 ```
 
-Metric labels must remain bounded. CSI operation and duration metrics may use
-operation name and gRPC code. Allocation metrics may use state and pool. They
-must not use volume IDs, PVC names, paths, node IDs, or other unbounded values as
-labels.
+Metric labels must remain bounded. The exact v1 label contract is:
 
-Unknown-attachment and published-node-fence metrics are aggregate gauges with
-only bounded pool/state labels. Exact Instance, node, and volume identities
-belong in structured events and logs, never metric labels.
+- parent byte/timestamp metrics use `pool,parent`, where both values come only
+  from the validated configured-parent allowlist;
+- parent volume counts use `pool,parent,state`, and parent conditions use
+  `pool,parent,condition`, with closed state and condition domains;
+- allocation counts use `pool,state`; permanent records from an offline
+  decommissioned parent are aggregated under the fixed `_historical` pool label
+  instead of retaining an arbitrary old pool name;
+- unknown attachments and published-node fences are aggregate gauges using
+  `pool,state`; their state domains are closed and contain no Instance or node
+  identity;
+- authenticated Scaleway API errors use only the five closed provider
+  operation names; CSI operation and duration metrics use only an implemented
+  RPC name and canonical gRPC code;
+- node parent-mount counts use only configured `pool`; all remaining listed
+  controller and node metrics have no driver-supplied label.
+
+Metrics must not use volume IDs, PVC names, paths, node IDs, Instance IDs,
+request names, raw provider responses, or other unbounded values as labels.
+Exact Instance, node, and volume identities belong in structured events and
+logs. Configured parent IDs are the sole resource-identity exception because
+the validated installation-wide allowlist bounds their cardinality before the
+metrics registry is created.
+
+Every implemented unary CSI RPC is observed after its handler has fixed the
+response and canonical gRPC status. The generic counter and duration histogram
+record every completion, and the dedicated CreateVolume, DeleteVolume,
+NodeStageVolume, and NodePublishVolume counters likewise include both
+successful and failed completions. An internal metrics-registry failure is
+reported to the serving supervisor out of band: it must terminate the process,
+but it must never replace the already-fixed RPC result and thereby make a
+possibly completed storage mutation ambiguous to the caller.
+
+The authenticated Scaleway adapter increments the closed provider-error
+counter only when the corresponding API call fails. The node mount adapter
+likewise increments `sfs_subdir_mount_errors_total` for failed mount-table,
+parent-mount, bind, or exact-unmount operations. In both adapters an internal
+metrics failure is delivered to the serving supervisor out of band and never
+replaces the exact provider or kernel result, including an ambiguous attach,
+detach, bind, or unmount result.
+
+The node initializes and periodically refreshes
+`sfs_subdir_node_parent_mounts` from one coherent mount-table snapshot. Only an
+exact configured `virtiofs` parent identity contributes to its configured-pool
+count; absence contributes zero, while a stacked or foreign target is an
+internal node-service failure rather than a plausible mount. This observation
+uses no controller or public-provider dependency.
 
 The repository must provide sample Prometheus alert expressions for these
 production conditions:
@@ -3157,6 +4121,14 @@ Probe semantics:
 - the leadership watchdog must terminate the process after the configured
   renewal deadline so a stale controller cannot continue accepting mutations.
 
+Cached controller readiness is derived from independent startup, periodic
+global-maintenance, checkpoint-quiesce, and shutdown conditions through one
+aggregated state. Clearing one condition must not hide another active failure.
+A global maintenance degradation rejects new CreateVolume and
+ControllerPublishVolume work with `Unavailable`, while DeleteVolume and
+ControllerUnpublishVolume remain available under their normal ownership and
+fencing checks so cleanup can improve safety.
+
 The controller and node pods must wire these endpoints explicitly in the chart;
 one endpoint must not be reused for contradictory readiness and liveness
 semantics. Tests must prove that an unavailable provider keeps cold startup
@@ -3164,6 +4136,39 @@ unready without restarting it, that a runtime failure scoped to one parent does
 not block unrelated parents, that neither condition makes a healthy node plugin
 unready, and that a wedged process or expired controller leadership watchdog
 does terminate the affected process.
+
+The process serves `/livez` and `/metrics` through two distinct one-shot HTTP
+servers and listeners. Each server routes only its exact unescaped path;
+cross-endpoint, unknown, and encoded-alias paths return 404 before a component
+handler. Component handlers retain the GET/HEAD-only contract. The server uses
+a 5-second header timeout, 10-second read timeout, 15-second write timeout,
+30-second idle timeout, and 16-KiB header bound. The standard library request
+error logger is disabled because it can echo untrusted request bytes;
+structured runtime diagnostics remain the bounded logging authority.
+
+After pure runtime configuration validation, the controller constructs a local
+non-mutating serving shell before Kubernetes, provider, mount, recovery, or
+operator-approval work. That shell serves shallow `/livez`, metrics, the
+controller CSI socket with cached `Probe(ready=false)`, and the private admin
+handshake. Valid Controller RPCs return `Unavailable`, and admin mutations
+return the protocol `unavailable` error, until one complete active runtime has
+been installed. Installation atomically publishes the leadership-guarded cores
+and admin handler, then flips readiness only after parent bootstrap and startup
+reconciliation succeed. This permits an abnormal-takeover or missing-Lease
+approval wait to remain live and observable without exposing a provisional
+mutation path. A permanent startup error still terminates the process after all
+local serving goroutines have drained.
+
+Listener bind accepts only the already-validated numeric TCP address and honors
+startup cancellation. Runtime cancellation first cancels every request context,
+then closes listeners through `http.Server.Shutdown` and permits a five-second
+graceful drain. A drain timeout force-closes active connections, returns a
+runtime error, and must not be converted into successful shutdown. The serving
+call joins its shutdown supervisor before returning, owns listener close, and
+rejects reuse of the same server instance. Provider unavailability,
+reconciliation delay, or leadership loss changes cached CSI readiness but does
+not cancel the shallow liveness server; only process shutdown or its defined
+internal-failure path does so.
 
 ## 10. Pool Accounting and Recovery
 
@@ -3268,6 +4273,9 @@ gcQuarantinePath
 gcStartedAt
 gcRemoveStartedAt
 gcCompletedAt
+recoveryOperationID
+recoverySource
+recoveredAt
 ```
 
 `publishedNodeIDs` is a deduplicated array of exact CSI node IDs, bounded by the
@@ -3278,8 +4286,21 @@ The ConfigMap stores the allocation record as canonical JSON in the single data
 key `record.json`; indexed bounded values are duplicated only in the labels
 defined in section 11.4. `schemaVersion` is the string `"1"` for the initial
 schema, timestamps are RFC 3339 UTC, byte counts and revisions are base-10 JSON
-integers, and duplicate JSON keys or invalid field types are rejected. Every
-update uses Kubernetes `resourceVersion` compare-and-swap.
+integers, and duplicate JSON keys or invalid field types are rejected. All
+untrusted durable JSON readers reject nesting deeper than 100 container levels
+before typed decoding; v1 schemas are intentionally far shallower. Every update
+uses Kubernetes `resourceVersion` compare-and-swap.
+
+`recoveryOperationID`, `recoverySource`, and `recoveredAt` are an optional
+all-or-none audit triplet on the detailed allocation record. Normal CSI create
+leaves them absent. `recoverySource` is the closed value `ownership-only` after
+both allocation and PV absence were conclusively proven, or
+`pv-and-ownership` when the missing allocation is reconstructed from an exact
+current PV generation plus authenticated ownership. Both paths set a fresh UUID
+operation ID and canonical recovery observation time before their create-only
+compare-and-swap. The triplet then remains immutable across detailed allocation
+updates and is omitted by the closed compact tombstone projection. It never
+exists in the ownership record and never authorizes a filesystem mutation.
 
 Allocation records must set `reservesCapacity` consistently with the state
 machine:
@@ -3298,6 +4319,19 @@ handle can never resolve to a newer volume. After the operator's chosen detailed
 record retention window, the controller may update that same ConfigMap in place
 to a compact schema using resource-version compare-and-swap. It must not delete
 the ConfigMap or move the proof into a shared index.
+
+The window is configured by
+`controller.detailedTombstoneRetention`; the v1 chart default is `720h` (30
+days), it must be positive, and it is rendered into the closed runtime document
+as `detailedTombstoneRetentionSeconds`. The active controller rechecks the
+window under leadership, normal global mutation admission, and the exact
+logical-volume lock immediately before compaction. Background selection skips
+detailed tombstones whose parent has completed offline decommission because v1
+must not remount an unconfigured historical parent merely to authenticate a
+compaction peer. Those Kubernetes records may remain detailed permanently.
+An eligible configured-parent ownership mismatch or unreadable record degrades
+controller maintenance readiness and is retried; it is never treated as a
+reason to delete or synthesize evidence.
 
 A compacted tombstone uses the distinct `recordKind: compactDeleted` variant.
 It contains this required closed field set:
@@ -3387,6 +4421,38 @@ On startup, the controller must:
    and retained reservations on both active and draining parents;
 10. log a clear pool summary.
 
+The mutating crash-window pass runs only after the complete allocation, PV,
+parent-claim, and ownership inventory has been paired and every permitted
+allocation reconstruction has completed. It reads the allocation set once
+in stable order. `Reserved`/`CreatingDirectory` resume creation from their
+persisted parent without placement or current defaults; `Ready` restores only
+the conservative published-node union; `Deleting` and delete-created terminal
+lags resume through the delete state machine; execute/progress GC resumes
+through the GC state machine; stable `Archived`/`Retained` pairs restore the
+fence union and validate complete terminal evidence. Detailed GC and delete
+repair paths never substitute for one another. `compactDeleted` and
+`deletedUnknown` records cause no per-record follow-up API or filesystem read in
+this pass; their pairing/absence contract was already established by the
+inventory phase. Any first conflict stops startup serving and later records are
+not opportunistically mutated.
+
+The inventory phase itself is read-only and validates the complete set before
+the first recovery write. Every configured parent has exactly one matching
+parent-global claim and complete ownership enumeration; duplicate parent,
+allocation, PV-name, PV-logical-ID, or ownership identities fail closed. An
+allocation/PV pair must match the full immutable context, and a configured
+detailed allocation must satisfy the closed lifecycle predecessor table against
+its ownership. A leftover PV requires matching detailed ownership and becomes a
+`pv-and-ownership` recovery; leftover detailed or compact ownership without a
+PV becomes an `ownership-only` recovery. A PV with no ownership evidence, a PV
+paired with compact ownership, or a changed mapping is not reconstructable.
+Only non-reserving `Deleted` allocation tombstones from a completed offline
+decommission may reference an unconfigured parent without online ownership or
+PV evidence. Recovery needs are sorted and isolated from the input snapshot;
+PV-backed creates run first, ownership-only creates second, and the lifecycle
+pass rereads the allocation list last. Failure at any step stops the sequence
+and keeps startup non-serving.
+
 Stale allocation records without a matching PV must not be deleted
 automatically unless the directory state has been checked and the configured
 cleanup policy has been applied.
@@ -3395,13 +4461,31 @@ If a PV exists without an allocation record, the controller must reconstruct the
 record from the volume handle, PV CSI attributes, and driver-owned ownership
 record, or fail closed with a recovery message.
 
+PV-backed reconstruction requires the exact PV name, UID, resourceVersion,
+driver name, complete handle, and closed immutable `volume_context`. The handle
+and context mapping must agree with each other and every immutable field in the
+checksum-authenticated detailed ownership record before any recovery proof or
+write. A fresh read must then prove that exact PV generation remains current and
+the deterministic allocation name remains absent. The controller writes one
+create-only allocation with `recoverySource = pv-and-ownership`; a committed but
+unacknowledged create is accepted only after deterministic reread validates the
+same PV/ownership pair and audit triplet. A compact ownership record, changed
+PV generation, missing context field, unavailable read, or conflicting existing
+allocation fails closed. No StorageClass, Helm, or pool default fills a field.
+
 If both allocation record and PV are missing but a matching ownership record
 exists, the controller may reconstruct a detailed allocation record only from the
 complete immutable recovery envelope required by section 6.13. It must first
-persist the reconstructed record with compare-and-swap, mark the recovery in its
-audit fields, and then use the normal lifecycle state machine. A missing field,
-checksum mismatch, or disagreement with the handle fails closed; current Helm
-or StorageClass defaults are never substituted.
+persist the reconstructed record with create-only compare-and-swap, set the
+allocation audit triplet `recoveryOperationID`, `recoverySource =
+ownership-only`, and `recoveredAt`, and then use the normal lifecycle state
+machine. `recordRevision` is initialized from the authenticated ownership
+revision and `updatedAt` is the recovery observation time. For `Archived` and
+`Retained`, the allocation-only `deleteResult` is derived from the authenticated
+terminal ownership state as the closed values `archived` or `retained`; this is
+a schema projection, not a current-default lookup. A missing field, checksum
+mismatch, or disagreement with the handle fails closed; current Helm or
+StorageClass defaults are never substituted.
 
 `Reserved` and `CreatingDirectory` are repairable startup states:
 
@@ -3444,8 +4528,9 @@ Same-cluster namespace recovery does not require a separate database. V1
 recovery is supported only from a controller-generated quiesced metadata
 checkpoint; an arbitrary online export is not a consistent backup.
 
-The bundled admin CLI must expose `checkpoint prepare` and `checkpoint resume`
-through a controller-local Unix socket. Operators invoke it with `kubectl exec`
+The bundled admin CLI must expose controller-local `checkpoint prepare` and
+`checkpoint resume`, plus the operator-side offline `checkpoint restore`
+workflow defined below. Operators invoke prepare/resume with `kubectl exec`
 against the current controller Pod; no network Service or second controller is
 introduced. `checkpoint prepare` carries a unique request ID and performs this
 closed protocol while the controller still owns its Lease and parent mounts:
@@ -3455,9 +4540,12 @@ closed protocol while the controller still owns its Lease and parent mounts:
    process-wide mutation count to reach zero;
 2. reject preparation when any allocation is `Reserved`, `CreatingDirectory`,
    or `Deleting`, when a GC/delete transition or bootstrap attempt is active,
-   or when allocation and ownership records do not agree;
+   when the journal set is not the exact configured `Ready` set, when any
+   permanent pool journal is not exactly `Idle`, or when allocation and
+   ownership records do not agree;
 3. during the same uninterrupted quiesced interval, read the complete
-   allocation and driver-PV sets; capture a canonical Kubernetes-object
+   allocation, reservation-journal-set, permanent reservation-journal, and
+   driver-PV sets; capture a canonical Kubernetes-object
    inventory containing source UID/resourceVersion plus a hash of each
    schema-defined recoverable object projection, and a canonical parent
    inventory for every currently configured parent containing the parent-global
@@ -3481,6 +4569,122 @@ closed protocol while the controller still owns its Lease and parent mounts:
    leaves checkpoint mode, and becomes ready. A failed export is discarded and
    resumed in the same way; it is never labelled as a completed checkpoint.
 
+The prepare result is one immutable process-local candidate containing the
+bounded manifest, the exact canonical detailed Kubernetes-object inventory,
+and one exact canonical detailed inventory per configured parent. The
+controller retains an isolated copy only until resume. Export verification must
+match all of those captured bytes before verifying the exported object and
+ownership contents. In particular, the restore-stable Kubernetes aggregate
+deliberately excludes source UID/resourceVersion, so aggregate equality alone
+cannot prove that the backup tool exported the same quiesced API generations;
+the detailed inventory must be byte-for-byte equal to the captured candidate.
+The captured holder evidence must also equal both the complete holder-evidence
+annotation set and `holderIdentity` of that same quiesced Lease read. A stale,
+mixed-generation, absent, or malformed holder field invalidates the candidate;
+the controller must not combine holder evidence supplied independently of the
+Lease snapshot.
+
+The `checkpoint.prepare` control response is a canonical, schema-versioned
+ticket bounded to 2 MiB. It contains the complete canonical manifest and its
+SHA-256, plus the exact SHA-256 and byte size of the detailed Kubernetes-object
+inventory and each sorted parent inventory. It does not copy detailed
+inventories through the controller-local socket: at the supported scale those
+files may each be up to 32 MiB. The checksum-verified release `csi-admin`
+export path builds the detailed inventories and package, compares every ticket
+commitment, then runs the complete object/ownership package verifier over those
+same bytes. Size is checked before hashing or decoding. A source
+UID/resourceVersion-only change is detected by the detailed Kubernetes
+inventory commitment even though the restore-stable aggregate is intentionally
+unchanged. A missing, extra, non-canonical, size-changed, or digest-changed
+inventory invalidates the export. The ticket is control evidence only and is
+not the immutable restore Secret; `checkpoint.json` remains the embedded
+manifest bytes.
+
+The released operator grammar is:
+
+```text
+csi-admin checkpoint prepare --namespace=<namespace> --release=<helm-release> --request-id=<uuid> --output-file=/absolute/checkpoint.tar [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=30m]
+csi-admin checkpoint resume --namespace=<namespace> --release=<helm-release> --request-id=<uuid> [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=30m]
+csi-admin checkpoint restore --namespace=<namespace> --release=<helm-release> --request-id=<uuid> --archive-file=/absolute/checkpoint.tar --identity-secret=<name> --identity-key=<key> --mode=<dry-run|execute> [--kubeconfig=/absolute/path] [--context=<name>] [--timeout=30m]
+```
+
+Prepare uses the caller's kubeconfig to select the one exact release controller
+Pod, invokes the private prepare command, and passes only the canonical ticket
+to the private export command over `kubectl exec -i`. The controller performs a
+fresh complete startup-inventory read while the barrier remains closed,
+reconstructs every recoverable Kubernetes projection, parent owner, detailed
+inventory, and ownership record, requires byte-for-byte equality with the
+process-local candidate, and runs the complete package verifier before the
+stream success prelude. The stream is a deterministic POSIX tar containing
+only regular mode-`0600` files: `format.json`, `checkpoint.json`, the detailed
+Kubernetes inventory, sorted object metadata/projections, and sorted parent
+owner/inventory/record files. The v1 stream refuses an archive above 1 GiB,
+well above the supported scale envelope but finite for a compromised or
+incompatible peer.
+
+The success prelude commits the exact archive byte count. After those bytes the
+server emits a canonical completion trailer carrying that same count and the
+archive SHA-256. The in-Pod client returns success only after receiving and
+matching the entire archive and trailer; EOF alone is never completion. The
+operator writes to a unique same-directory mode-`0600` temporary inode, calls
+`fsync`, publishes it with no-replace hard-link semantics, synchronizes the
+directory, removes the temporary name, and synchronizes the directory again.
+An existing output path is rejected before cluster access and again by the
+atomic publish primitive; a failed or truncated export never replaces it.
+Resume remains a separate explicit command and is run only after the operator
+has retained the successful manifest/archive digests and completed package.
+
+Restore accepts only the exact deterministic archive emitted above. Before any
+Kubernetes read or mutation it opens one clean absolute non-symlink regular
+file, bounds it to 1 GiB, rejects every non-regular, linked, duplicate,
+non-`0600`, unsafe, unknown, oversized, missing, or non-canonical tar entry,
+runs the complete checkpoint package verifier, regenerates the deterministic
+archive, and requires the regenerated complete size and SHA-256 to equal the
+input. Reordered headers, altered padding, appended data, and a merely
+well-formed but non-canonical tar are rejected. The explicit request ID must
+equal the embedded completed checkpoint request.
+
+The restore command runs before any release node Pod exists and only while an
+existing matching controller Deployment is absent or stable at zero replicas;
+the node DaemonSet must be absent and the fixed controller Lease absent or
+empty. It verifies the current `kube-system` UID, the caller-selected restored
+identity Secret key and its checkpoint hash, the exact surviving driver-PV set,
+and every immutable PV mapping. It never creates, updates, or deletes a PV.
+Every archived allocation projection must be in the same target namespace,
+decode to one exact v1 allocation variant, match the manifest identity, and use
+its deterministic ConfigMap name. A dry-run performs all archive, cluster,
+identity, PV, existing-allocation, and existing-checkpoint-Secret checks without
+mutation.
+
+Execute first creates only missing exact all-`Idle` reservation journals and
+then the exact `Ready` journal-set commitment. It uses create-only ConfigMaps;
+an existing, ambiguous, extra, or conflicting journal fails closed unless a
+conclusive reread proves the exact checkpoint record. It then creates only
+missing exact allocation ConfigMaps through the normal create-only
+AllocationStore schema. An `AlreadyExists`, timeout, or ambiguous create is
+success only after a conclusive reread returns the exact checkpoint record; a
+conflicting or extra allocation fails closed. After all journals and allocations
+exist, restore rereads the complete journal/allocation/PV set and requires its
+restore-stable aggregate to equal the manifest. Only then does it create the
+fixed externally owned immutable Opaque `sfs-subdir-checkpoint` Secret with the
+sole `checkpoint.json` data key. An existing Secret is accepted only when its
+complete envelope and manifest bytes are exact; an existing Secret with a
+missing allocation is inconsistent and is not used to authorize repair. This
+allocation-first, Secret-last order makes an interrupted restore safely
+idempotent while ensuring the recovery marker never advertises an incomplete
+Kubernetes object set. Parent inventory equality and offline provider fencing
+remain controller startup responsibilities and are not replaced by archive
+verification.
+
+A persisted GC `dry-run` request is bounded audit evidence, not an active
+filesystem transition. It is checkpoint-eligible only when the allocation has
+no `gcOperationID` or GC progress fields and the matching detailed ownership
+record has no GC request or progress fields, as required by section 10.6. A
+persisted `execute` request or any GC progress on either side is active and
+rejects checkpoint preparation. This distinction prevents an earlier completed
+dry-run from permanently making later checkpoints impossible without weakening
+the quiesce boundary around mutating GC.
+
 Checkpoint preparation and resume are idempotent by request ID. `SIGTERM`,
 Lease loss, or a process crash while quiesced invalidates the candidate; no
 graceful-release marker may be interpreted as checkpoint completion. Tests must
@@ -3488,9 +4692,26 @@ attempt create, delete, publish, unpublish, GC, compaction, bootstrap, and
 background repair between every phase and prove that none crosses the quiesce
 barrier.
 
+Resume reconciliation reuses the production startup reconstruction and
+lifecycle state machines while the global gate remains closed. MutationGate
+grants only the active checkpoint request one unforgeable, callback-scoped
+internal admission capability; ordinary CSI, GC, compaction, bootstrap, and
+background callers continue to receive the quiesced error. The capability is
+bound to the exact gate instance and request ID, is cleared before the callback
+returns, and the gate again drains any admitted holder before it can reopen.
+Retaining its derived context cannot authorize a later operation. A failed or
+cancelled reconciliation clears the internal capability but leaves the global
+checkpoint barrier and readiness closed for an explicit retry or operator
+decision. Resume first resolves every exact `Pending` reservation journal,
+validates the complete committed set as `Idle`, then captures the fresh startup
+inventory and runs lifecycle reconciliation; this lets a failed prepare reopen
+safely without discarding an ambiguous reservation.
+
 The minimal backup set is:
 
 - installation identity Secret;
+- the fixed reservation-journal-set ConfigMap and every permanent per-pool
+  reservation-journal ConfigMap, all proven `Ready`/`Idle` under quiesce;
 - allocation and permanent tombstone ConfigMaps;
 - Helm values and pinned chart version;
 - PV manifests for this driver;
@@ -3513,13 +4734,51 @@ after a successful recovery and retaining the external backup package.
 The in-cluster checkpoint manifest is intentionally O(number of parents plus
 images), not O(number of volumes). Per-object entries stay in the external
 package; the Secret contains only their count and aggregate digest and must stay
-within the Kubernetes Secret size limit at the supported scale envelope. On
+within the Kubernetes Secret size limit at the supported scale envelope. The
+controller applies a 1 MiB maximum to the exact canonical `checkpoint.json`
+bytes before the manifest is emitted or decoded; oversized input is rejected
+before JSON allocation. On
 restore, Kubernetes assigns new UIDs and resourceVersions, so the controller
 recomputes the aggregate from canonical recoverable content and logical object
 identity, excluding server-assigned metadata and status. Source
 UID/resourceVersion are export-consistency evidence only and are never expected
 to survive recreation. Missing, extra, duplicated, or content-changed objects
 change the aggregate and keep recovery non-serving.
+
+For v1 the restore-stable Kubernetes-object set is closed to the fixed
+reservation-journal-set ConfigMap, every permanent per-pool reservation-journal
+ConfigMap, allocation and permanent-tombstone ConfigMaps owned by this
+installation, plus every current PV whose CSI driver equals this driver name.
+Journal projections are their complete canonical closed-schema records and must
+describe the exact configured `Ready` set with every member `Idle`. An
+allocation ConfigMap projection is
+the complete canonical `record.json`; its deterministic object name and
+namespace form the logical inventory identity, and AllocationStore has already
+validated every required deterministic label. A PV projection contains its
+name as logical identity and the exact driver name, volume handle, and complete
+closed immutable `volume_context` as canonical content. This is the complete
+driver-authoritative PV mapping; UID, resourceVersion, other server-assigned
+metadata, and status are deliberately excluded. The installation identity is
+committed separately by `installationIDHash`, while chart version and the
+closed rendered-image set have their own manifest fields. All three commitments
+must match together; none may substitute for another.
+
+A fresh installation with no allocation record and no driver PV still has the
+fixed journal-set object plus one permanent `Idle` journal per configured pool.
+Those objects form an explicit non-empty detailed Kubernetes inventory; empty
+allocation and PV subsets are not treated as omitted or unavailable reads. The
+complete journal enumeration, installation hash, chart/image commitments, and
+non-empty configured-parent inventories are all still required. This preserves
+checkpoint support before the first PVC without granting the controller API
+read access to the separately kubelet-projected identity Secret.
+
+External detailed inventory JSON is canonical, closed-schema, sorted, and
+bounded to 32 MiB per inventory file. Each schema-defined recoverable Kubernetes
+object projection is canonical JSON bounded to 2 MiB, above the size supported
+for the namespaced ConfigMaps and Secrets in this backup set. Empty,
+non-canonical, oversized, duplicate-key, duplicate-identity, or unknown-field
+input invalidates the checkpoint package rather than being normalized during
+verification.
 
 Each configured-parent inventory digest is SHA-256 over canonical JSON whose entries are
 sorted by normalized relative ownership-record path. Each entry contains only
@@ -3570,7 +4829,7 @@ must never fence only the checkpoint holder. An absent Lease and a newly created
 empty Lease are equivalent for recovery decisions; neither bypasses the offline
 gate.
 
-When the Lease is absent or empty, the controller may acquire it provisionally
+When the Lease is absent or empty, the controller must acquire it provisionally
 and attach/mount configured parents only for provider inventory and read-only
 inspection of parent-global owner records. Read-only here is an operation-level
 restriction; the mount uses the single release-tested flagless `virtiofs`
@@ -3580,9 +4839,38 @@ different Pod UID must never overwrite or provisionally acquire a Lease with a
 non-empty previous holder, even when it is expired, before the exact abnormal
 takeover approval has been validated and consumed.
 
+The provisional acquisition persists a closed all-or-none discovery marker on
+the same Lease containing schema version `1`, state `Provisional`, the canonical
+UTC condition-observation timestamp, installation ID, active cluster UID, and
+holder Pod UID. Renewal and same-Pod reacquisition preserve this marker and
+remain read-only; restarting or draining the local renewal loop cannot promote
+it. A conclusive empty-installation discovery is promoted only by a separate
+resourceVersion CAS that immediately follows a fresh complete absence proof and
+clears the marker. Missing-Lease approval must be newer than the marker's exact
+timestamp and consumes the marker together with approval audit evidence in its
+single acquisition CAS. Graceful release and parent bootstrap are forbidden
+while the marker remains active.
+
+Fresh-installation discovery requires a complete empty allocation and driver-PV
+inventory before the first attach and repeats both inventories after every
+parent has been inspected. Before attaching each parent, its complete regional
+inventory and the controller Instance inventory must both prove that the parent
+is detached. The controller records that observation only in process memory,
+then attaches and mounts the parent, revalidates that the exact current
+controller Instance is its sole available attachment, proves the immutable
+parent claim absent, and requires the literal filesystem root to be empty. A
+partial retry in the same process may recognize only an exact attachment whose
+empty observation it recorded before issuing the attach. The all-parent proof
+hands those process-local observations to bootstrap only after successful Lease
+promotion; bootstrap must persist the per-parent attempt journal before its
+first filesystem write. A restart loses this evidence, so a pre-attached parent
+without a matching durable journal can never be adopted as fresh and requires
+the operator-approved recovery path.
+
 - if no allocation record, ownership record, driver PV, or parent-global owner
-  record exists, this is a fresh installation and the holder may initialize the
-  parent claims without recovery approval;
+  record exists, the separate discovery-promotion CAS establishes a fresh
+  installation and the holder may then initialize the parent claims without
+  recovery approval;
 - if any durable driver state exists, recovery is offline in v1. Before
   approval, the operator must recreate or scale down the Kapsule worker pools so
   every pre-recovery workload/controller Instance is conclusively stopped or
@@ -3595,6 +4883,21 @@ takeover approval has been validated and consumed.
   is never sufficient;
 - if any parent claim has a different `activeClusterUID`, recovery approval
   cannot authorize it and the controller fails closed.
+
+The Scaleway API can exhaustively enumerate every attachment of each configured
+parent, but it cannot infer historical Kubernetes-cluster membership for an
+already detached Instance. Consequently, completeness of the
+all-pre-recovery-Instances offline set is an explicit operator attestation in
+the immutable approval, after the documented worker-pool replacement or
+scale-down. The controller independently verifies the provider-observable half
+with fresh reads: the provisional controller Instance has the exact runtime
+project, region, zone, and running state; every configured parent is available;
+each complete regional inventory contains exactly one attachment, to that
+provisional Instance in its exact zone; and the Instance inventory contains the
+same configured parents in `available` state and no other File Storage. Any old,
+unknown, duplicate, cross-zone, transitional, missing, or contradictory entry
+keeps recovery non-serving. This check covers every configured parent and never
+uses the historical checkpoint holder as the recovery fence scope.
 
 ### 10.3 Concurrent Provisioning
 
@@ -3642,7 +4945,37 @@ holderActiveClusterUID
 
 Renewals preserve this evidence. A mismatch between `holderIdentity` and
 `holderPodUID`, or between the recorded installation/cluster and runtime, makes
-the controller non-serving. Required behavior:
+the controller non-serving. A committed-but-unacknowledged acquisition,
+approval-consumption, or renewal CAS is accepted only after a fresh Lease read
+proves an advanced resourceVersion with the exact expected holder and complete
+unchanged annotations. The prior unchanged generation remains a retryable
+failure; any advanced divergent generation is conclusive Lease loss.
+Renewal and bootstrap-journal updates within one leadership session share one
+context-cancellable update gate. A bootstrap write or clear therefore cannot
+race a renewal and overwrite its resourceVersion generation. The complete
+expected annotation map is compared after every update; unrelated annotations
+are preserved. A successful bootstrap-journal CAS renews the Lease and advances
+the same local renewal watchdog, while a conclusive conflict cancels leadership
+before the caller can continue to a provider or filesystem mutation. Replaying
+an already-recorded exact bootstrap attempt still performs this CAS, because
+the attach path must freshly prove the current leadership generation.
+Acquisition attempts within one process are serialized by a context-cancellable
+gate. Every acquired generation has one renewal session. Before same-process
+reacquisition or approval-based promotion of a provisional recovery holder, the
+prior session must cancel its leadership context, stop and join its renewal
+loop, and report a clean drain. This drain occurs before the approval's fresh
+provider fence and promotion compare-and-swap, so an old renewal cannot race or
+overwrite approval consumption. Fresh-installation promotion instead keeps the
+provisional renewal active throughout its potentially slow read-only provider
+and filesystem absence proof. A failed proof leaves that provisional session
+active; a successful proof immediately stops and joins it before reloading the
+latest Lease generation and clearing the discovery marker by compare-and-swap.
+A session ended by Lease loss, renewal deadline, or external cancellation is
+not locally reusable; the watchdog exit path remains mandatory. A container
+restart with the same Pod UID is a new runtime and still follows the normal
+same-holder compare-and-swap rule.
+
+Required behavior:
 
 - a controller without the Lease is unready and rejects mutating operations;
 - Lease loss cancels operation contexts, prevents new irreversible steps, and
@@ -3659,6 +4992,15 @@ the controller non-serving. Required behavior:
   holder identity through the immutable operator approval Secret;
 - the approval is provider-verified, consumed, and audited in the Lease before
   the successor mutates.
+
+The cancellation rule includes cold-start mutations. Immediately after a
+leadership session starts, the controller derives one startup context from the
+process lifetime and that exact session generation. Parent bootstrap, claim
+installation, startup inventory, allocation reconstruction, lifecycle repair,
+and initial maintenance all use that context. Approval-based promotion creates
+a new context from the promoted generation before any mutating startup work.
+A point-in-time `RequireActiveLeadership` check without propagation of the
+session context is insufficient.
 
 The same Lease stores the bounded graceful-handoff evidence in fixed
 annotations. No second coordination object is introduced. After all mutations
@@ -3677,6 +5019,19 @@ gracefulReleaseLeaseUID = <current immutable Lease metadata.uid>
 gracefulReleaseInstallationID = <current installation ID>
 gracefulReleaseActiveClusterUID = <current cluster UID>
 ```
+
+The shutdown or uninstall request ID must already own the closed process-wide
+mutation barrier with zero in-flight mutations. Before the release CAS, the
+runtime cancels leadership, stops and joins its renewal loop, and rereads the
+exact Lease UID/generation so a renewal cannot race the holder clear. The
+release finalization context retains the operator deadline and process-shutdown
+lifetime but is deliberately not canceled by the leadership session it is
+stopping; the exact UID, holder, generation, and compare-and-swap checks are
+the authority for this terminal step. All earlier phases remain bound to active
+leadership. A
+committed-but-unacknowledged release is accepted only after a fresh read proves
+the exact empty holder, preserved holder evidence, Lease-bound marker, and same
+request ID. After success the runtime is terminal and cannot reacquire locally.
 
 The process exits only after that update succeeds. If it cannot persist the
 release, it exits with the previous holder left uncleared, so the abnormal
@@ -3773,6 +5128,21 @@ guide requires deleting the approval Secret after successful consumption. A new
 approval requires deleting and recreating the immutable Secret, which gives it a
 new Kubernetes UID.
 
+The permanent closed Lease annotation names for that tuple are:
+
+```text
+approvalConsumptionSecretUID
+approvalConsumptionRequestID
+approvalConsumptionMode
+approvalConsumptionPodUID
+approvalConsumedAt
+```
+
+They are all-or-none. Partial, malformed, unknown `approvalConsumption*`
+annotations, or any attempt to replace an existing tuple, keep the controller
+non-serving. Normal renewal and graceful-release updates preserve this audit
+tuple unchanged.
+
 `missing-lease-recovery` uses the same object and one-time consumption rule. The
 provisional Lease records when recovery was first observed; the approval must be
 created afterward and match the installation, `activeClusterUID`, checkpoint
@@ -3790,6 +5160,57 @@ Inside the single controller process, protect pool selection and accounting with
 an in-process lock and use a per-logical-volume lock for create, publish,
 unpublish, delete, and GC transitions.
 
+For a new CreateVolume name, the selected pool lock remains held through the
+durable reservation journal, creation or conclusive deterministic reread of the
+initial `Reserved` allocation ConfigMap, and conclusive journal completion.
+Releasing it after selection but before that reservation would allow two
+different logical-volume locks to consume the same aggregate capacity budget.
+
+Each configured pool has one permanent fixed-name ConfigMap journal. It is
+created once, never deleted or name-reused, has a closed schema, and contains a
+monotonic CAS generation plus either exact state `Idle` or `Pending`. `Pending`
+contains the complete canonical `Reserved` allocation. The controller must
+conclusively observe `Pending` before emitting the allocation POST. It returns
+the journal to `Idle` only after the exact allocation is authoritative. A stale
+update from an older controller generation uses the previous resourceVersion
+and therefore conflicts with a successor's CAS; the Lease is not used as a
+storage fence.
+
+One fixed journal-set ConfigMap commits which per-pool journals are permanent.
+It is created before fresh-install provider or filesystem mutation. Its
+`Initializing` state makes a crash during first bootstrap or a pool addition
+resumable without treating a missing established journal as new. Operational
+startup may create only journals listed in `PendingPools`; after `Ready`, a
+missing committed journal is a fatal durable-state inconsistency. V1 does not
+remove a committed pool journal online.
+
+If either the allocation or journal completion remains ambiguous, the process
+also retains a fail-closed in-memory marker as defense in depth. Every successor
+ensures all fixed journals and resolves every `Pending` intent before serving.
+It reissues only the exact deterministic allocation from the journal, repeats
+startup inventory/reconciliation when that creates a record, and keeps the
+controller non-serving on an unavailable, malformed, mismatched, or unresolved
+journal. A plain startup inventory without this journal protocol is not a
+sufficient inter-generation barrier.
+
+The process-local marker is not durable authority. Any path that conclusively
+proves the exact allocation and an `Idle` journal, including an observation of
+an already-applied journal CAS, removes it under the pool lock before normal
+admission resumes. A retry whose allocation is still absent resolves its own
+exact `Pending` intent before consulting the placement marker; an intent for a
+different logical volume remains blocked. If the journal is conclusively
+`Idle`, the retry may clear only the process-local marker. Before a subsequent
+fresh `Begin`, the controller advances every `Idle` journal in the committed
+journal-set. Because an older ambiguous `Begin` may target a different journal
+ConfigMap, this installation-wide generation fence is required: advancing only
+the newly selected pool would not invalidate the old pool's resourceVersion.
+
+Cold start reconciles every `Pending` journal before lifecycle reconciliation.
+It then performs a fresh complete allocation/PV/ownership inventory and runs
+the lifecycle state machine once against that post-journal view. This ordering
+prevents a `Reserved` allocation from advancing to `Ready` before its exact
+Pending intent has been completed.
+
 The controller must also use Kubernetes optimistic concurrency on allocation
 records. The in-process lock prevents local races; Kubernetes resource versions
 prevent stale writes after retries, restarts, or future HA work.
@@ -3804,6 +5225,22 @@ then per-logical-volume lock when needed, then pool lock when needed preserves
 the existing create idempotency gate and prevents lock inversion. No code path
 may acquire those locks in the opposite order. The controller must expose
 bounded inflight and queued mutation gauges.
+
+Create-only allocation reconstruction from authenticated PV/ownership or
+ownership-only evidence follows the same admission and lock order. This applies
+both at startup and during the internally authorized reconciliation performed
+by `checkpoint resume`: active leadership is checked first, then the global
+mutation gate is acquired, then the exact logical-volume lock, and only then may
+the deterministic allocation ConfigMap be created or reread to resolve an
+ambiguous create result. The checkpoint callback capability authorizes that
+specific gate acquisition; it is not permission to bypass the gate.
+
+The shared controller attachment/mount adapter additionally serializes one
+`(nodeID,parentFilesystemID)` provider attach check and one parent mount
+check-and-act at a time. These keyed sections are acquired only after the
+global/per-volume/pool locks already owned by the calling state machine and
+never call back into an outer lock. They prevent duplicate attach calls and
+stacked controller mounts without changing the normative outer lock order.
 
 Graceful termination is a bounded safety protocol, not a shorter normal
 provisioning timeout:
@@ -3865,6 +5302,16 @@ Logical accounting already removes the configured reserve from usable capacity
 before accepting reservations. The `statfs` check independently protects
 against unmanaged existing data, workloads that exceed reservations, and
 physical consumption that logical records cannot predict.
+
+The placement input is a closed snapshot containing exactly one entry for every
+configured parent. Provider or `statfs` unavailability is represented explicitly
+on that parent's entry, never by omission. A missing, extra, or duplicate
+parent, configured/candidate state disagreement, or capacity tuple that cannot
+be recomputed exactly from observed size, configured reserve/ratio, and
+aggregate allocation is an inventory error and fails closed before tie-breaking.
+If any active provider-unavailable or node-incompatible entry could change a
+failed selection, the result is respectively transient inventory unavailability
+or failed node compatibility, never the conclusive pool-full error.
 
 Required behavior:
 
@@ -4014,6 +5461,16 @@ GC retries must be idempotent and state-driven:
 - matching persisted allocation and ownership completion -> return success
   without touching the filesystem.
 
+The request submit boundary must preserve that idempotency after completion. A
+detailed `Deleted` allocation accepts only the same completed execute request
+envelope. After allocation compaction intentionally drops the request-only
+fields, a compact tombstone with completed GC evidence accepts an execute retry
+only when its requested expected source state is exactly derivable from the
+preserved archive/retain operation. This terminal observation is read-only; it
+never creates a new request or repeats filesystem work. A dry-run, mismatched
+source state, absent completed GC evidence, or conflicting detailed request is
+rejected.
+
 A dry-run may persist only its bounded request/audit fields in the allocation
 record. It must not write GC lifecycle fields, modify ownership metadata, or
 touch the filesystem.
@@ -4066,6 +5523,8 @@ The repository must include compatibility fixtures for:
 - old PV CSI attributes;
 - old allocation ConfigMaps;
 - old ownership records;
+- old permanent reservation-journal records and the installation-wide
+  reservation-journal-set commitment;
 - compact allocation and compact ownership tombstones;
 - old parent-global owner records;
 - Lease coordination evidence and operator approval Secret fixtures;
@@ -4076,13 +5535,39 @@ The chart rejects structurally invalid candidate values, but it cannot prove the
 historical contents of an externally owned identity Secret or parent claim.
 The required `csi-admin upgrade preflight` command compares candidate immutable
 values, the fixed Lease name, and identity hashes with live
-allocation/ownership state before the old controller is stopped. Controller startup is the final fail-closed authority and
-performs no mutation when `driver.name`, an existing pool `basePath`,
+allocation/ownership state before the old controller is stopped. The online
+preflight permits a new parent but rejects removal or any pool/base-path-hash
+change for an existing parent. The candidate must declare readers for every
+allocation and ownership schema observed live, must read its own writer schema,
+and must not write an allocation or ownership schema outside the currently
+deployed N-1 node-reader contract. At least one valid Ready node configuration
+generation and the candidate generation are required audit inputs. Controller
+startup is the final fail-closed authority and performs no mutation when
+`driver.name`, an existing pool `basePath`,
 installation identity, ownership path, or schema generation disagrees. The
 operations guide must state that bypassing preflight can cause a safe outage,
 never silent adoption. Rollback limits must be documented: once an explicitly
 offline migration writes a newer record version, older versions are unsupported
 unless the release contract says otherwise.
+
+The controller-local live reader requires active leadership before and after
+the preflight snapshot. It reuses the complete startup allocation/PV/claim/
+ownership validator, derives each existing parent mapping from the configured
+pool plus its authenticated parent-global claim, and lists a fresh joined
+Node/CSINode/node-plugin Pod inventory. Only non-deleting Ready nodes with a
+Ready plugin Pod and registered driver contribute node generations; a matching
+Pod without a generation is corruption, not an old default. V1 always includes
+schema `1` in the current allocation and ownership reader sets even when the
+installation has no per-volume records, and adds every schema observed in live
+durable records. Unknown record types or incomplete parent inventories fail the
+read before candidate comparison.
+
+The permanent reservation-journal and reservation-journal-set formats are
+explicitly immutable for the whole v1 compatibility line. Both use schema `1`;
+every v1 controller must retain those readers and writers, and compatibility
+fixtures must cover both objects. Changing either format requires an explicit
+post-v1 design and migration contract; the v1 upgrade payload therefore does
+not grow a second set of redundant reader/writer declarations.
 
 Migration from the official Scaleway File Storage CSI driver or from existing
 manually-created PVs is out of scope for v1 automatic behavior. The documented
@@ -4184,7 +5669,11 @@ explicit:
   `virtiofs`; no NFS client is installed for this feature;
 - all non-mount sidecars run non-root where their upstream image supports it,
   with read-only root filesystems, no privilege escalation, and all capabilities
-  dropped;
+  dropped. The upstream `node-driver-registrar` is the explicit exception: it
+  runs as UID/GID 0 with all capabilities dropped because it must create its
+  registration socket in kubelet's root-owned shared `plugins_registry`
+  hostPath. The chart must not chown that shared directory because doing so can
+  break other CSI drivers;
 - the dedicated driver namespace must use the Pod Security admission level
   required for these two privileged mount containers and must be documented as
   a security-sensitive namespace.
@@ -4333,6 +5822,14 @@ V1 must validate and document at least this envelope:
 These are tested support limits, not hardcoded driver limits. Configuration or
 usage above them must be documented as unvalidated rather than silently
 rejected, except where a real provider, Kubernetes, or safety limit applies.
+The v1 allocation and ownership inventory safety cap is 16,384 entries. This
+is deliberately above the tested 1,000 active plus 10,000 permanent tombstones
+envelope so crash-temporary records fit without turning the tested support
+limit itself into an outage threshold; exceeding the safety cap fails closed.
+`csi-admin` uses the same 16,384 cap for allocation records and applies smaller
+domain limits only after filtering driver-relevant PVs, PVCs, Pods, and
+attachments; unrelated cluster objects do not consume a driver inventory
+bound.
 
 The implementation must remain O(number of records plus PVs) during startup and
 must not perform an API request per compact tombstone when a paginated list or
@@ -4672,11 +6169,23 @@ Required unit tests:
 
 Use Kubernetes CSI sanity tests for the driver.
 
-The sanity suite must run in CI with fake Scaleway and fake mounter
-implementations. The repository must pin the exact `kubernetes-csi/csi-test`
+The sanity suite must run in CI through the production Create, Delete,
+Publish/Unpublish, Validate, Stage/Unstage, and Node Publish/Unpublish state
+machines, with only their Kubernetes, Scaleway, filesystem, and mounter
+boundaries replaced by deterministic fakes. A separate in-memory CSI service is
+not a conformance proof. Per-RPC counters must prove that each implemented core
+was reached. The repository must pin the exact `kubernetes-csi/csi-test`
 module version in `go.mod`; CI and release evidence must print that version.
 Updating it is a deliberate compatibility change with a reviewed test result,
 not an unbounded `latest` dependency.
+
+The pinned v5.4 suite omits CreateVolume's returned context from some otherwise
+valid publish fixtures. The harness may replay only the exact context returned
+by the production Create core, only for the fixture's exact known NodeGetInfo
+identity. It must pass unknown-node probes and every malformed request through
+unchanged, so their read-only `NotFound` and `InvalidArgument` behavior is
+proved by the product rather than manufactured by the harness. No provider,
+filesystem, or durable-state result may be injected.
 
 Run sanity separately against the controller and node Unix sockets with the
 service set appropriate to each endpoint. The test harness must fail if the
@@ -4731,7 +6240,8 @@ Required checks:
   and 3900-second Deployment progress deadline, and rejects insufficient
   shutdown or startup margins;
 - production render uses `priorityClassName: system-cluster-critical` for the
-  singleton controller and does not pin it to one hostname or failure domain;
+  singleton controller and does not pin it to one hostname; all controller
+  candidates may nevertheless share one zone;
 - render with the `CSIDriver` object;
 - production render uses `repository@sha256:<digest>` for the controller and
   every sidecar, retains version tags as metadata, and rejects tag-only or
@@ -4752,6 +6262,10 @@ Required checks:
   overlap before enabling mount propagation;
 - verify the controller parent root is `emptyDir`, the controller has no kubelet
   hostPath, and only node mount roots use required `Bidirectional` propagation;
+- verify each privileged driver container receives a dedicated private
+  `emptyDir` at `/run/scaleway-sfs-subdir-csi-mount-quarantine`, as a sibling
+  of the strict `0700` admin-socket directory, with no mount propagation and no
+  sidecar mount;
 - verify controller and node startup/readiness use their own CSI livenessprobe
   `/healthz`, liveness uses the respective driver's separate `/livez`, and none
   of these endpoints is exposed by a Service;
@@ -4764,6 +6278,14 @@ Required checks:
 
 Use `kind` or a local Kubernetes cluster for API-level tests that do not require
 real Scaleway mounts.
+
+The required fake endpoint is a separate development-only binary and image,
+not a runtime flag or dependency linked into the released driver. Helm may
+select it only when `release.mode=development`; production rendering must reject
+the switch. The fake node uses real bind mounts below the disposable kind
+kubelet/driver hostPaths so chart-install evidence covers socket permissions,
+registrar access, mount propagation, and kubelet lifecycle. It must not call
+Scaleway, claim provider fidelity, or appear in a release image.
 
 Validate:
 
@@ -4825,6 +6347,13 @@ This chart-install integration test is mandatory in CI. Template rendering and
 direct CSI sanity alone do not prove socket, ServiceAccount, RBAC, and sidecar
 wiring.
 
+The runner arms exact-cluster cleanup before invoking `kind create`, because a
+late kubeconfig failure can occur after the node container already exists. It
+also executes the packaged `csi-admin version` from the driver image, proves
+the controller and node template configuration generations agree, and uses
+Kubernetes authorization review to prove the controller ServiceAccount cannot
+create, update, patch, or delete Pods.
+
 ### 12.6 Scaleway E2E Tests
 
 Provide e2e scripts that can run against a real Scaleway project.
@@ -4841,7 +6370,8 @@ Required e2e scenario:
    the test report;
 4. verify the cluster-level File Storage CSI tag is present and the selected
    node pool's exact commercial Instance type is in the release-tested
-   allowlist and exposes a positive live `MaxFileSystems` value;
+   allowlist and exposes a live `MaxFileSystems` value at least equal to the two
+   planned parents;
 5. run with Project-scoped `FileStorageReadOnly` and `InstancesFullAccess`, then
    verify expected permission-denied behavior with an intentionally
    under-privileged key;
@@ -5013,6 +6543,122 @@ Every created Scaleway resource must include:
 - the target project ID;
 - the target region.
 
+Before any real-cloud mutation, the runner must derive and retain a closed v1
+preflight plan. The request names the base or release-candidate profile, exact
+Project and `fr-par` region, UUID run ID, DNS resource prefix containing that
+complete run ID, absolute evidence directory, aggregate positive hourly EUR
+cost and bounded pricing source, exact Git commit and chart SHA-256, and the
+canonical candidate-manifest SHA-256 plus the immutable digest reference of the
+driver and every rendered sidecar. The candidate digest also binds the exact
+release values, checksum manifest, native `csi-admin`, and commercial allowlist.
+Because the pinned APIs do not expose one stable endpoint for product maturity,
+remaining File Storage quota, and pricing, the closed request also carries a
+canonical UTC provider-review timestamp no older than 24 hours, the documented
+product status and source, explicit Public Beta acceptance when applicable, a
+positive remaining File Storage quota sufficient for both parents and its
+source, and the pricing source used for the aggregate cost. This operator
+review is not a substitute for live API checks: the executor still proves
+regional File Storage access, the candidate commercial allowlist, current
+Instance-type availability, and live `MaxFileSystems` sufficient for every
+planned parent before mutation.
+It chooses
+either a new ephemeral cluster or one exact reused cluster ID, but it always
+creates a fresh run-owned node pool of two or three nodes. Reusing or modifying
+a pre-existing node pool is forbidden. Both profiles plan exactly two
+run-owned parents. The release-candidate profile additionally plans exactly one
+standalone run-owned disposable Instance of the same explicitly selected
+commercial type, reused serially across its recovery scenarios so it cannot
+disappear from cost or cleanup accounting.
+
+`hack/scaleway-e2e-plan` is the repository's closed-schema, bounded-input
+preflight renderer. Its canonical output always has `dryRun = true`,
+`mutationAuthorized = false`, and `requiresImmediateApproval = true`. It has no
+credentials, live-discovery, or execution backend; its output is review
+evidence and never authorization. `hack/scaleway-e2e-run` is the separate live
+executor. Dry-run is its default and does not construct a credentialed client.
+Execution requires both `--execute` and an exact `--confirm-run-id` matching the
+closed request immediately after the reviewed Project, region, resources,
+hourly cost, destructive operations, and cleanup command are printed. It then
+performs live regional File Storage, commercial-type, attach-limit, and
+artifact validation and verifies that the operator product, quota, and pricing
+review is explicit and no older than 24 hours. A previously rendered plan or
+approval does not authorize a later run.
+
+The executor maintains an explicit closed list of smoke-only scenarios. While
+that list is non-empty, `--execute` fails before credentials, live reads, or
+provider mutation, and no scenario log or zero exit status can be encoded as
+release qualification. A scenario leaves that list only after its structured
+evidence proves the full normative invariant. Before a previous public release
+exists, N/N-1 is explicitly not qualifying; it is never reported as a
+successful upgrade merely because no previous chart was supplied.
+
+Before the first provider mutation the executor fsyncs a provisioning-phase
+inventory. Provisioning is sequential. Immediately before each provider
+`Create`, the executor fsyncs the one exact resource kind and deterministic
+name as `pendingCreate`; it clears that intent only in the same durable update
+that records the successful response's exact ID, or after deterministic
+discovery conclusively recovers that exact run-owned resource. An unresolved
+intent blocks deletion and `complete`. Cleanup also discovers only the
+deterministic exact names inside
+the exact Project/region and requires the complete run ownership tag before
+recovering an ID omitted by a crash between provider commit and ledger fsync.
+Discovery is recovery input only: deletion is always by the recovered exact ID
+after a fresh identity read. A name collision, duplicate, ambiguous read,
+wrong tag, wrong Project, or wrong region blocks cleanup. A failed run is
+resumed with `--cleanup-only` and the same exact confirmation; a second full
+execution is refused while a retained inventory exists. `--cleanup-only`
+requires that retained fsynced inventory and never recreates an authorizing
+seed when it is missing. A missing ledger after possible provider mutation is
+corruption and requires operator recovery, not inferred absence.
+
+The retained cleanup inventory is a closed exact-ID creation ledger. A ready
+scenario run contains exactly one cluster, one newly created node pool, and two
+created parents; the release-candidate profile also contains its one disposable
+Instance. A provisioning failure may leave any valid prefix of that planned
+set. Cleanup and complete phases retain exactly the resources that were created
+or conclusively rediscovered for that run and never require invented IDs for
+resources that were never created. Deterministic discovery checks every planned
+name before cleanup can accept that partial ledger. After any provisioning
+error, the executor requires a bounded sequence of stable, successful discovery
+reads of the complete canonical `kind/name/ID/state` set; equal cardinality is
+not stability. These reads may recover a committed intent, but repeated absence
+does not clear an unresolved provider `Create` without an authoritative
+provider conclusion. One empty list can never turn an ambiguous provider
+Create into `complete`. A timeout, changing result, or unresolved intent retains
+the provisioning ledger and requires `--cleanup-only` retry. The cluster entry records
+whether it was created or reused; every other entry must be run-created. Each
+entry records exact ID, name, Project,
+region, tags, creation provenance, and the closed observed state `present`,
+`absent`, or `unknown`. Created entries must match the complete run prefix and
+ownership tag. A conclusive exact-ID provider lookup is required for `absent`;
+forbidden, timed-out, partial, failed, or contradictory reads are `unknown`.
+Inventory observations older than ten minutes or more than one minute in the
+future block deletion review.
+
+`hack/scaleway-e2e-cleanup --dry-run` validates that ledger and emits canonical,
+non-authorizing review evidence. It lists no delete action if any observation is
+stale/unknown or any required Kubernetes cleanup, PV/VolumeAttachment removal,
+unpublish/unstage, published-fence clearing, safe-uninstall, node/controller
+stop, mount absence, attachment absence, or post-prepare Helm uninstall barrier
+is incomplete. When unblocked it identifies only exact run-owned IDs, ordered
+as disposable Instance, node pool, parents, then a run-owned cluster. It never
+selects a reused cluster. Conclusively absent resources are idempotent success
+evidence. That review command deliberately has no deletion backend.
+`hack/scaleway-e2e-run --cleanup-only` is the distinct credentialed executor;
+after a new immediate approval it repeats discovery, exact-ID reads and every
+Kubernetes/unmount/detach barrier before each ordered deletion. It requires the
+exact run ID in every mode, distinguishes a conclusively absent Helm release
+from Helm/Kubernetes errors, and derives its retained preconditions from a
+completed structured `csi-admin` safe-uninstall audit plus fresh exact
+inventories. It never writes a conventional all-success object after an
+inconclusive command. The safe-uninstall request ID is the exact run ID, its
+result filename is run-scoped, and the executor decodes and validates the full
+typed plan and audit before Helm removal or provider deletion. Failure to
+remove the retained kubeconfig is a cleanup error and cannot yield successful
+qualification evidence. Presence of the
+runner does not constitute release evidence: the exact candidate still needs a
+successful retained Kapsule run and a final complete inventory.
+
 Cleanup must:
 
 - require explicit project ID, region, run ID, and non-empty name prefix;
@@ -5027,9 +6673,16 @@ Cleanup must:
 - print an audit summary before deletion;
 - be idempotent and runnable separately after failed tests.
 
-### 12.8 CI
+### 12.8 CI and release execution boundary
 
-GitHub Actions must run:
+The repository intentionally contains one GitHub Actions workflow,
+`.github/workflows/ci.yaml`. It is a local verification boundary only. It must
+not receive Scaleway credentials, call Scaleway APIs, provision or mutate a
+cloud resource, publish an image or chart, create a GitHub Release, or promote
+a release tag. Pull requests and pushes therefore cannot incur Scaleway cost or
+perform provider-side cleanup.
+
+The CI workflow must run:
 
 - `go test ./...`;
 - `go test -race ./...` on Linux;
@@ -5039,43 +6692,74 @@ GitHub Actions must run:
 - CSI sanity tests;
 - privileged Linux mount-namespace tests that exercise the real path-safety,
   symlink-swap, nested-mount, exact staging-source proof, stacked-mount
-  rejection, publish/unpublish locking, exact unmount, and CO-owned
-  staging-directory behavior without replacing those checks with a fake
-  mounter;
+  rejection, publish/unpublish locking, mountinfo-ID reuse after replacement,
+  `STATX_MNT_ID_UNIQUE` comparison, exact unmount, and CO-owned staging-directory
+  behavior without replacing those checks with a fake mounter;
+- privileged Linux tests for internal symlink aliases, descriptor/path
+  replacement, unknown descendant mounts, interrupted-quarantine retry, and
+  quarantine-empty proof before provider detach;
 - privileged Linux filesystem-crash tests that fail each required file and
   parent-directory durability barrier and prove restart observes either the old
   complete generation or the new complete generation, never guessed success;
-- Helm lint;
-- Helm template checks;
-- release-manifest check that rejects tag-only driver or sidecar images and
-  records every rendered digest;
+- Helm lint and template checks;
 - required kind chart-install test with fake provider and mounter;
-- supported-envelope reconciliation and concurrency test;
+- supported-envelope reconciliation and concurrency tests;
 - packaged `csi-admin` protocol/version compatibility tests;
 - Docker build.
 
-Release CI must also verify that the exact supported Kubernetes/Kapsule, Go,
-CSI module, pinned `csi-test`, Scaleway SDK, commercial Instance type, and CSI
-sidecar version matrix is present and that every claimed tuple has matching
-automated or retained real-E2E evidence. Untested tuples must not be advertised
-as supported. The table lists deliberate tested combinations; it does not need
-to certify an unnecessary Cartesian product of every independent dimension.
+Release preparation is an explicit operator procedure in v1, not a second
+GitHub workflow graph. Before publication, the operator must run the checked-in
+`test-release-binaries`, `test-release-manifest`, Linux, kind, CSI, Helm, and
+real-Kapsule gates against one frozen commit and one exact set of image digests.
+The procedure must verify that the supported Kubernetes/Kapsule, Go, CSI
+module, pinned `csi-test`, Scaleway SDK, commercial Instance type, and sidecar
+matrix has matching evidence. Untested tuples must not be advertised.
 
-Release workflows must also publish:
+The manual release procedure must produce:
 
-- versioned container images to the configured public registry;
-- versioned Helm charts to the configured public chart repository;
+- versioned container images in the configured public registry;
+- versioned Helm charts in the configured public chart repository;
 - versioned `csi-admin` static binaries for documented operator platforms;
-- SHA-256 checksums, SBOMs, and build provenance for release artifacts.
+- SHA-256 checksums, SBOMs, and honest build provenance for release artifacts.
 
-Scaleway e2e tests must be manual or scheduled behind repository secrets. They
-must not run on untrusted pull requests.
+Candidate construction and qualification must still bind the commit, chart,
+driver image, sidecar images, binaries, commercial allowlist, Linux results,
+kind results, Kapsule results, and final cleanup evidence. Publication uses the
+already-qualified bytes without a rebuild and refuses existing image tags,
+chart versions, or release assets. The checked-in local tools may generate and
+verify these manifests, but they do not publish them automatically and must not
+claim a GitHub workflow builder identity.
+
+Real Scaleway E2E is exclusively an operator-controlled command in v1. No
+GitHub workflow may invoke the credentialed executor. The dry-run plan is
+reviewed first, then a new immediate approval is required before the operator
+runs `hack/scaleway-e2e-run --execute` from a dedicated non-production test
+environment. This keeps the cloud safety boundary visible and avoids a second
+CI control plane while preserving the required real-provider evidence.
 
 A v1 release candidate must record a successful real Kapsule E2E result for the
 exact Git commit, chart package, driver image digest, and every CSI sidecar image
-digest being released. The result and cleanup audit must be retained as release
-artifacts. This does not require running cloud E2E on every untrusted pull
-request.
+digest being released. The result and cleanup audit must be retained with the
+release evidence. No pull request, push, tag, or GitHub release action runs this
+cloud test automatically.
+
+Both qualification creation and final verification independently compare every
+Kapsule evidence artifact to that exact candidate commit, candidate-manifest
+digest, chart digest, and canonical five-image set. File checksums alone are not
+a semantic candidate binding and a hand-crafted qualification manifest cannot
+bypass this comparison.
+
+Qualification validates the embedded final inventory itself and requires the
+separately retained cleanup audit to be byte-equivalent after canonical
+encoding. Run ID, Project, region, profile, resource prefix, ownership tag,
+resource IDs, states, preconditions, and observation time must all match; a
+complete cleanup from another run can never authorize publication.
+Successful production qualification requires the `release-candidate` profile
+and its complete historical inventory: one cluster entry, one run-owned node
+pool, two run-owned parents, and one run-owned disposable Instance. Every
+run-owned resource is conclusively `absent`; only an explicitly reused cluster
+may remain conclusively `present`. Partial ledgers remain valid cleanup evidence
+for failed provisioning, but can never be encoded as a successful release run.
 
 ## 13. Documentation Requirements
 
@@ -5123,6 +6807,11 @@ The README must clearly state:
 
 - not an official Scaleway product;
 - requires Kubernetes nodes that can attach/mount Scaleway File Storage;
+- requires a Linux kernel exposing `statx(STATX_MNT_ID_UNIQUE)` (normally Linux
+  6.8 or a distribution kernel with the primitive backported); reusable
+  mountinfo IDs alone are never sufficient to authorize unmount; the kernel and
+  runtime profile must also support `open_tree`, `move_mount`, `mount_setattr`,
+  procfs mount-FD identity, and exact detach as proven by startup preflight;
 - designed primarily for Scaleway Kapsule/Instances;
 - requires a stable CSI driver name before any real workload deployment;
 - may coexist with an installed but idle official Scaleway File Storage CSI
