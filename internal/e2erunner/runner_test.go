@@ -146,8 +146,12 @@ func TestSuccessfulInventoryRequiresExactProfileResources(t *testing.T) {
 	}
 	reusedBase := base
 	reusedBase.Resources = append([]e2ecleanup.Resource(nil), base.Resources...)
-	reusedBase.Resources[0].CreatedByRun = false
-	reusedBase.Resources[0].State = e2ecleanup.ResourceStatePresent
+	for index := range reusedBase.Resources {
+		if reusedBase.Resources[index].Kind == e2ecleanup.ResourceKindCluster {
+			reusedBase.Resources[index].CreatedByRun = false
+			reusedBase.Resources[index].State = e2ecleanup.ResourceStatePresent
+		}
+	}
 	if err := validateSuccessfulInventory(reusedBase, e2eplan.ProfileBase); err == nil {
 		t.Fatal("validateSuccessfulInventory(base profile with reused cluster) error = nil")
 	}
@@ -167,9 +171,24 @@ func TestSuccessfulInventoryRequiresExactProfileResources(t *testing.T) {
 	if err := validateSuccessfulInventory(complete, e2eplan.ProfileReleaseCandidate); err != nil {
 		t.Fatalf("validateSuccessfulInventory(complete RC) error = %v", err)
 	}
+	reused := complete
+	reused.Resources = make([]e2ecleanup.Resource, 0, len(complete.Resources)-1)
+	for _, resource := range complete.Resources {
+		if resource.Kind == e2ecleanup.ResourceKindPrivateNetwork {
+			continue
+		}
+		if resource.Kind == e2ecleanup.ResourceKindCluster {
+			resource.CreatedByRun = false
+			resource.State = e2ecleanup.ResourceStatePresent
+		}
+		reused.Resources = append(reused.Resources, resource)
+	}
+	if err := validateSuccessfulInventory(reused, e2eplan.ProfileReleaseCandidate); err != nil {
+		t.Fatalf("validateSuccessfulInventory(reused RC) error = %v", err)
+	}
 
 	partial := complete
-	partial.Resources = partial.Resources[:4]
+	partial.Resources = partial.Resources[:len(partial.Resources)-1]
 	if err := validateSuccessfulInventory(partial, e2eplan.ProfileReleaseCandidate); err == nil {
 		t.Fatal("validateSuccessfulInventory(partial RC) error = nil")
 	}
@@ -217,6 +236,7 @@ func testImages(digest string) []e2eplan.ImageDigest {
 
 func testInventory(request Request) e2ecleanup.Inventory {
 	resources := []e2ecleanup.Resource{
+		{Kind: e2ecleanup.ResourceKindPrivateNetwork, ID: "88888888-8888-4888-8888-888888888888", Name: request.Plan.ResourcePrefix + "-network", CreatedByRun: true},
 		{Kind: e2ecleanup.ResourceKindCluster, ID: "33333333-3333-4333-8333-333333333333", Name: request.Plan.ResourcePrefix, CreatedByRun: true},
 		{Kind: e2ecleanup.ResourceKindNodePool, ID: "44444444-4444-4444-8444-444444444444", Name: request.Plan.ResourcePrefix + "-pool", CreatedByRun: true},
 		{Kind: e2ecleanup.ResourceKindParent, ID: "55555555-5555-4555-8555-555555555555", Name: request.Plan.ResourcePrefix + "-parent-a", CreatedByRun: true},

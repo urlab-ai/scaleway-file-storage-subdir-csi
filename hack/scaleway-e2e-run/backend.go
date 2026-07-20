@@ -15,6 +15,7 @@ import (
 	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
 	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
+	vpcapi "github.com/scaleway/scaleway-sdk-go/api/vpc/v2"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
@@ -41,6 +42,7 @@ type scalewayBackend struct {
 	kubernetes    *k8sapi.API
 	file          *fileapi.API
 	instance      *instanceapi.API
+	vpc           *vpcapi.API
 	inventoryPath string
 	kubeconfig    string
 	scenarioTool  string
@@ -62,7 +64,7 @@ func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scaleway
 	}
 	return &scalewayBackend{
 		request: request, plan: plan,
-		kubernetes: k8sapi.NewAPI(client), file: fileapi.NewAPI(client), instance: instanceapi.NewAPI(client),
+		kubernetes: k8sapi.NewAPI(client), file: fileapi.NewAPI(client), instance: instanceapi.NewAPI(client), vpc: vpcapi.NewAPI(client),
 		inventoryPath: plan.CleanupInventoryPath,
 		kubeconfig:    filepath.Join(filepath.Dir(plan.CleanupInventoryPath), ".kubeconfig-"+plan.RunID),
 		scenarioTool:  scenarioTool,
@@ -226,6 +228,27 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 	}
 	region := scw.Region(plan.Region)
 	if plan.Cluster.CreatedByRun {
+		privateNetworkName := plan.ResourcePrefix + "-network"
+		if err := backend.beginProviderCreate(&inventory, e2ecleanup.ResourceKindPrivateNetwork, privateNetworkName); err != nil {
+			return inventory, err
+		}
+		privateNetwork, err := backend.vpc.CreatePrivateNetwork(&vpcapi.CreatePrivateNetworkRequest{
+			Region: region, Name: privateNetworkName, ProjectID: plan.ProjectID,
+			Tags: []string{plan.OwnershipTag}, Subnets: []scw.IPNet{}, DefaultRoutePropagationEnabled: false,
+		}, scw.WithContext(ctx))
+		if err != nil {
+			return inventory, fmt.Errorf("create Kapsule Private Network: %w", err)
+		}
+		if privateNetwork == nil || privateNetwork.ID == "" {
+			return inventory, fmt.Errorf("create Kapsule Private Network returned an empty response")
+		}
+		if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindPrivateNetwork, privateNetwork.ID, privateNetwork.Name, true, privateNetwork.Tags)); err != nil {
+			return inventory, err
+		}
+		if privateNetwork.ProjectID != plan.ProjectID || privateNetwork.Region.String() != plan.Region || privateNetwork.Name != privateNetworkName || privateNetwork.VpcID == "" || !slices.Contains(privateNetwork.Tags, plan.OwnershipTag) {
+			return inventory, fmt.Errorf("created Private Network differs from the exact run-owned scope")
+		}
+
 		if err := backend.beginProviderCreate(&inventory, e2ecleanup.ResourceKindCluster, plan.ResourcePrefix); err != nil {
 			return inventory, err
 		}
@@ -235,6 +258,7 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 			Name: plan.ResourcePrefix, Description: "Disposable SFS subdirectory CSI qualification " + plan.RunID,
 			Tags: []string{plan.OwnershipTag, requiredFileStorageClusterTag}, Version: request.KapsuleVersion, Cni: k8sapi.CNI("cilium"),
 			Pools: []*k8sapi.CreateClusterRequestPoolConfig{}, FeatureGates: []string{}, AdmissionPlugins: []string{}, ApiserverCertSans: []string{},
+			PrivateNetworkID: &privateNetwork.ID,
 		}, scw.WithContext(ctx))
 		if err != nil {
 			return inventory, err
@@ -245,13 +269,17 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 		if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindCluster, cluster.ID, cluster.Name, true, cluster.Tags)); err != nil {
 			return inventory, err
 		}
+		if cluster.PrivateNetworkID == nil || *cluster.PrivateNetworkID != privateNetwork.ID {
+			return inventory, fmt.Errorf("created Kapsule cluster differs from the exact run-owned Private Network")
+		}
 		readyCluster, err := backend.kubernetes.WaitForCluster(&k8sapi.WaitForClusterRequest{Region: region, ClusterID: cluster.ID}, scw.WithContext(ctx))
 		if err != nil {
 			return inventory, err
 		}
 		if readyCluster == nil || readyCluster.ID != cluster.ID || readyCluster.ProjectID != plan.ProjectID || readyCluster.Region.String() != plan.Region ||
+			readyCluster.PrivateNetworkID == nil || *readyCluster.PrivateNetworkID != privateNetwork.ID ||
 			!slices.Contains(readyCluster.Tags, plan.OwnershipTag) || !slices.Contains(readyCluster.Tags, requiredFileStorageClusterTag) {
-			return inventory, fmt.Errorf("created Kapsule cluster does not expose the exact run and File Storage tags")
+			return inventory, fmt.Errorf("created Kapsule cluster does not expose the exact network, run, and File Storage identity")
 		}
 	} else {
 		cluster, err := backend.kubernetes.GetCluster(&k8sapi.GetClusterRequest{Region: region, ClusterID: plan.Cluster.ExistingID}, scw.WithContext(ctx))
@@ -673,6 +701,17 @@ func (backend *scalewayBackend) deleteExact(ctx context.Context, resource e2ecle
 		if _, err := backend.kubernetes.DeleteCluster(&k8sapi.DeleteClusterRequest{Region: region, ClusterID: resource.ID, WithAdditionalResources: false}, scw.WithContext(ctx)); err != nil && !providerNotFound(err) {
 			return err
 		}
+	case e2ecleanup.ResourceKindPrivateNetwork:
+		observed, err := backend.vpc.GetPrivateNetwork(&vpcapi.GetPrivateNetworkRequest{Region: region, PrivateNetworkID: resource.ID}, scw.WithContext(ctx))
+		if err != nil && providerNotFound(err) {
+			return nil
+		}
+		if err != nil || observed == nil || observed.ProjectID != backend.plan.ProjectID || observed.Region.String() != backend.plan.Region || observed.Name != resource.Name || !slices.Contains(observed.Tags, backend.plan.OwnershipTag) {
+			return fmt.Errorf("refuse deletion of mismatched Private Network %s: %w", resource.ID, err)
+		}
+		if err := backend.vpc.DeletePrivateNetwork(&vpcapi.DeletePrivateNetworkRequest{Region: region, PrivateNetworkID: resource.ID}, scw.WithContext(ctx)); err != nil && !providerNotFound(err) {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported exact cleanup kind %q", resource.Kind)
 	}
@@ -710,6 +749,8 @@ func (backend *scalewayBackend) exactPresent(ctx context.Context, kind, id strin
 		_, err = backend.file.GetFileSystem(&fileapi.GetFileSystemRequest{Region: region, FilesystemID: id}, scw.WithContext(ctx))
 	case e2ecleanup.ResourceKindCluster:
 		_, err = backend.kubernetes.GetCluster(&k8sapi.GetClusterRequest{Region: region, ClusterID: id}, scw.WithContext(ctx))
+	case e2ecleanup.ResourceKindPrivateNetwork:
+		_, err = backend.vpc.GetPrivateNetwork(&vpcapi.GetPrivateNetworkRequest{Region: region, PrivateNetworkID: id}, scw.WithContext(ctx))
 	default:
 		return false, fmt.Errorf("unsupported exact observation kind %q", kind)
 	}

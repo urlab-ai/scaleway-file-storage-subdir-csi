@@ -45,6 +45,7 @@ func validInventory() Inventory {
 			resource(ResourceKindCluster, "33333333-3333-4333-8333-333333333333", "cluster"),
 			resource(ResourceKindParent, "44444444-4444-4444-8444-444444444444", "parent-a"),
 			resource(ResourceKindNodePool, "66666666-6666-4666-8666-666666666666", "nodes"),
+			resource(ResourceKindPrivateNetwork, "88888888-8888-4888-8888-888888888888", "network"),
 		},
 	}
 }
@@ -57,10 +58,10 @@ func TestBuildProducesOrderedExactNonAuthorizingActions(t *testing.T) {
 	if !plan.DryRun || plan.MutationAuthorized || plan.ExecutionBackendAvailable || !plan.RequiresImmediateApproval || !plan.ReadyForImmediateApproval || plan.CleanupComplete {
 		t.Fatalf("plan authority = %#v", plan)
 	}
-	if len(plan.Blockers) != 0 || len(plan.DeleteActions) != 4 {
+	if len(plan.Blockers) != 0 || len(plan.DeleteActions) != 5 {
 		t.Fatalf("blockers/actions = %#v / %#v", plan.Blockers, plan.DeleteActions)
 	}
-	wantKinds := []string{ResourceKindNodePool, ResourceKindParent, ResourceKindParent, ResourceKindCluster}
+	wantKinds := []string{ResourceKindNodePool, ResourceKindParent, ResourceKindParent, ResourceKindCluster, ResourceKindPrivateNetwork}
 	gotKinds := make([]string, 0, len(plan.DeleteActions))
 	for index, action := range plan.DeleteActions {
 		gotKinds = append(gotKinds, action.Kind)
@@ -82,13 +83,19 @@ func TestBuildProducesOrderedExactNonAuthorizingActions(t *testing.T) {
 
 func TestBuildNeverDeletesReusedClusterButDeletesRunNodePool(t *testing.T) {
 	inventory := validInventory()
-	for index := range inventory.Resources {
-		if inventory.Resources[index].Kind == ResourceKindCluster {
-			inventory.Resources[index].CreatedByRun = false
-			inventory.Resources[index].Name = "shared-e2e-cluster"
-			inventory.Resources[index].Tags = nil
+	resources := make([]Resource, 0, len(inventory.Resources)-1)
+	for _, resource := range inventory.Resources {
+		if resource.Kind == ResourceKindPrivateNetwork {
+			continue
 		}
+		if resource.Kind == ResourceKindCluster {
+			resource.CreatedByRun = false
+			resource.Name = "shared-e2e-cluster"
+			resource.Tags = nil
+		}
+		resources = append(resources, resource)
 	}
+	inventory.Resources = resources
 	plan, err := Build(inventory, testNow)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -119,11 +126,11 @@ func TestBuildReleaseCandidateRequiresAndDeletesDisposableInstanceFirst(t *testi
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if len(plan.DeleteActions) != 5 || plan.DeleteActions[0].Kind != ResourceKindInstance {
+	if len(plan.DeleteActions) != 6 || plan.DeleteActions[0].Kind != ResourceKindInstance || plan.DeleteActions[5].Kind != ResourceKindPrivateNetwork {
 		t.Fatalf("delete actions = %#v", plan.DeleteActions)
 	}
 
-	inventory.Resources = inventory.Resources[:4]
+	inventory.Resources = inventory.Resources[:len(inventory.Resources)-1]
 	if _, err := Build(inventory, testNow); err == nil {
 		t.Fatal("Build(release candidate without disposable instance) error = nil")
 	}
@@ -145,7 +152,7 @@ func TestBuildSuppressesAllActionsWhenAnyEvidenceIsIncomplete(t *testing.T) {
 	if len(plan.Blockers) != 2 || len(plan.DeleteActions) != 0 || plan.ReadyForImmediateApproval {
 		t.Fatalf("blocked plan = blockers %#v actions %#v ready %t", plan.Blockers, plan.DeleteActions, plan.ReadyForImmediateApproval)
 	}
-	if len(plan.SurvivingRunResources) != 4 {
+	if len(plan.SurvivingRunResources) != 5 {
 		t.Fatalf("surviving resources = %#v", plan.SurvivingRunResources)
 	}
 }
@@ -171,7 +178,7 @@ func TestBuildIsIdempotentlyCompleteAfterRunResourcesAreAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if !plan.CleanupComplete || plan.ReadyForImmediateApproval || len(plan.DeleteActions) != 0 || len(plan.AlreadyAbsent) != 4 || len(plan.Blockers) != 0 {
+	if !plan.CleanupComplete || plan.ReadyForImmediateApproval || len(plan.DeleteActions) != 0 || len(plan.AlreadyAbsent) != 5 || len(plan.Blockers) != 0 {
 		t.Fatalf("complete plan = %#v", plan)
 	}
 }
@@ -227,6 +234,21 @@ func TestBuildBlocksUnresolvedProviderCreate(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsRunOwnedPrivateNetworkCreateIntentBeforeMutation(t *testing.T) {
+	inventory := validInventory()
+	inventory.Phase = PhaseProvisioning
+	inventory.Resources = nil
+	inventory.PendingCreate = &CreateIntent{Kind: ResourceKindPrivateNetwork, Name: inventory.ResourcePrefix + "-network"}
+
+	plan, err := Build(inventory, testNow)
+	if err != nil {
+		t.Fatalf("Build(Private Network Create intent) error = %v", err)
+	}
+	if len(plan.DeleteActions) != 0 || plan.CleanupComplete || !slices.Contains(plan.Blockers, "provider Create for private-network "+inventory.ResourcePrefix+"-network remains unresolved") {
+		t.Fatalf("Private Network Create intent plan = %#v", plan)
+	}
+}
+
 func TestBuildRejectsUnsafeOrIncompleteInventory(t *testing.T) {
 	tests := map[string]func(*Inventory){
 		"schema":        func(inventory *Inventory) { inventory.SchemaVersion = "2" },
@@ -237,7 +259,7 @@ func TestBuildRejectsUnsafeOrIncompleteInventory(t *testing.T) {
 		"prefix":        func(inventory *Inventory) { inventory.ResourcePrefix = "other" },
 		"tag scope":     func(inventory *Inventory) { inventory.OwnershipTag = "other" },
 		"timestamp":     func(inventory *Inventory) { inventory.ObservedAt = "yesterday" },
-		"missing entry": func(inventory *Inventory) { inventory.Resources = inventory.Resources[:3] },
+		"missing entry": func(inventory *Inventory) { inventory.Resources = inventory.Resources[:len(inventory.Resources)-1] },
 		"wrong kind":    func(inventory *Inventory) { inventory.Resources[0].Kind = "instance" },
 		"duplicate ID":  func(inventory *Inventory) { inventory.Resources[0].ID = inventory.Resources[1].ID },
 		"bad ID":        func(inventory *Inventory) { inventory.Resources[0].ID = "parent" },

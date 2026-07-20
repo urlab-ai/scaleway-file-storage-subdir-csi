@@ -55,6 +55,7 @@ func commandTestInventory() e2ecleanup.Inventory {
 			ControllerStopped: true, HelmUninstalled: true,
 		},
 		Resources: []e2ecleanup.Resource{
+			resource(e2ecleanup.ResourceKindPrivateNetwork, "77777777-7777-4777-8777-777777777777", "network"),
 			resource(e2ecleanup.ResourceKindCluster, "33333333-3333-4333-8333-333333333333", "cluster"),
 			resource(e2ecleanup.ResourceKindNodePool, "44444444-4444-4444-8444-444444444444", "nodes"),
 			resource(e2ecleanup.ResourceKindParent, "55555555-5555-4555-8555-555555555555", "parent-a"),

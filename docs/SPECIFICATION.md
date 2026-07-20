@@ -6621,6 +6621,12 @@ per-filesystem maximum; it additionally plans exactly one standalone run-owned
 disposable Instance of the same explicitly selected commercial type, reused
 serially across its recovery scenarios so it cannot disappear from cost or
 cleanup accounting.
+Creating a cluster also plans exactly one run-owned Private Network in the same
+Project and region. The executor creates and journals that network before the
+cluster, passes its exact ID as the cluster's immutable `private_network_id`,
+and verifies the cluster reports the same ID. A reused cluster keeps its
+existing network; the run neither journals nor mutates that pre-existing
+network.
 
 `hack/scaleway-e2e-plan` is the repository's closed-schema, bounded-input
 preflight renderer. Its canonical output always has `dryRun = true`,
@@ -6669,9 +6675,11 @@ corruption and requires operator recovery, not inferred absence.
 
 The retained cleanup inventory is a closed exact-ID creation ledger. A ready
 scenario run contains exactly one cluster, one newly created node pool, and two
-created parents; the release-candidate profile also contains its one disposable
-Instance. A provisioning failure may leave any valid prefix of that planned
-set. Cleanup and complete phases retain exactly the resources that were created
+created parents; a run-created cluster also requires its one created Private
+Network, and the release-candidate profile additionally contains its one
+disposable Instance. A provisioning failure may leave any valid prefix of that
+planned set. Cleanup and complete phases retain exactly the resources that were
+created
 or conclusively rediscovered for that run and never require invented IDs for
 resources that were never created. Deterministic discovery checks every planned
 name before cleanup can accept that partial ledger. After any provisioning
@@ -6697,8 +6705,9 @@ stale/unknown or any required Kubernetes cleanup, PV/VolumeAttachment removal,
 unpublish/unstage, published-fence clearing, safe-uninstall, node/controller
 stop, mount absence, attachment absence, or post-prepare Helm uninstall barrier
 is incomplete. When unblocked it identifies only exact run-owned IDs, ordered
-as disposable Instance, node pool, parents, then a run-owned cluster. It never
-selects a reused cluster. Conclusively absent resources are idempotent success
+as disposable Instance, node pool, parents, a run-owned cluster, then that
+cluster's run-owned Private Network. It never selects a reused cluster or its
+pre-existing network. Conclusively absent resources are idempotent success
 evidence. That review command deliberately has no deletion backend.
 `hack/scaleway-e2e-run --cleanup-only` is the distinct credentialed executor;
 after a new immediate approval it repeats discovery, exact-ID reads and every
@@ -6724,8 +6733,8 @@ Cleanup must:
   wait for PV deletion, VolumeAttachment removal, unpublish, and unstage, then
   run and verify `csi-admin uninstall prepare` before deleting Helm-managed
   RBAC, controller, or node resources;
-- never delete reused or pre-existing clusters/filesystems unless they were
-  created by the same run ID;
+- never delete reused or pre-existing clusters, Private Networks, or
+  filesystems unless they were created by the same run ID;
 - print an audit summary before deletion;
 - be idempotent and runnable separately after failed tests.
 

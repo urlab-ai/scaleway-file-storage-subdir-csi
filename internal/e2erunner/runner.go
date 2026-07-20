@@ -397,17 +397,30 @@ func validateSuccessfulInventory(inventory e2ecleanup.Inventory, profile string)
 			return fmt.Errorf("only one conclusively present reused cluster may survive real E2E cleanup")
 		}
 	}
-	if counts[e2ecleanup.ResourceKindCluster] != 1 || counts[e2ecleanup.ResourceKindNodePool] != 1 || counts[e2ecleanup.ResourceKindParent] != 2 {
-		return fmt.Errorf("real E2E inventory does not contain the exact cluster, node pool, and two parents")
+	clusterCreatedByRun := false
+	for _, resource := range inventory.Resources {
+		if resource.Kind == e2ecleanup.ResourceKindCluster {
+			clusterCreatedByRun = resource.CreatedByRun
+			break
+		}
+	}
+	wantPrivateNetworks := 0
+	if clusterCreatedByRun {
+		wantPrivateNetworks = 1
+	}
+	if counts[e2ecleanup.ResourceKindPrivateNetwork] != wantPrivateNetworks || counts[e2ecleanup.ResourceKindCluster] != 1 || counts[e2ecleanup.ResourceKindNodePool] != 1 || counts[e2ecleanup.ResourceKindParent] != 2 {
+		return fmt.Errorf("real E2E inventory does not contain the exact network, cluster, node pool, and two parents required by cluster ownership")
 	}
 	if profile == e2eplan.ProfileBase {
-		if len(inventory.Resources) != 4 || len(counts) != 3 {
-			return fmt.Errorf("base smoke inventory contains resources outside the exact cluster, node pool, and two parents")
+		if len(inventory.Resources) != 5 || len(counts) != 4 {
+			return fmt.Errorf("base smoke inventory contains resources outside the exact Private Network, cluster, node pool, and two parents")
 		}
 		return nil
 	}
-	if profile != e2eplan.ProfileReleaseCandidate || len(inventory.Resources) != 5 || counts[e2ecleanup.ResourceKindInstance] != 1 || len(counts) != 4 {
-		return fmt.Errorf("release-candidate inventory does not contain the exact cluster, node pool, two parents, and disposable Instance")
+	wantResources := 5 + wantPrivateNetworks
+	wantKinds := 4 + wantPrivateNetworks
+	if profile != e2eplan.ProfileReleaseCandidate || len(inventory.Resources) != wantResources || counts[e2ecleanup.ResourceKindInstance] != 1 || len(counts) != wantKinds {
+		return fmt.Errorf("release-candidate inventory does not contain the exact ownership-dependent network, cluster, node pool, two parents, and disposable Instance")
 	}
 	return nil
 }

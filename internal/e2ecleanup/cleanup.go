@@ -20,6 +20,10 @@ const (
 
 	// ResourceKindCluster identifies one exact Kapsule cluster.
 	ResourceKindCluster = "kapsule-cluster"
+	// ResourceKindPrivateNetwork identifies the run-created Private Network
+	// required by a run-created Kapsule cluster. Reused clusters retain their
+	// existing network and never add it to the run-owned cleanup ledger.
+	ResourceKindPrivateNetwork = "private-network"
 	// ResourceKindNodePool identifies the run-created Kapsule node pool. A
 	// fresh pool is mandatory even when the cluster is reused.
 	ResourceKindNodePool = "kapsule-node-pool"
@@ -265,9 +269,15 @@ func (inventory Inventory) validateStatic() (time.Time, error) {
 	if err != nil || observation.Location() != time.UTC || observation.Format(time.RFC3339Nano) != inventory.ObservedAt {
 		return time.Time{}, fmt.Errorf("observedAt must be a canonical UTC RFC3339 timestamp")
 	}
+	clusterCreatedByRun := inventoryClusterCreatedByRun(inventory)
+	wantPrivateNetworks := 0
 	wantResources := 4
+	if clusterCreatedByRun {
+		wantPrivateNetworks = 1
+		wantResources++
+	}
 	if inventory.Profile == e2eplan.ProfileReleaseCandidate {
-		wantResources = 5
+		wantResources++
 	}
 	// A controlled failure may stop provisioning after any durable prefix of the
 	// planned resources. Cleanup and its final audit must remain able to carry
@@ -278,7 +288,7 @@ func (inventory Inventory) validateStatic() (time.Time, error) {
 		return time.Time{}, fmt.Errorf("cleanup inventory has %d resources; profile %q requires %d", len(inventory.Resources), inventory.Profile, wantResources)
 	}
 
-	counts := make(map[string]int, 3)
+	counts := make(map[string]int, 5)
 	seenIDs := make(map[string]struct{}, len(inventory.Resources))
 	for index, resource := range inventory.Resources {
 		if err := resource.validate(inventory, seenIDs); err != nil {
@@ -286,14 +296,14 @@ func (inventory Inventory) validateStatic() (time.Time, error) {
 		}
 		counts[resource.Kind]++
 	}
-	wantKinds := 3
+	wantKinds := 3 + wantPrivateNetworks
 	wantInstances := 0
 	if inventory.Profile == e2eplan.ProfileReleaseCandidate {
-		wantKinds = 4
+		wantKinds++
 		wantInstances = 1
 	}
-	completeKinds := counts[ResourceKindCluster] == 1 && counts[ResourceKindNodePool] == 1 && counts[ResourceKindParent] == 2 && counts[ResourceKindInstance] == wantInstances && len(counts) == wantKinds
-	withinPartialBounds := counts[ResourceKindCluster] <= 1 && counts[ResourceKindNodePool] <= 1 && counts[ResourceKindParent] <= 2 && counts[ResourceKindInstance] <= wantInstances && len(counts) <= wantKinds
+	completeKinds := counts[ResourceKindPrivateNetwork] == wantPrivateNetworks && counts[ResourceKindCluster] == 1 && counts[ResourceKindNodePool] == 1 && counts[ResourceKindParent] == 2 && counts[ResourceKindInstance] == wantInstances && len(counts) == wantKinds
+	withinPartialBounds := counts[ResourceKindPrivateNetwork] <= wantPrivateNetworks && counts[ResourceKindCluster] <= 1 && counts[ResourceKindNodePool] <= 1 && counts[ResourceKindParent] <= 2 && counts[ResourceKindInstance] <= wantInstances && len(counts) <= wantKinds
 	if (partialLedgerAllowed && !withinPartialBounds) || (!partialLedgerAllowed && !completeKinds) {
 		return time.Time{}, fmt.Errorf("cleanup inventory resource classes do not match profile %q", inventory.Profile)
 	}
@@ -316,6 +326,11 @@ func (inventory Inventory) validateStatic() (time.Time, error) {
 func (intent CreateIntent) validate(inventory Inventory) error {
 	wantName := ""
 	switch intent.Kind {
+	case ResourceKindPrivateNetwork:
+		if !inventoryClusterCreatedByRun(inventory) {
+			return fmt.Errorf("reused cluster cannot have a Private Network Create intent")
+		}
+		wantName = inventory.ResourcePrefix + "-network"
 	case ResourceKindCluster:
 		if !inventoryClusterCreatedByRun(inventory) {
 			return fmt.Errorf("reused cluster cannot have a provider Create intent")
@@ -348,14 +363,20 @@ func inventoryClusterCreatedByRun(inventory Inventory) bool {
 			return resource.CreatedByRun
 		}
 	}
-	// Before the first cluster Create there is no retained resource yet. The
-	// fixed name and ownership tag still bind the intent to this run.
+	for _, resource := range inventory.Resources {
+		if resource.Kind == ResourceKindPrivateNetwork && resource.CreatedByRun {
+			return true
+		}
+	}
+	// Before the first run-owned Private Network Create there is no retained
+	// resource yet. The fixed name and ownership tag still bind the intent to
+	// this run.
 	return len(inventory.Resources) == 0
 }
 
 func (resource Resource) validate(inventory Inventory, seenIDs map[string]struct{}) error {
 	switch resource.Kind {
-	case ResourceKindCluster, ResourceKindNodePool, ResourceKindParent, ResourceKindInstance:
+	case ResourceKindPrivateNetwork, ResourceKindCluster, ResourceKindNodePool, ResourceKindParent, ResourceKindInstance:
 	default:
 		return fmt.Errorf("resource kind %q is unsupported", resource.Kind)
 	}
@@ -456,8 +477,10 @@ func deletionRank(kind string) int {
 		return 3
 	case ResourceKindCluster:
 		return 4
-	default:
+	case ResourceKindPrivateNetwork:
 		return 5
+	default:
+		return 6
 	}
 }
 

@@ -172,7 +172,8 @@ type InstancePlan struct {
 	DeleteOnCleanup bool   `json:"deleteOnCleanup"`
 }
 
-// ResourcePlan is one bounded planned billable resource class.
+// ResourcePlan is one bounded planned provider resource class included in the
+// explicit scope, cost review, and cleanup contract.
 type ResourcePlan struct {
 	Kind            string `json:"kind"`
 	Count           uint32 `json:"count"`
@@ -197,7 +198,10 @@ func Build(request Request) (Plan, error) {
 		"delete exact run-owned parent IDs after verified uninstall",
 	}
 	if clusterOwned {
-		operations = append(operations, "delete the exact run-owned ephemeral cluster during cleanup")
+		operations = append(operations,
+			"delete the exact run-owned ephemeral cluster during cleanup",
+			"delete the exact run-owned Private Network after cluster deletion",
+		)
 	}
 	if request.Profile == ProfileReleaseCandidate {
 		operations = append(operations,
@@ -207,12 +211,18 @@ func Build(request Request) (Plan, error) {
 			"inject controller interruption around the run-owned bootstrap claim",
 		)
 	}
-	plannedResources := []ResourcePlan{
-		{Kind: "kapsule-cluster", Count: 1, CreatedByRun: clusterOwned, DeleteOnCleanup: clusterOwned},
-		{Kind: "kapsule-node-pool", Count: 1, CreatedByRun: true, DeleteOnCleanup: true},
-		{Kind: "kapsule-node", Count: request.NodePool.Count, CreatedByRun: true, DeleteOnCleanup: true},
-		{Kind: "file-storage-parent", Count: request.Parents.Count, CreatedByRun: true, DeleteOnCleanup: true},
+	plannedResources := make([]ResourcePlan, 0, 6)
+	if clusterOwned {
+		plannedResources = append(plannedResources, ResourcePlan{
+			Kind: "private-network", Count: 1, CreatedByRun: true, DeleteOnCleanup: true,
+		})
 	}
+	plannedResources = append(plannedResources,
+		ResourcePlan{Kind: "kapsule-cluster", Count: 1, CreatedByRun: clusterOwned, DeleteOnCleanup: clusterOwned},
+		ResourcePlan{Kind: "kapsule-node-pool", Count: 1, CreatedByRun: true, DeleteOnCleanup: true},
+		ResourcePlan{Kind: "kapsule-node", Count: request.NodePool.Count, CreatedByRun: true, DeleteOnCleanup: true},
+		ResourcePlan{Kind: "file-storage-parent", Count: request.Parents.Count, CreatedByRun: true, DeleteOnCleanup: true},
+	)
 	if request.Profile == ProfileReleaseCandidate {
 		// One standalone Instance is reused serially across the destructive
 		// recovery scenarios. Its cost is part of the explicit aggregate cost.

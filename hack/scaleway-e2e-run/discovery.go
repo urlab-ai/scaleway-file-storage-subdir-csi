@@ -10,6 +10,7 @@ import (
 	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
 	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
+	vpcapi "github.com/scaleway/scaleway-sdk-go/api/vpc/v2"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
@@ -61,7 +62,21 @@ func (backend *scalewayBackend) readInventory() (e2ecleanup.Inventory, error) {
 // it recovers exact IDs into the ledger so the normal exact-ID verifier can
 // authorize cleanup after a crash between provider commit and ledger fsync.
 func (backend *scalewayBackend) reconcileRunResources(ctx context.Context, inventory e2ecleanup.Inventory) (e2ecleanup.Inventory, error) {
-	cluster, err := backend.discoverCluster(ctx)
+	privateNetworkID := ""
+	if backend.plan.Cluster.CreatedByRun {
+		privateNetworkID = resourceID(inventory, e2ecleanup.ResourceKindPrivateNetwork, 0)
+		privateNetwork, err := backend.discoverPrivateNetwork(ctx)
+		if err != nil {
+			return inventory, err
+		}
+		if privateNetwork != nil {
+			if err := mergeResource(&inventory, *privateNetwork); err != nil {
+				return inventory, err
+			}
+			privateNetworkID = privateNetwork.ID
+		}
+	}
+	cluster, err := backend.discoverCluster(ctx, privateNetworkID)
 	if err != nil {
 		return inventory, err
 	}
@@ -137,7 +152,34 @@ func resolveDiscoveredCreateIntent(inventory *e2ecleanup.Inventory) {
 	}
 }
 
-func (backend *scalewayBackend) discoverCluster(ctx context.Context) (*e2ecleanup.Resource, error) {
+func (backend *scalewayBackend) discoverPrivateNetwork(ctx context.Context) (*e2ecleanup.Resource, error) {
+	name := backend.plan.ResourcePrefix + "-network"
+	response, err := backend.vpc.ListPrivateNetworks(&vpcapi.ListPrivateNetworksRequest{
+		Region: scw.Region(backend.plan.Region), ProjectID: &backend.plan.ProjectID, Name: &name,
+	}, scw.WithAllPages(), scw.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("discover run-owned Private Network: %w", err)
+	}
+	var matches []*vpcapi.PrivateNetwork
+	for _, privateNetwork := range response.PrivateNetworks {
+		if privateNetwork != nil && privateNetwork.Name == name {
+			if privateNetwork.ProjectID != backend.plan.ProjectID || privateNetwork.Region.String() != backend.plan.Region || !slices.Contains(privateNetwork.Tags, backend.plan.OwnershipTag) {
+				return nil, fmt.Errorf("Private Network name %q collides with a resource not owned by this run", name)
+			}
+			matches = append(matches, privateNetwork)
+		}
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("multiple run-owned Private Networks use exact name %q", name)
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	resource := backend.resource(e2ecleanup.ResourceKindPrivateNetwork, matches[0].ID, matches[0].Name, true, matches[0].Tags)
+	return &resource, nil
+}
+
+func (backend *scalewayBackend) discoverCluster(ctx context.Context, privateNetworkID string) (*e2ecleanup.Resource, error) {
 	region := scw.Region(backend.plan.Region)
 	if backend.plan.Cluster.Disposition == e2eplan.ClusterReuse {
 		cluster, err := backend.kubernetes.GetCluster(&k8sapi.GetClusterRequest{Region: region, ClusterID: backend.plan.Cluster.ExistingID}, scw.WithContext(ctx))
@@ -161,7 +203,7 @@ func (backend *scalewayBackend) discoverCluster(ctx context.Context) (*e2ecleanu
 	var matches []*k8sapi.Cluster
 	for _, cluster := range response.Clusters {
 		if cluster != nil && cluster.Name == name {
-			if cluster.ProjectID != backend.plan.ProjectID || !slices.Contains(cluster.Tags, backend.plan.OwnershipTag) || !slices.Contains(cluster.Tags, requiredFileStorageClusterTag) {
+			if privateNetworkID == "" || cluster.PrivateNetworkID == nil || *cluster.PrivateNetworkID != privateNetworkID || cluster.ProjectID != backend.plan.ProjectID || cluster.Region.String() != backend.plan.Region || !slices.Contains(cluster.Tags, backend.plan.OwnershipTag) || !slices.Contains(cluster.Tags, requiredFileStorageClusterTag) {
 				return nil, fmt.Errorf("cluster name %q collides with a resource not owned by this run", name)
 			}
 			matches = append(matches, cluster)

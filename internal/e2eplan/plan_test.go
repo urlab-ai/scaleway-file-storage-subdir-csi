@@ -61,8 +61,11 @@ func TestBuildProducesNonAuthorizingRunOwnedPlan(t *testing.T) {
 	if plan.DisposableInstance != nil {
 		t.Fatalf("base profile disposable instance = %#v", plan.DisposableInstance)
 	}
-	if len(plan.PlannedResources) != 4 || plan.PlannedResources[3].Count != 2 || !plan.PlannedResources[3].DeleteOnCleanup {
+	if len(plan.PlannedResources) != 5 || plan.PlannedResources[0].Kind != "private-network" || !plan.PlannedResources[0].DeleteOnCleanup || plan.PlannedResources[4].Count != 2 || !plan.PlannedResources[4].DeleteOnCleanup {
 		t.Fatalf("planned resources = %#v", plan.PlannedResources)
+	}
+	if !slices.Contains(plan.DestructiveOperations, "delete the exact run-owned Private Network after cluster deletion") {
+		t.Fatalf("destructive operations = %#v", plan.DestructiveOperations)
 	}
 	if !slices.EqualFunc(plan.Artifacts.Images, []ImageDigest{
 		{Name: "csi-node-driver-registrar"}, {Name: "driver"}, {Name: "external-attacher"},
@@ -91,12 +94,15 @@ func TestBuildNeverMarksReusedClusterForDeletion(t *testing.T) {
 	if plan.Cluster.CreatedByRun || plan.Cluster.DeleteOnCleanup || plan.PlannedResources[0].DeleteOnCleanup {
 		t.Fatalf("reused cluster deletion authority = cluster %#v resources %#v", plan.Cluster, plan.PlannedResources)
 	}
+	if len(plan.PlannedResources) != 5 || plan.PlannedResources[0].Kind != "kapsule-cluster" {
+		t.Fatalf("reused cluster must not plan a Private Network: %#v", plan.PlannedResources)
+	}
 	if !plan.NodePool.CreatedByRun || !plan.NodePool.DeleteOnCleanup || !plan.PlannedResources[1].DeleteOnCleanup || !plan.PlannedResources[2].DeleteOnCleanup {
 		t.Fatalf("run-owned node pool is not scheduled for cleanup: nodePool %#v resources %#v", plan.NodePool, plan.PlannedResources)
 	}
 	for _, operation := range plan.DestructiveOperations {
-		if strings.Contains(operation, "delete the exact run-owned ephemeral cluster") {
-			t.Fatalf("reused cluster plan contains cluster deletion: %q", operation)
+		if strings.Contains(operation, "run-owned ephemeral cluster") || strings.Contains(operation, "run-owned Private Network") {
+			t.Fatalf("reused cluster plan contains cluster-network deletion: %q", operation)
 		}
 	}
 }
@@ -109,10 +115,10 @@ func TestBuildReleaseCandidatePlansOneRunOwnedDisposableInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if len(plan.PlannedResources) != 5 {
+	if len(plan.PlannedResources) != 6 {
 		t.Fatalf("planned resources = %#v", plan.PlannedResources)
 	}
-	instance := plan.PlannedResources[4]
+	instance := plan.PlannedResources[5]
 	if instance.Kind != "disposable-instance" || instance.Count != 1 || !instance.CreatedByRun || !instance.DeleteOnCleanup {
 		t.Fatalf("disposable instance plan = %#v", instance)
 	}

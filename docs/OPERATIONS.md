@@ -100,7 +100,8 @@ go run ./hack/scaleway-e2e-plan --input=/absolute/path/request.json
 
 The request is closed-schema. It includes the exact Project, `fr-par`, UUID run
 ID, run-containing DNS prefix, absolute evidence directory, cluster
-create/reuse choice, fresh two-or-three-node run-owned pool, two parents,
+create/reuse choice, one run-owned Private Network for a created cluster, fresh
+two-or-three-node run-owned pool, two parents,
 reviewed aggregate hourly cost, Git/chart identity, and immutable driver and
 sidecar digests. It also carries a canonical provider review no older than 24
 hours: documented GA product status and source, remaining File Storage quota
@@ -140,7 +141,9 @@ This is a safety interlock, not a test skip. `--cleanup-only` remains supported
 for a retained previously approved run.
 
 Dry-run is the default and never loads credentials. The live form creates only
-the request's tagged resources, fsyncs every exact ID to the cleanup ledger,
+the request's tagged resources, creates and journals a run-owned Private
+Network before a run-owned cluster, binds the cluster to that exact immutable
+network ID, fsyncs every exact ID to the cleanup ledger,
 executes the fixed scenario set, and attempts cleanup after every failure.
 Never retry a full execution while its ledger exists. Resume cleanup with a
 new immediate approval and the same request/run ID:
@@ -172,14 +175,17 @@ go run ./hack/scaleway-e2e-cleanup \
   --dry-run
 ```
 
-The inventory must include the cluster, newly created node pool, both parents,
-and the release-candidate disposable Instance when applicable. Every created
+The inventory must include the cluster, its run-owned Private Network when the
+cluster was created by the run, the newly created node pool, both parents, and
+the release-candidate disposable Instance when applicable. Every created
 resource carries the exact run prefix/tag and every resource has an exact ID,
 Project, region, creation provenance, and fresh closed state. The verifier
 blocks the entire deletion list for stale or unknown provider evidence or any
 incomplete Kubernetes, unmount, detach, controller-stop, or Helm-uninstall
-barrier. A reused cluster is retained; it is never a deletion candidate. Even
-an unblocked review grants no authority. The credentialed cleanup command
+barrier. Cleanup deletes a run-owned cluster before its exact run-owned Private
+Network. A reused cluster and its pre-existing network are retained; neither is
+a deletion candidate. Even an unblocked review grants no authority. The
+credentialed cleanup command
 repeats live reads, but still requires a new explicit approval immediately
 before mutation.
 
