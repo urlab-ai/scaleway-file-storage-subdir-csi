@@ -8,15 +8,15 @@ HELM=${HELM:-helm}
 JQ=${JQ:-jq}
 
 mode=${1:-}
-[ "$mode" = run-pre ] || [ "$mode" = run-post ] || [ "$mode" = cleanup ] || {
-  echo "usage: run-kapsule-e2e.sh <run-pre|run-post|cleanup> --closed-flags" >&2
+[ "$mode" = run-smoke ] || [ "$mode" = run-pre ] || [ "$mode" = run-post ] || [ "$mode" = cleanup ] || {
+  echo "usage: run-kapsule-e2e.sh <run-smoke|run-pre|run-post|cleanup> --closed-flags" >&2
   exit 2
 }
 shift
 
 kubeconfig= chart= values= namespace= release= admin= workload_image=
 project_id= region= run_id= cluster_id= parent_a= parent_b= results= evidence_dir=
-preconditions= validator= previous_chart= previous_values=
+preconditions= validator= previous_chart= previous_values= profile=
 for argument in "$@"; do
   case "$argument" in
     --kubeconfig=*) kubeconfig=${argument#*=} ;;
@@ -26,6 +26,7 @@ for argument in "$@"; do
     --release=*) release=${argument#*=} ;;
     --admin=*) admin=${argument#*=} ;;
     --workload-image=*) workload_image=${argument#*=} ;;
+    --profile=*) profile=${argument#*=} ;;
     --project-id=*) project_id=${argument#*=} ;;
     --region=*) region=${argument#*=} ;;
     --run-id=*) run_id=${argument#*=} ;;
@@ -49,8 +50,8 @@ require_value() {
 for required in kubeconfig namespace release admin evidence_dir; do
   require_value "$required"
 done
-if [ "$mode" = run-pre ] || [ "$mode" = run-post ]; then
-  for required in chart values workload_image project_id region run_id cluster_id parent_a parent_b results; do
+if [ "$mode" = run-smoke ] || [ "$mode" = run-pre ] || [ "$mode" = run-post ]; then
+  for required in chart values workload_image profile project_id region run_id cluster_id parent_a parent_b results; do
     require_value "$required"
   done
 fi
@@ -68,6 +69,11 @@ fi
 if { [ -n "$previous_chart" ] && [ -z "$previous_values" ]; } || { [ -z "$previous_chart" ] && [ -n "$previous_values" ]; }; then
   echo "previous chart and values must be supplied together" >&2
   exit 2
+fi
+if [ "$mode" = run-smoke ]; then
+  [ "$profile" = base ] || { echo "run-smoke requires profile base" >&2; exit 2; }
+elif [ "$mode" = run-pre ] || [ "$mode" = run-post ]; then
+  [ "$profile" = release-candidate ] || { echo "$mode requires profile release-candidate" >&2; exit 2; }
 fi
 
 mkdir -p "$evidence_dir"
@@ -107,10 +113,12 @@ write_credentials() {
 
 helm_candidate() {
   filesystems=$1
+  delete_policy=delete
+  [ "$profile" != base ] || delete_policy=archive
   h upgrade --install "$release" "$chart" --namespace "$namespace" --values "$values" \
     --set-string "scaleway.projectId=$project_id" \
     --set-string "scaleway.region=$region" \
-    --set-string 'pools.standard.onDelete=delete' \
+    --set-string "pools.standard.onDelete=$delete_policy" \
     --set-json "pools.standard.filesystems=$filesystems" \
     --set-json 'controller.affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"topology.kubernetes.io/zone","operator":"In","values":["fr-par-1","fr-par-2"]}]}]}}}' \
     --wait --timeout 30m
@@ -152,6 +160,7 @@ apply_pod() {
   claim=$2
   node=$3
   command=$4
+  command_json=$("$JQ" -cn --arg command "$command" '["sh","-c",$command]')
   k -n "$namespace" apply -f - <<EOF
 apiVersion: v1
 kind: Pod
@@ -165,7 +174,7 @@ spec:
   containers:
     - name: workload
       image: $workload_image
-      command: ["sh", "-c", "$command"]
+      command: $command_json
       volumeMounts: [{name: data, mountPath: /data}]
   volumes:
     - name: data
@@ -191,8 +200,10 @@ scenario_artifact_and_install() {
     --project-id="$project_id" \
     --region="$region"
   if [ -n "$previous_chart" ]; then
+    delete_policy=delete
+    [ "$profile" != base ] || delete_policy=archive
     h upgrade --install "$release" "$previous_chart" --namespace "$namespace" --values "$previous_values" \
-      --set-string "scaleway.projectId=$project_id" --set-string 'pools.standard.onDelete=delete' \
+      --set-string "scaleway.projectId=$project_id" --set-string "pools.standard.onDelete=$delete_policy" \
       --set-json "pools.standard.filesystems=$parents" --wait --timeout 30m
   fi
   helm_candidate "$parents"
@@ -224,6 +235,72 @@ scenario_rwx() {
   apply_pod "e2e-rwx-b-$short_run" "e2e-smoke-$short_run" "$node_b" 'until test "$(cat /data/rwx 2>/dev/null)" = cross-node; do sleep 1; done; sleep 3600'
   k -n "$namespace" wait "pod/e2e-rwx-b-$short_run" --for=condition=Ready --timeout=10m
   k -n "$namespace" exec "e2e-rwx-b-$short_run" -- cat /data/rwx
+}
+
+scenario_ten_pvc_isolation_and_archive() {
+  nodes=$(k get nodes -l kubernetes.io/os=linux -o json | "$JQ" -er '.items | map(select(.spec.unschedulable != true)) | .[0:2] | .[].metadata.name')
+  node_a=$(printf '%s\n' "$nodes" | sed -n '1p')
+  node_b=$(printf '%s\n' "$nodes" | sed -n '2p')
+  [ -n "$node_a" ] && [ -n "$node_b" ] && [ "$node_a" != "$node_b" ]
+
+  index=1
+  while [ "$index" -lt 10 ]; do
+    claim="e2e-logical-$short_run-$(printf '%02d' "$index")"
+    apply_pvc "$claim" ReadWriteMany
+    index=$((index + 1))
+  done
+  wait_pvcs_bound "$run_label"
+  counts=$(k -n "$namespace" get pvc -l "$run_label" -o json | "$JQ" -r '[.items | length, [.items[] | select(.status.phase == "Bound")] | length] | @tsv')
+  [ "$(printf '%s' "$counts" | cut -f1)" = 10 ]
+  [ "$(printf '%s' "$counts" | cut -f2)" = 10 ]
+
+  k -n "$namespace" exec "e2e-smoke-$short_run" -- sh -c "test ! -e /data/logical-marker; printf '%s' e2e-volume-00-$short_run > /data/logical-marker; sync"
+  index=1
+  while [ "$index" -lt 10 ]; do
+    claim="e2e-logical-$short_run-$(printf '%02d' "$index")"
+    pod="e2e-logical-$short_run-$(printf '%02d' "$index")"
+    marker="e2e-volume-$(printf '%02d' "$index")-$short_run"
+    node=$node_a
+    [ $((index % 2)) -eq 0 ] || node=$node_b
+    apply_pod "$pod" "$claim" "$node" "test ! -e /data/logical-marker; printf '%s' '$marker' > /data/logical-marker; sync; sleep 3600"
+    index=$((index + 1))
+  done
+  k -n "$namespace" wait pod -l "$run_label" --for=condition=Ready --timeout=15m
+  index=0
+  while [ "$index" -lt 10 ]; do
+    if [ "$index" -eq 0 ]; then
+      pod="e2e-smoke-$short_run"
+    else
+      pod="e2e-logical-$short_run-$(printf '%02d' "$index")"
+    fi
+    marker="e2e-volume-$(printf '%02d' "$index")-$short_run"
+    observed=$(k -n "$namespace" exec "$pod" -- cat /data/logical-marker)
+    [ "$observed" = "$marker" ]
+    index=$((index + 1))
+  done
+
+  claim="e2e-logical-$short_run-09"
+  pod="e2e-logical-$short_run-09"
+  pvc_uid=$(k -n "$namespace" get "pvc/$claim" -o jsonpath='{.metadata.uid}')
+  pv=$(k -n "$namespace" get "pvc/$claim" -o jsonpath='{.spec.volumeName}')
+  [ -n "$pvc_uid" ] && [ -n "$pv" ]
+  k -n "$namespace" delete "pod/$pod" --wait=true --timeout=10m
+  k -n "$namespace" delete "pvc/$claim" --wait=true --timeout=10m
+  deadline=$(( $(date +%s) + 900 ))
+  while :; do
+    [ -z "$(k get "pv/$pv" --ignore-not-found -o name)" ] && break
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 5
+  done
+  request_name="pvc-$pvc_uid"
+  while :; do
+    archived=$(k -n "$namespace" get configmaps -l app.kubernetes.io/name=scaleway-sfs-subdir-csi -o json | "$JQ" -r --arg request "$request_name" '[.items[] | (.data["record.json"]? // empty) | fromjson? | select(.createVolumeRequestName == $request and .state == "Archived" and .deleteResult == "archived" and (.archivedPath // "") != "")] | length')
+    [ "$archived" = 1 ] && break
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 5
+  done
+  remaining=$(k -n "$namespace" exec "e2e-logical-$short_run-08" -- cat /data/logical-marker)
+  [ "$remaining" = "e2e-volume-08-$short_run" ]
 }
 
 scenario_single_node_writer() {
@@ -352,10 +429,10 @@ run_scenario() {
   name=$1
   function_name=$2
   evidence="$evidence_dir/$name.log"
-  if ! "$function_name" >"$evidence" 2>&1; then
-    echo "Kapsule E2E scenario $name failed; retained log: $evidence" >&2
-    return 1
-  fi
+  # Keep the function call out of an if/!/|| condition. POSIX shells suppress
+  # errexit inside a function used as a conditional, which could otherwise turn
+  # an intermediate failed assertion into a successful scenario.
+  "$function_name" >"$evidence" 2>&1
   digest=$(sha256sum "$evidence" | awk '{print $1}')
   "$JQ" -cn --arg name "$name" --arg file "$name.log" --arg digest "sha256:$digest" \
     '{name:$name,succeeded:true,evidenceFile:$file,evidenceSha256:$digest}' >>"$entries"
@@ -423,7 +500,13 @@ fi
 
 entries="$evidence_dir/.scenario-results-$mode.ndjson"
 : >"$entries"
-if [ "$mode" = run-pre ]; then
+if [ "$mode" = run-smoke ]; then
+  run_scenario artifact-and-install-preflight scenario_artifact_and_install
+  run_scenario virtiofs-mount-api scenario_virtiofs
+  run_scenario rwx-cross-node scenario_rwx
+  run_scenario ten-pvc-isolation-and-archive scenario_ten_pvc_isolation_and_archive
+  run_scenario controller-hard-failure scenario_controller_failure
+elif [ "$mode" = run-pre ]; then
   run_scenario artifact-and-install-preflight scenario_artifact_and_install
   run_scenario virtiofs-mount-api scenario_virtiofs
   run_scenario rwx-cross-node scenario_rwx

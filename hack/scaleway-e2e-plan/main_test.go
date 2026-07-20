@@ -36,12 +36,12 @@ func commandTestRequest() e2eplan.Request {
 		EvidenceDirectory:      "/tmp/sfs-e2e-evidence",
 		Cluster:                e2eplan.ClusterRequest{Disposition: e2eplan.ClusterCreate},
 		NodePool:               e2eplan.NodePoolRequest{Count: 2, CommercialType: "TEST-TYPE-1"},
-		Parents:                e2eplan.ParentRequest{Count: 2, SizeBytes: 2_000_000_000_000},
+		Parents:                e2eplan.ParentRequest{Count: 2, SizeBytes: 25_000_000_000},
 		EstimatedHourlyCostEUR: "1.250000",
 		CostSource:             "operator-reviewed pricing snapshot",
 		ProviderReview: e2eplan.ProviderReview{
-			ObservedAt: "2026-07-15T11:00:00Z", ProductStatus: "public-beta",
-			ProductStatusSource: "test product status", PublicBetaAccepted: true,
+			ObservedAt: "2026-07-15T11:00:00Z", ProductStatus: "ga",
+			ProductStatusSource: "test product status", PublicBetaAccepted: false,
 			FileStorageQuotaRemaining: 2, QuotaSource: "test quota",
 		},
 		Artifacts: e2eplan.Artifacts{

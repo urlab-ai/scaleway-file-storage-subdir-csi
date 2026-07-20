@@ -7,24 +7,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
+	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
+	driverscaleway "github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
 )
 
 const fileStorageSizeStep = uint64(100_000_000_000)
 
 type providerAttachmentEvidence struct {
-	SchemaVersion string                     `json:"schemaVersion"`
-	ObservedAt    string                     `json:"observedAt"`
-	Parents       []providerParentAttachment `json:"parents"`
+	SchemaVersion  string                     `json:"schemaVersion"`
+	ObservedAt     string                     `json:"observedAt"`
+	PlannedNodeIDs []string                   `json:"plannedNodeIds"`
+	Parents        []providerParentAttachment `json:"parents"`
 }
 
 type providerParentAttachment struct {
@@ -33,6 +37,8 @@ type providerParentAttachment struct {
 	ReportedAttachments uint32   `json:"reportedAttachments"`
 	AttachmentIDs       []string `json:"attachmentIds"`
 	ResourceIDs         []string `json:"resourceIds"`
+	ResourceTypes       []string `json:"resourceTypes"`
+	Zones               []string `json:"zones"`
 }
 
 type providerGrowthEvidence struct {
@@ -47,7 +53,7 @@ type providerGrowthEvidence struct {
 }
 
 func (backend *scalewayBackend) runProviderScenarios(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, inventory e2ecleanup.Inventory, evidenceDirectory string) ([]e2erunner.ScenarioResult, error) {
-	attachmentResult, err := backend.providerAttachmentScenario(ctx, inventory, evidenceDirectory)
+	attachmentResult, err := backend.providerAttachmentScenario(ctx, request, inventory, evidenceDirectory, "provider-attach-detach")
 	if err != nil {
 		return nil, err
 	}
@@ -58,10 +64,15 @@ func (backend *scalewayBackend) runProviderScenarios(ctx context.Context, reques
 	return []e2erunner.ScenarioResult{attachmentResult, growthResult}, nil
 }
 
-func (backend *scalewayBackend) providerAttachmentScenario(ctx context.Context, inventory e2ecleanup.Inventory, evidenceDirectory string) (e2erunner.ScenarioResult, error) {
+func (backend *scalewayBackend) providerAttachmentScenario(ctx context.Context, request e2erunner.Request, inventory e2ecleanup.Inventory, evidenceDirectory, evidenceName string) (e2erunner.ScenarioResult, error) {
 	region := scw.Region(backend.plan.Region)
-	evidence := providerAttachmentEvidence{SchemaVersion: "1", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	totalAttachments := 0
+	plannedNodeIDs, err := backend.plannedPoolCSINodeIDs(ctx, request, inventory)
+	if err != nil {
+		return e2erunner.ScenarioResult{}, err
+	}
+	evidence := providerAttachmentEvidence{
+		SchemaVersion: "1", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), PlannedNodeIDs: plannedNodeIDs,
+	}
 	for ordinal := 0; ordinal < int(backend.plan.Parents.Count); ordinal++ {
 		filesystemID := resourceID(inventory, e2ecleanup.ResourceKindParent, ordinal)
 		filesystem, err := backend.file.GetFileSystem(&fileapi.GetFileSystemRequest{Region: region, FilesystemID: filesystemID}, scw.WithContext(ctx))
@@ -74,22 +85,209 @@ func (backend *scalewayBackend) providerAttachmentScenario(ctx context.Context, 
 		}
 		parent := providerParentAttachment{FilesystemID: filesystemID, FilesystemStatus: filesystem.Status.String(), ReportedAttachments: filesystem.NumberOfAttachments}
 		for _, attachment := range listed.Attachments {
-			if attachment == nil || attachment.FilesystemID != filesystemID || attachment.ID == "" || attachment.ResourceID == "" {
+			if attachment == nil || attachment.FilesystemID != filesystemID || attachment.ID == "" || attachment.ResourceID == "" || attachment.Zone == nil {
 				return e2erunner.ScenarioResult{}, fmt.Errorf("provider attachment inventory for %s is incomplete", filesystemID)
 			}
 			parent.AttachmentIDs = append(parent.AttachmentIDs, attachment.ID)
 			parent.ResourceIDs = append(parent.ResourceIDs, attachment.ResourceID)
+			parent.ResourceTypes = append(parent.ResourceTypes, attachment.ResourceType.String())
+			parent.Zones = append(parent.Zones, attachment.Zone.String())
 		}
-		if uint32(len(parent.AttachmentIDs)) != parent.ReportedAttachments {
-			return e2erunner.ScenarioResult{}, fmt.Errorf("provider attachment surfaces disagree for %s", filesystemID)
-		}
-		totalAttachments += len(parent.AttachmentIDs)
 		evidence.Parents = append(evidence.Parents, parent)
 	}
-	if totalAttachments == 0 {
-		return e2erunner.ScenarioResult{}, fmt.Errorf("provider inventory contains no live parent attachment after mounted workloads")
+	if err := validateProviderAttachmentEvidence(evidence, request.Zone, backend.plan.Parents.Count, backend.plan.Profile == e2eplan.ProfileBase); err != nil {
+		return e2erunner.ScenarioResult{}, err
 	}
-	return writeScenarioJSON(evidenceDirectory, "provider-attach-detach", evidence)
+	return writeScenarioJSON(evidenceDirectory, evidenceName, evidence)
+}
+
+// plannedPoolCSINodeIDs binds provider attachment evidence to the exact fresh
+// node pool recorded in the cleanup inventory. Kapsule supplies the pool
+// membership; CSINode supplies the driver-visible <zone>/<Instance ID> used by
+// the CSI and provider attachment contracts.
+func (backend *scalewayBackend) plannedPoolCSINodeIDs(ctx context.Context, request e2erunner.Request, inventory e2ecleanup.Inventory) ([]string, error) {
+	region := scw.Region(backend.plan.Region)
+	clusterID := resourceID(inventory, e2ecleanup.ResourceKindCluster, 0)
+	poolID := resourceID(inventory, e2ecleanup.ResourceKindNodePool, 0)
+	nodes, err := backend.kubernetes.ListNodes(&k8sapi.ListNodesRequest{
+		Region: region, ClusterID: clusterID, PoolID: &poolID,
+	}, scw.WithAllPages(), scw.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("list exact planned Kapsule pool nodes: %w", err)
+	}
+	observedNodes := 0
+	if nodes != nil {
+		observedNodes = len(nodes.Nodes)
+	}
+	if observedNodes != int(backend.plan.NodePool.Count) {
+		return nil, fmt.Errorf("planned Kapsule pool exposes %d nodes, want %d", observedNodes, backend.plan.NodePool.Count)
+	}
+	plannedNames := make(map[string]struct{}, len(nodes.Nodes))
+	for _, node := range nodes.Nodes {
+		if node == nil || node.Name == "" || node.PoolID != poolID || node.ClusterID != clusterID || node.Region != region || node.Status != k8sapi.NodeStatusReady {
+			return nil, fmt.Errorf("planned Kapsule pool contains an incomplete or non-ready node")
+		}
+		if _, duplicate := plannedNames[node.Name]; duplicate {
+			return nil, fmt.Errorf("planned Kapsule pool repeats node %q", node.Name)
+		}
+		plannedNames[node.Name] = struct{}{}
+	}
+
+	driverObjects, err := backend.kubectl(ctx, request, nil, "get", "csidriver", "-l", "app.kubernetes.io/instance="+request.HelmRelease, "-o", "json")
+	if err != nil {
+		return nil, fmt.Errorf("list exact release CSIDriver: %w", err)
+	}
+	csiNodeObjects, err := backend.kubectl(ctx, request, nil, "get", "csinodes", "-o", "json")
+	if err != nil {
+		return nil, fmt.Errorf("list CSINodes for planned pool: %w", err)
+	}
+	return decodePlannedCSINodeIDs(driverObjects, csiNodeObjects, plannedNames)
+}
+
+func decodePlannedCSINodeIDs(driverObjects, csiNodeObjects []byte, plannedNames map[string]struct{}) ([]string, error) {
+	if len(plannedNames) == 0 {
+		return nil, fmt.Errorf("planned Kapsule node-name set is empty")
+	}
+	var drivers struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(driverObjects, &drivers); err != nil {
+		return nil, fmt.Errorf("decode exact release CSIDriver: %w", err)
+	}
+	if len(drivers.Items) != 1 || drivers.Items[0].Metadata.Name == "" {
+		return nil, fmt.Errorf("exact release CSIDriver inventory must contain one named object")
+	}
+	driverName := drivers.Items[0].Metadata.Name
+
+	var csiNodes struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Drivers []struct {
+					Name   string `json:"name"`
+					NodeID string `json:"nodeID"`
+				} `json:"drivers"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(csiNodeObjects, &csiNodes); err != nil {
+		return nil, fmt.Errorf("decode CSINodes for planned pool: %w", err)
+	}
+	plannedNodeIDs := make([]string, 0, len(plannedNames))
+	seenNames := make(map[string]struct{}, len(plannedNames))
+	for _, node := range csiNodes.Items {
+		if _, planned := plannedNames[node.Metadata.Name]; !planned {
+			continue
+		}
+		if _, duplicate := seenNames[node.Metadata.Name]; duplicate {
+			return nil, fmt.Errorf("CSINode inventory repeats planned node %q", node.Metadata.Name)
+		}
+		seenNames[node.Metadata.Name] = struct{}{}
+		matchingNodeID := ""
+		for _, driver := range node.Spec.Drivers {
+			if driver.Name != driverName {
+				continue
+			}
+			if matchingNodeID != "" || driver.NodeID == "" {
+				return nil, fmt.Errorf("CSINode %q has ambiguous %q registration", node.Metadata.Name, driverName)
+			}
+			matchingNodeID = driver.NodeID
+		}
+		if matchingNodeID == "" {
+			return nil, fmt.Errorf("CSINode %q lacks %q registration", node.Metadata.Name, driverName)
+		}
+		if _, err := driverscaleway.ParseNodeID(matchingNodeID); err != nil {
+			return nil, fmt.Errorf("parse planned CSINode %q identity: %w", node.Metadata.Name, err)
+		}
+		plannedNodeIDs = append(plannedNodeIDs, matchingNodeID)
+	}
+	if len(plannedNodeIDs) != len(plannedNames) {
+		return nil, fmt.Errorf("CSINode inventory covers %d of %d planned pool nodes", len(plannedNodeIDs), len(plannedNames))
+	}
+	slices.Sort(plannedNodeIDs)
+	return plannedNodeIDs, nil
+}
+
+// validateProviderAttachmentEvidence proves that the logical-volume smoke did
+// not create an unbounded provider attachment fan-out. The same Instance may
+// legitimately appear once for each parent, but never twice for one parent.
+func validateProviderAttachmentEvidence(evidence providerAttachmentEvidence, expectedZone string, parentCount uint32, requireEveryPlannedNode bool) error {
+	if len(evidence.Parents) != int(parentCount) || parentCount == 0 || len(evidence.PlannedNodeIDs) < 2 {
+		return fmt.Errorf("provider attachment evidence does not cover the exact parent pool")
+	}
+	attachmentIDs := make(map[string]struct{})
+	filesystemIDs := make(map[string]struct{})
+	plannedResourceIDs := make(map[string]struct{}, len(evidence.PlannedNodeIDs))
+	for _, nodeID := range evidence.PlannedNodeIDs {
+		target, err := driverscaleway.ParseNodeID(nodeID)
+		if err != nil || target.Zone != expectedZone {
+			return fmt.Errorf("provider attachment evidence contains invalid planned node %q", nodeID)
+		}
+		if _, duplicate := plannedResourceIDs[target.ServerID]; duplicate {
+			return fmt.Errorf("provider attachment evidence repeats planned Instance %s", target.ServerID)
+		}
+		plannedResourceIDs[target.ServerID] = struct{}{}
+	}
+	resourceIDs := make(map[string]struct{})
+	totalAttachments := 0
+	for _, parent := range evidence.Parents {
+		if parent.FilesystemID == "" {
+			return fmt.Errorf("provider attachment evidence contains an empty filesystem ID")
+		}
+		if parent.FilesystemStatus != fileapi.FileSystemStatusAvailable.String() {
+			return fmt.Errorf("provider attachment parent %s has status %q", parent.FilesystemID, parent.FilesystemStatus)
+		}
+		if _, duplicate := filesystemIDs[parent.FilesystemID]; duplicate {
+			return fmt.Errorf("provider attachment evidence repeats filesystem %s", parent.FilesystemID)
+		}
+		filesystemIDs[parent.FilesystemID] = struct{}{}
+		count := len(parent.AttachmentIDs)
+		if uint32(count) != parent.ReportedAttachments || len(parent.ResourceIDs) != count || len(parent.ResourceTypes) != count || len(parent.Zones) != count {
+			return fmt.Errorf("provider attachment surfaces disagree for %s", parent.FilesystemID)
+		}
+		parentResources := make(map[string]struct{}, count)
+		for index, attachmentID := range parent.AttachmentIDs {
+			resourceID := parent.ResourceIDs[index]
+			if attachmentID == "" || resourceID == "" {
+				return fmt.Errorf("provider attachment evidence for %s is incomplete", parent.FilesystemID)
+			}
+			if _, duplicate := attachmentIDs[attachmentID]; duplicate {
+				return fmt.Errorf("provider attachment evidence repeats attachment %s", attachmentID)
+			}
+			attachmentIDs[attachmentID] = struct{}{}
+			if _, duplicate := parentResources[resourceID]; duplicate {
+				return fmt.Errorf("provider attachment evidence repeats resource %s for parent %s", resourceID, parent.FilesystemID)
+			}
+			parentResources[resourceID] = struct{}{}
+			if _, planned := plannedResourceIDs[resourceID]; !planned {
+				return fmt.Errorf("provider attachment %s references foreign Instance %s", attachmentID, resourceID)
+			}
+			resourceIDs[resourceID] = struct{}{}
+			if parent.ResourceTypes[index] != fileapi.AttachmentResourceTypeInstanceServer.String() {
+				return fmt.Errorf("provider attachment %s has unsupported resource type %q", attachmentID, parent.ResourceTypes[index])
+			}
+			if parent.Zones[index] != expectedZone {
+				return fmt.Errorf("provider attachment %s is in zone %q instead of %q", attachmentID, parent.Zones[index], expectedZone)
+			}
+		}
+		totalAttachments += count
+	}
+	if len(resourceIDs) < 2 {
+		return fmt.Errorf("provider inventory spans %d planned Instances after cross-node mounts; expected at least 2", len(resourceIDs))
+	}
+	if requireEveryPlannedNode && len(resourceIDs) != len(plannedResourceIDs) {
+		return fmt.Errorf("provider inventory spans %d of %d planned Instances", len(resourceIDs), len(plannedResourceIDs))
+	}
+	if totalAttachments > int(parentCount)*len(plannedResourceIDs) {
+		return fmt.Errorf("provider inventory contains %d attachments for %d parents and %d planned nodes", totalAttachments, parentCount, len(plannedResourceIDs))
+	}
+	return nil
 }
 
 func (backend *scalewayBackend) providerGrowthScenario(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, inventory e2ecleanup.Inventory, evidenceDirectory string) (e2erunner.ScenarioResult, error) {
@@ -100,7 +298,7 @@ func (backend *scalewayBackend) providerGrowthScenario(ctx context.Context, requ
 		return e2erunner.ScenarioResult{}, fmt.Errorf("read parent before growth: %w", err)
 	}
 	newSize := uint64(before.Size) + fileStorageSizeStep
-	if newSize > 10_000_000_000_000 {
+	if newSize > 50_000_000_000_000 {
 		return e2erunner.ScenarioResult{}, fmt.Errorf("parent growth would exceed the File Storage maximum")
 	}
 	if _, err := backend.file.UpdateFileSystem(&fileapi.UpdateFileSystemRequest{Region: region, FilesystemID: filesystemID, Size: &newSize}, scw.WithContext(ctx)); err != nil {

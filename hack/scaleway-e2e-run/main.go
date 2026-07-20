@@ -57,9 +57,10 @@ func main() {
 	if confirmedRunID != plan.RunID {
 		fail(fmt.Errorf("--confirm-run-id must equal the complete planned run ID"))
 	}
-	if execute {
+	if execute && plan.Profile == e2eplan.ProfileReleaseCandidate {
 		// Fail before constructing the credentialed backend while the checked-in
-		// scenario matrix still contains smoke-only probes.
+		// release matrix still contains smoke-only probes. The base profile has a
+		// separate non-qualifying evidence contract.
 		if err := e2erunner.RequireReleaseQualificationReady(); err != nil {
 			fail(err)
 		}
@@ -99,11 +100,18 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	encoded, err := e2erunner.EncodeEvidence(evidence)
+	var encoded []byte
+	var output string
+	if plan.Profile == e2eplan.ProfileBase {
+		encoded, err = e2erunner.EncodeSmokeEvidence(evidence)
+		output = filepath.Join(request.Plan.EvidenceDirectory, "kapsule-smoke-evidence-"+request.Plan.RunID+".json")
+	} else {
+		encoded, err = e2erunner.EncodeEvidence(evidence)
+		output = filepath.Join(request.Plan.EvidenceDirectory, "kapsule-evidence-"+request.Plan.RunID+".json")
+	}
 	if err != nil {
 		fail(err)
 	}
-	output := filepath.Join(request.Plan.EvidenceDirectory, "kapsule-evidence-"+request.Plan.RunID+".json")
 	if err := writeExactFile(output, append(encoded, '\n'), 0o600); err != nil {
 		fail(err)
 	}

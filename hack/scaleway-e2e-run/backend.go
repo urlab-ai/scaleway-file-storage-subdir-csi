@@ -38,7 +38,6 @@ const (
 type scalewayBackend struct {
 	request       e2erunner.Request
 	plan          e2eplan.Plan
-	client        *scw.Client
 	kubernetes    *k8sapi.API
 	file          *fileapi.API
 	instance      *instanceapi.API
@@ -48,13 +47,9 @@ type scalewayBackend struct {
 }
 
 func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scalewayBackend, error) {
-	client, err := scw.NewClient(scw.WithEnv())
+	client, err := newRegionalScalewayClientFromEnvironment(plan)
 	if err != nil {
-		return nil, fmt.Errorf("construct Scaleway client from environment: %w", err)
-	}
-	project, present := client.GetDefaultProjectID()
-	if !present || project != plan.ProjectID {
-		return nil, fmt.Errorf("SCW_DEFAULT_PROJECT_ID must equal the exact planned Project")
+		return nil, err
 	}
 	working, err := os.Getwd()
 	if err != nil {
@@ -66,12 +61,46 @@ func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scaleway
 		return nil, fmt.Errorf("checked-in Kapsule scenario runner is unavailable or not executable")
 	}
 	return &scalewayBackend{
-		request: request, plan: plan, client: client,
+		request: request, plan: plan,
 		kubernetes: k8sapi.NewAPI(client), file: fileapi.NewAPI(client), instance: instanceapi.NewAPI(client),
 		inventoryPath: plan.CleanupInventoryPath,
 		kubeconfig:    filepath.Join(filepath.Dir(plan.CleanupInventoryPath), ".kubeconfig-"+plan.RunID),
 		scenarioTool:  scenarioTool,
 	}, nil
+}
+
+// newRegionalScalewayClientFromEnvironment deliberately copies only
+// credentials and the closed Project/region scope from the environment client.
+// In particular it never copies SCW_DEFAULT_ZONE: the pinned File Storage SDK
+// fills an omitted attachment-list zone from that client default, which would
+// turn the required regional cleanup inventory into a one-zone view.
+func newRegionalScalewayClientFromEnvironment(plan e2eplan.Plan) (*scw.Client, error) {
+	environmentClient, err := scw.NewClient(scw.WithEnv())
+	if err != nil {
+		return nil, fmt.Errorf("load Scaleway authority from environment")
+	}
+	project, present := environmentClient.GetDefaultProjectID()
+	if !present || project != plan.ProjectID {
+		return nil, fmt.Errorf("SCW_DEFAULT_PROJECT_ID must equal the exact planned Project")
+	}
+	accessKey, accessPresent := environmentClient.GetAccessKey()
+	secretKey, secretPresent := environmentClient.GetSecretKey()
+	if !accessPresent || !secretPresent {
+		return nil, fmt.Errorf("SCW_ACCESS_KEY and SCW_SECRET_KEY are required for approved live execution")
+	}
+	client, err := scw.NewClient(
+		scw.WithAuth(accessKey, secretKey),
+		scw.WithDefaultProjectID(plan.ProjectID),
+		scw.WithDefaultRegion(scw.Region(plan.Region)),
+		scw.WithUserAgent("scaleway-sfs-subdir-csi-e2e/1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("construct zone-free regional Scaleway client")
+	}
+	if _, hasZone := client.GetDefaultZone(); hasZone {
+		return nil, fmt.Errorf("regional Scaleway client unexpectedly has a default zone")
+	}
+	return client, nil
 }
 
 func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan) error {
@@ -316,12 +345,28 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 	arguments := []string{"--kubeconfig=" + backend.kubeconfig, "--chart=" + request.ChartPackage,
 		"--values=" + request.ReleaseValues, "--namespace=" + request.DriverNamespace, "--release=" + request.HelmRelease,
 		"--admin=" + request.AdminBinary, "--workload-image=" + request.WorkloadImage,
+		"--profile=" + plan.Profile,
 		"--project-id=" + plan.ProjectID, "--region=" + plan.Region, "--run-id=" + plan.RunID,
 		"--cluster-id=" + resourceID(inventory, e2ecleanup.ResourceKindCluster, 0),
 		"--parent-a=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 0), "--parent-b=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
 		"--evidence-dir=" + evidenceDirectory}
 	if request.PreviousChart != "" {
 		arguments = append(arguments, "--previous-chart="+request.PreviousChart, "--previous-values="+request.PreviousValues)
+	}
+	if plan.Profile == e2eplan.ProfileBase {
+		smoke, err := backend.runScenarioPhase(ctx, evidenceDirectory, "run-smoke", arguments)
+		if err != nil {
+			return nil, err
+		}
+		attachment, err := backend.providerAttachmentScenario(ctx, request, inventory, evidenceDirectory, "provider-attachment-inventory")
+		if err != nil {
+			return nil, err
+		}
+		results := append(smoke, attachment)
+		if err := e2erunner.ValidateSmokeScenarioResults(results); err != nil {
+			return nil, err
+		}
+		return results, nil
 	}
 	pre, err := backend.runScenarioPhase(ctx, evidenceDirectory, "run-pre", arguments)
 	if err != nil {

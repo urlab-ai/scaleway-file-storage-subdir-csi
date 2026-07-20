@@ -1,7 +1,8 @@
 # Operations Guide
 
-This repository contains the frozen public identities for the
-`v0.1.0-rc.1` candidate, but it is not yet a qualified production release. The
+This repository contains frozen public identities. The `v0.1.0-rc.1` candidate
+is superseded and must not be promoted; the next candidate will be
+`v0.1.0-rc.2`, but it is not yet a qualified production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint
@@ -101,13 +102,14 @@ ID, run-containing DNS prefix, absolute evidence directory, cluster
 create/reuse choice, fresh two-or-three-node run-owned pool, two parents,
 reviewed aggregate hourly cost, Git/chart identity, and immutable driver and
 sidecar digests. It also carries a canonical provider review no older than 24
-hours: documented product status and source, explicit Public Beta acceptance,
-remaining File Storage quota and source, and the pricing source used for the
-aggregate cost. Live regional access, candidate allowlist membership and
-positive `MaxFileSystems` are still re-read before mutation. The
-release-candidate profile also accounts for one standalone
-run-owned disposable Instance of the selected node commercial type. Output
-always says that mutation is not
+hours: documented GA product status and source, remaining File Storage quota
+and source, and the pricing source used for the aggregate cost. The legacy
+`publicBetaAccepted` field must be `false`. Live regional access, candidate
+allowlist membership and positive `MaxFileSystems` are still re-read before
+mutation. The base profile requires two product-minimum 25 GB parents. The
+release-candidate profile uses 100 GB increments and also accounts for one
+standalone run-owned disposable Instance of the selected node commercial type.
+Output always says that mutation is not
 authorized and that immediate approval is still required. Live product, quota,
 availability, attach-limit, commercial-type, artifact, and price review remains
 mandatory immediately before execution; API-backed facts are read live and the
@@ -125,13 +127,16 @@ go run ./hack/scaleway-e2e-run \
   --confirm-run-id=11111111-1111-4111-8111-111111111111
 ```
 
-The current development snapshot intentionally rejects this `--execute` form
-before credentials, live reads, or resource creation because its closed
-smoke-only scenario list is not empty. This is a safety interlock, not a test
-skip. Keep using the dry-run plan for review; do not remove a blocker until the
-corresponding scenario emits and validates the full structured evidence in the
-specification. `--cleanup-only` remains supported for a retained previously
-approved run.
+For a `base` request, this command executes only the fixed non-qualifying smoke:
+ten logical PVCs, cross-node RWX, isolation and archive, controller replacement,
+provider attachment inventory bounded to the two parents and two nodes,
+structured safe uninstall, and exact cleanup.
+Its output is named `kapsule-smoke-evidence-<run-id>.json`, contains
+`releaseQualified=false`, and cannot be used by release qualification. A
+`release-candidate` request remains rejected before credentials, live reads, or
+resource creation while its production scenario blocker list is non-empty.
+This is a safety interlock, not a test skip. `--cleanup-only` remains supported
+for a retained previously approved run.
 
 Dry-run is the default and never loads credentials. The live form creates only
 the request's tagged resources, fsyncs every exact ID to the cleanup ledger,

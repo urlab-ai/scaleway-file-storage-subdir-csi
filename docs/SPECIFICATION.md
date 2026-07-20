@@ -147,13 +147,15 @@ The public artifact coordinates are:
 Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
 with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
 `vendor_version`, chart `version`, and chart `appVersion` omit the leading `v`.
-The first frozen candidate is `v0.1.0-rc.1`. It is not a production support
-claim until the exact candidate passes every Linux, kind, CSI, Helm, and real
-Kapsule qualification gate. Supported Kubernetes and Kapsule versions remain
-limited to the exact versions retained in that qualification evidence.
-`DEV1-M` is the sole proposed commercial type for this first qualification; it
-does not enter the supported allowlist unless that exact run and its cleanup
-evidence pass.
+The first frozen candidate, `v0.1.0-rc.1`, is superseded by the provider and
+smoke-runner corrections on `main` and must not be promoted. The next candidate
+is `v0.1.0-rc.2`. It is not a production support claim until the exact candidate
+passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
+Supported Kubernetes and Kapsule versions remain limited to the exact versions
+retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
+commercial type for the first controlled run because it is the lowest-priced
+currently documented type with two File Storage slots; it does not enter the
+supported allowlist unless that exact run and its cleanup evidence pass.
 
 The v1 controller and node images support Linux `amd64` and Linux `arm64`.
 Release CI must compile both architectures, and the real-provider support matrix
@@ -1003,8 +1005,9 @@ Mount contract:
 Release-time compatibility contract:
 
 - File Storage is limited to regions and Instance types that the current
-  Scaleway API and documentation qualify. As of this specification, the public
-  documentation identifies `fr-par` and reports File Storage as Public Beta;
+  Scaleway API and documentation qualify. As of 2026-07-20, the public
+  documentation identifies the PAR region and reports File Storage as General
+  Availability;
 - startup must verify `ServerType.Capabilities.MaxFileSystems > 0` for every
   eligible node and must not rely only on a hardcoded family list;
 - every release must embed the exact allowlist of Scaleway commercial types
@@ -1026,11 +1029,12 @@ Release-time compatibility contract:
 - every release must re-check product maturity, region availability, quotas,
   attach limits, cluster tag behavior, and the SDK attachment states.
 
-A production release must either target a GA Scaleway File Storage offer or
-document an explicit operator acceptance gate for beta/preview status, including
-support, SLA, backup, rollback, and fallback implications. Provider facts that
-cannot be confirmed by public documentation must be proven by the real Kapsule
-E2E suite before release; the driver must fail closed rather than infer them.
+A production release must target the GA Scaleway File Storage offer. Supporting
+a future beta/preview region or variant requires a deliberate specification and
+support-policy change; an operator acknowledgement alone is insufficient.
+Provider facts that cannot be confirmed by public documentation must be proven
+by the real Kapsule E2E suite before release; the driver must fail closed rather
+than infer them.
 The installation preflight and README must verify the cluster-level
 `scw-filestorage-csi` tag through the Kapsule API/CLI before Helm installation;
 the runtime driver does not gain broader Kapsule IAM solely to repeat that
@@ -6367,6 +6371,34 @@ Provide e2e scripts that can run against a real Scaleway project.
 The e2e suite must be explicit, destructive only inside tagged test resources,
 and easy to clean up.
 
+The `base` profile is the first controlled real-provider smoke and is not
+release qualification. It uses one run-owned ephemeral Kapsule cluster,
+exactly two fresh nodes, two run-owned 25 GB parents, and the exact candidate
+artifacts. Its closed scenario set must:
+
+1. pass artifact and install preflight;
+2. prove a real `virtiofs` mount;
+3. prove one PVC is readable and writable from Pods on two distinct nodes;
+4. bind exactly ten logical PVCs, write one unique marker through every logical
+   mount, and fail if any new mount exposes another marker;
+5. delete one of those PVCs with `archive`, observe the matching durable
+   allocation in `Archived` with archive completion evidence, and re-read an
+   untouched sibling marker;
+6. force replacement of the singleton controller Pod, create another PVC, and
+   re-read the existing cross-node volume;
+7. retain provider attachment inventory for only the two planned parent IDs,
+   require both parents to be `available`, require every attachment to be an
+   `instance_server` in the planned zone, reject duplicate parent/Instance
+   pairs, prove the cross-node mount spans exactly the two planned nodes, and
+   bound physical attachments to `parents * nodes`;
+8. remove workloads, run the complete structured safe-uninstall procedure, and
+   delete every run-owned resource by exact retained ID.
+
+Base evidence must contain `profile = base` and `releaseQualified = false`, use
+a distinct smoke-evidence filename, and be rejected by every release
+qualification decoder. Passing it authorizes only the next engineering step;
+it does not satisfy the production matrix below.
+
 Required e2e scenario:
 
 1. create or reuse a Kapsule cluster in `fr-par`;
@@ -6560,10 +6592,10 @@ release values, checksum manifest, native `csi-admin`, and commercial allowlist.
 Because the pinned APIs do not expose one stable endpoint for product maturity,
 remaining File Storage quota, and pricing, the closed request also carries a
 canonical UTC provider-review timestamp no older than 24 hours, the documented
-product status and source, explicit Public Beta acceptance when applicable, a
-positive remaining File Storage quota sufficient for both parents and its
-source, and the pricing source used for the aggregate cost. This operator
-review is not a substitute for live API checks: the executor still proves
+GA product status and source, a positive remaining File Storage quota sufficient
+for both parents and its source, and the pricing source used for the aggregate
+cost. The legacy closed-schema `publicBetaAccepted` field must be `false`. This
+operator review is not a substitute for live API checks: the executor still proves
 regional File Storage access, the candidate commercial allowlist, current
 Instance-type availability, and live `MaxFileSystems` sufficient for every
 planned parent before mutation.
@@ -6571,10 +6603,13 @@ It chooses
 either a new ephemeral cluster or one exact reused cluster ID, but it always
 creates a fresh run-owned node pool of two or three nodes. Reusing or modifying
 a pre-existing node pool is forbidden. Both profiles plan exactly two
-run-owned parents. The release-candidate profile additionally plans exactly one
-standalone run-owned disposable Instance of the same explicitly selected
-commercial type, reused serially across its recovery scenarios so it cannot
-disappear from cost or cleanup accounting.
+run-owned parents. The base profile requires the current product-minimum 25 GB
+size for each parent. The release-candidate profile requires 100 GB increments
+from 100 GB through 49.9 TB so one 100 GB growth step remains below the 50 TB
+per-filesystem maximum; it additionally plans exactly one standalone run-owned
+disposable Instance of the same explicitly selected commercial type, reused
+serially across its recovery scenarios so it cannot disappear from cost or
+cleanup accounting.
 
 `hack/scaleway-e2e-plan` is the repository's closed-schema, bounded-input
 preflight renderer. Its canonical output always has `dryRun = true`,
@@ -6590,13 +6625,17 @@ artifact validation and verifies that the operator product, quota, and pricing
 review is explicit and no older than 24 hours. A previously rendered plan or
 approval does not authorize a later run.
 
-The executor maintains an explicit closed list of smoke-only scenarios. While
-that list is non-empty, `--execute` fails before credentials, live reads, or
-provider mutation, and no scenario log or zero exit status can be encoded as
-release qualification. A scenario leaves that list only after its structured
-evidence proves the full normative invariant. Before a previous public release
-exists, N/N-1 is explicitly not qualifying; it is never reported as a
-successful upgrade merely because no previous chart was supplied.
+The executor has two non-interchangeable evidence paths. The base profile may
+execute only the fixed smoke matrix defined in section 12.6 and emits explicitly
+non-qualifying evidence after complete cleanup. The release-candidate profile
+maintains an explicit closed list of smoke-only production scenarios. While
+that list is non-empty, release-candidate `--execute` fails before credentials,
+live reads, or provider mutation, and no scenario log, base evidence, or zero
+exit status can be encoded as release qualification. A production scenario
+leaves that list only after its structured evidence proves the full normative
+invariant. Before a previous public release exists, N/N-1 is explicitly not
+qualifying; it is never reported as a successful upgrade merely because no
+previous chart was supplied.
 
 Before the first provider mutation the executor fsyncs a provisioning-phase
 inventory. Provisioning is sequential. Immediately before each provider
@@ -7017,9 +7056,11 @@ Required:
 - fake CSI sanity tests;
 - Helm template tests for the critical production defaults;
 - public artifact identity decided, even if the release is marked preview;
-- one manual real Scaleway smoke test before publishing the preview:
-  install chart, create one PVC, write/read from one pod, delete with archive,
-  and clean up all tagged resources.
+- one controlled real Scaleway base smoke before publishing the preview using
+  the closed section 12.6 contract: two nodes, two 25 GB parents, ten logical
+  PVCs, cross-node RWX, isolation, archive, controller replacement, provider
+  attachment inventory, structured safe uninstall, and exact cleanup of every
+  tagged run-owned resource.
 
 ### 14.2 v0.2.0
 
@@ -7144,8 +7185,7 @@ Required:
   mounted on one node through exactly one parent attachment;
 - stable driver name;
 - stable Helm values contract;
-- provider maturity gate passed, or explicit documented operator acceptance for
-  beta/preview Scaleway File Storage status.
+- GA provider maturity gate passed for the exact supported region.
 
 ## 15. Acceptance Criteria
 

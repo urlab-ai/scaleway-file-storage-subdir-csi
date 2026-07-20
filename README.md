@@ -29,12 +29,14 @@ The public source, module, CSI, and artifact identities are frozen as:
 - `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
 - `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`.
 
-The first candidate is `v0.1.0-rc.1`. These stable coordinates do not make it a
-production release: publication remains blocked until the exact candidate has
-concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
-`DEV1-M` is the sole proposed commercial type for that first qualification run;
-it is not supported or advertised until the retained real-provider evidence is
-complete.
+The first frozen candidate, `v0.1.0-rc.1`, is superseded by the provider and
+smoke-runner corrections on `main` and must not be promoted. The next candidate
+will be `v0.1.0-rc.2`; publication remains blocked until that exact candidate
+has concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
+`POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
+run because it is the lowest-priced currently documented type with two File
+Storage slots. It is not supported or advertised until retained real-provider
+evidence is complete.
 
 `TEST-TYPE-1` in the development values is a synthetic validation fixture, not
 a supported Scaleway Instance type. A release must replace it with the sorted
@@ -179,8 +181,12 @@ operations guide](docs/OPERATIONS.md#real-e2e-planning-execution-and-cleanup).
 Cleanup refuses a missing retained ledger and accepts Kubernetes/Helm cleanup
 preconditions only from a completed structured `csi-admin` safe-uninstall
 audit. It never converts an unavailable API or absent local file into success.
-The current development snapshot also refuses `--execute` before any live call
-because several checked-in scenario probes are explicitly marked smoke-only.
-`--cleanup-only` remains available for an already approved retained run. A
-future release may remove a scenario from that blocker list only with the
-structured assertions required by the specification.
+The `base` profile can execute the fixed, explicitly non-qualifying first smoke
+matrix: two nodes, two product-minimum 25 GB parents, ten logical PVCs,
+cross-node RWX, isolation and archive, controller replacement, provider
+attachment inventory bounded to the two parents and two nodes, safe uninstall,
+and exact cleanup. Its evidence contains
+`releaseQualified=false` and is rejected by release promotion. The
+`release-candidate` profile still refuses `--execute` before any live call while
+its deeper scenario list contains smoke-only probes. `--cleanup-only` remains
+available for an already approved retained run.

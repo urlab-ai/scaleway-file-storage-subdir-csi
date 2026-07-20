@@ -50,10 +50,14 @@ func TestValidateScenarioSubsetRejectsDuplicateAndPath(t *testing.T) {
 		t.Fatal("ValidateScenarioSubset(path traversal) error = nil")
 	}
 }
-func (backend *fakeBackend) RunScenarios(context.Context, Request, e2eplan.Plan, e2ecleanup.Inventory) ([]ScenarioResult, error) {
+func (backend *fakeBackend) RunScenarios(_ context.Context, _ Request, plan e2eplan.Plan, _ e2ecleanup.Inventory) ([]ScenarioResult, error) {
 	backend.scenarios++
-	result := make([]ScenarioResult, 0, len(RequiredScenarios))
-	for _, name := range RequiredScenarios {
+	required := RequiredScenarios
+	if plan.Profile == e2eplan.ProfileBase {
+		required = SmokeScenarios
+	}
+	result := make([]ScenarioResult, 0, len(required))
+	for _, name := range required {
 		result = append(result, ScenarioResult{Name: name, Succeeded: true, EvidenceFile: name + ".json", EvidenceSHA: "sha256:" + strings.Repeat("a", 64)})
 	}
 	return result, nil
@@ -85,6 +89,8 @@ func TestExecuteIsDryRunByDefaultAndRequiresExactConfirmation(t *testing.T) {
 
 func TestExecuteRefusesSmokeOnlyScenarioMatrixBeforeLiveCalls(t *testing.T) {
 	request := testRequest()
+	request.Plan.Profile = e2eplan.ProfileReleaseCandidate
+	request.Plan.Parents.SizeBytes = 100_000_000_000
 	backend := &fakeBackend{inventory: testInventory(request)}
 	times := []time.Time{time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 1, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 5, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 6, 0, 0, time.UTC)}
 	index := 0
@@ -95,6 +101,32 @@ func TestExecuteRefusesSmokeOnlyScenarioMatrixBeforeLiveCalls(t *testing.T) {
 	}
 }
 
+func TestExecuteRunsBaseSmokeWithoutClaimingReleaseQualification(t *testing.T) {
+	request := testRequest()
+	backend := &fakeBackend{inventory: testInventory(request)}
+	times := []time.Time{
+		time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 15, 12, 1, 0, 0, time.UTC),
+		time.Date(2026, 7, 15, 12, 5, 0, 0, time.UTC),
+		time.Date(2026, 7, 15, 12, 6, 0, 0, time.UTC),
+	}
+	index := 0
+	clock := func() time.Time { value := times[index]; index++; return value }
+	evidence, err := Execute(context.Background(), request, true, request.Plan.RunID, backend, clock)
+	if err != nil {
+		t.Fatalf("Execute(base smoke) error = %v", err)
+	}
+	if !evidence.Succeeded || evidence.ReleaseQualified || evidence.Profile != e2eplan.ProfileBase || backend.preflight != 1 || backend.provision != 1 || backend.scenarios != 1 || backend.cleanup != 1 {
+		t.Fatalf("base smoke evidence/backend = %#v/%#v", evidence, backend)
+	}
+	if _, err := EncodeSmokeEvidence(evidence); err != nil {
+		t.Fatalf("EncodeSmokeEvidence() error = %v", err)
+	}
+	if _, err := EncodeEvidence(evidence); err == nil {
+		t.Fatal("EncodeEvidence(base smoke) error = nil")
+	}
+}
+
 func TestReleaseQualificationReadinessNamesSmokeOnlyScenarios(t *testing.T) {
 	err := RequireReleaseQualificationReady()
 	if err == nil || !strings.Contains(err.Error(), "checkpoint-and-restore") || !strings.Contains(err.Error(), "safe-uninstall") {
@@ -102,18 +134,26 @@ func TestReleaseQualificationReadinessNamesSmokeOnlyScenarios(t *testing.T) {
 	}
 }
 
-func TestSuccessfulInventoryRequiresCompleteReleaseCandidateProfile(t *testing.T) {
+func TestSuccessfulInventoryRequiresExactProfileResources(t *testing.T) {
 	request := testRequest()
 	base := testInventory(request)
 	base.Phase = e2ecleanup.PhaseComplete
 	for index := range base.Resources {
 		base.Resources[index].State = e2ecleanup.ResourceStateAbsent
 	}
-	if err := validateSuccessfulInventory(base); err == nil {
-		t.Fatal("validateSuccessfulInventory(base profile) error = nil")
+	if err := validateSuccessfulInventory(base, e2eplan.ProfileBase); err != nil {
+		t.Fatalf("validateSuccessfulInventory(base profile) error = %v", err)
+	}
+	reusedBase := base
+	reusedBase.Resources = append([]e2ecleanup.Resource(nil), base.Resources...)
+	reusedBase.Resources[0].CreatedByRun = false
+	reusedBase.Resources[0].State = e2ecleanup.ResourceStatePresent
+	if err := validateSuccessfulInventory(reusedBase, e2eplan.ProfileBase); err == nil {
+		t.Fatal("validateSuccessfulInventory(base profile with reused cluster) error = nil")
 	}
 
 	request.Plan.Profile = e2eplan.ProfileReleaseCandidate
+	request.Plan.Parents.SizeBytes = 100_000_000_000
 	complete := testInventory(request)
 	complete.Phase = e2ecleanup.PhaseComplete
 	complete.Resources = append(complete.Resources, e2ecleanup.Resource{
@@ -124,13 +164,13 @@ func TestSuccessfulInventoryRequiresCompleteReleaseCandidateProfile(t *testing.T
 	for index := range complete.Resources {
 		complete.Resources[index].State = e2ecleanup.ResourceStateAbsent
 	}
-	if err := validateSuccessfulInventory(complete); err != nil {
+	if err := validateSuccessfulInventory(complete, e2eplan.ProfileReleaseCandidate); err != nil {
 		t.Fatalf("validateSuccessfulInventory(complete RC) error = %v", err)
 	}
 
 	partial := complete
 	partial.Resources = partial.Resources[:4]
-	if err := validateSuccessfulInventory(partial); err == nil {
+	if err := validateSuccessfulInventory(partial, e2eplan.ProfileReleaseCandidate); err == nil {
 		t.Fatal("validateSuccessfulInventory(partial RC) error = nil")
 	}
 }
@@ -155,11 +195,11 @@ func testRequest() Request {
 		Plan: e2eplan.Request{SchemaVersion: e2eplan.SchemaVersionV1, Profile: e2eplan.ProfileBase, RunID: runID,
 			ProjectID: "22222222-2222-4222-8222-222222222222", Region: "fr-par", ResourcePrefix: "e2e-" + runID,
 			EvidenceDirectory: "/tmp/evidence", Cluster: e2eplan.ClusterRequest{Disposition: e2eplan.ClusterCreate},
-			NodePool: e2eplan.NodePoolRequest{Count: 2, CommercialType: "TYPE-A"}, Parents: e2eplan.ParentRequest{Count: 2, SizeBytes: 100_000_000_000},
+			NodePool: e2eplan.NodePoolRequest{Count: 2, CommercialType: "TYPE-A"}, Parents: e2eplan.ParentRequest{Count: 2, SizeBytes: 25_000_000_000},
 			EstimatedHourlyCostEUR: "1.0", CostSource: "test-price-2026-07-15",
 			ProviderReview: e2eplan.ProviderReview{
-				ObservedAt: "2026-07-15T11:00:00Z", ProductStatus: "public-beta",
-				ProductStatusSource: "test product status", PublicBetaAccepted: true,
+				ObservedAt: "2026-07-15T11:00:00Z", ProductStatus: "ga",
+				ProductStatusSource: "test product status", PublicBetaAccepted: false,
 				FileStorageQuotaRemaining: 2, QuotaSource: "test quota",
 			},
 			Artifacts: e2eplan.Artifacts{GitCommit: strings.Repeat("a", 40), CandidateDigest: digest, ChartDigest: digest, Images: testImages(digest)}},

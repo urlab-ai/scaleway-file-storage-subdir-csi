@@ -26,7 +26,10 @@ const (
 	// ClusterCreate creates a run-owned ephemeral Kapsule cluster.
 	ClusterCreate = "create"
 	// ClusterReuse uses one explicitly identified pre-existing test cluster.
-	ClusterReuse = "reuse"
+	ClusterReuse                = "reuse"
+	fileStorageMinimumSizeBytes = uint64(25_000_000_000)
+	fileStorageMaximumSizeBytes = uint64(50_000_000_000_000)
+	fileStorageGrowthStepBytes  = uint64(100_000_000_000)
 )
 
 var (
@@ -77,7 +80,8 @@ type NodePoolRequest struct {
 }
 
 // ParentRequest fixes the two run-owned File Storage resources required by the
-// complete scenario. Product-minimum validation remains a live provider gate.
+// real-provider scenarios. Base smoke uses the product minimum; release
+// qualification reserves one supported growth step.
 type ParentRequest struct {
 	Count     uint32 `json:"count"`
 	SizeBytes uint64 `json:"sizeBytes"`
@@ -88,9 +92,11 @@ type ParentRequest struct {
 // preflight. Live region, File Storage, and attachment-capability reads remain
 // mandatory in addition to this attestation.
 type ProviderReview struct {
-	ObservedAt                string `json:"observedAt"`
-	ProductStatus             string `json:"productStatus"`
-	ProductStatusSource       string `json:"productStatusSource"`
+	ObservedAt          string `json:"observedAt"`
+	ProductStatus       string `json:"productStatus"`
+	ProductStatusSource string `json:"productStatusSource"`
+	// PublicBetaAccepted is retained in the v1 request schema for strict decode
+	// compatibility. File Storage is GA and new requests must set it to false.
 	PublicBetaAccepted        bool   `json:"publicBetaAccepted"`
 	FileStorageQuotaRemaining uint64 `json:"fileStorageQuotaRemaining"`
 	QuotaSource               string `json:"quotaSource"`
@@ -185,8 +191,7 @@ func Build(request Request) (Plan, error) {
 	clusterOwned := request.Cluster.Disposition == ClusterCreate
 	inventoryPath := filepath.Join(request.EvidenceDirectory, "scaleway-e2e-inventory-"+request.RunID+".json")
 	operations := []string{
-		"resize one run-owned parent filesystem",
-		"replace one run-owned node during compatibility revalidation",
+		"force-delete one run-owned driver controller Pod and wait for replacement",
 		"delete the exact run-owned node pool during verified cleanup",
 		"detach exact run-owned parent IDs during verified cleanup",
 		"delete exact run-owned parent IDs after verified uninstall",
@@ -196,6 +201,8 @@ func Build(request Request) (Plan, error) {
 	}
 	if request.Profile == ProfileReleaseCandidate {
 		operations = append(operations,
+			"resize one run-owned parent filesystem",
+			"replace one run-owned node during compatibility revalidation",
 			"stop or delete only disposable run-owned Instances for recovery fencing",
 			"inject controller interruption around the run-owned bootstrap claim",
 		)
@@ -284,14 +291,26 @@ func (request Request) Validate() error {
 			return fmt.Errorf("reused cluster exact ID: %w", err)
 		}
 	}
-	if request.NodePool.Count < 2 || request.NodePool.Count > 3 {
-		return fmt.Errorf("E2E node count must be 2 or 3")
+	if request.Profile == ProfileBase && request.Cluster.Disposition != ClusterCreate {
+		return fmt.Errorf("base smoke requires a run-owned ephemeral cluster")
+	}
+	if request.Profile == ProfileBase && request.NodePool.Count != 2 {
+		return fmt.Errorf("base smoke requires exactly two fresh nodes")
+	}
+	if request.Profile == ProfileReleaseCandidate && (request.NodePool.Count < 2 || request.NodePool.Count > 3) {
+		return fmt.Errorf("release qualification node count must be 2 or 3")
 	}
 	if err := releasecompat.ValidateCommercialTypes([]string{request.NodePool.CommercialType}); err != nil {
 		return fmt.Errorf("node commercial type: %w", err)
 	}
-	if request.Parents.Count != 2 || request.Parents.SizeBytes < 100_000_000_000 || request.Parents.SizeBytes > 9_900_000_000_000 || request.Parents.SizeBytes%100_000_000_000 != 0 {
-		return fmt.Errorf("the complete E2E scenario requires exactly two run-owned parents from 100 GB to 9.9 TB in 100 GB increments, leaving one growth step")
+	if request.Parents.Count != 2 {
+		return fmt.Errorf("real E2E requires exactly two run-owned parents")
+	}
+	if request.Profile == ProfileBase && request.Parents.SizeBytes != fileStorageMinimumSizeBytes {
+		return fmt.Errorf("base smoke requires two product-minimum 25 GB parents")
+	}
+	if request.Profile == ProfileReleaseCandidate && (request.Parents.SizeBytes < fileStorageGrowthStepBytes || request.Parents.SizeBytes > fileStorageMaximumSizeBytes-fileStorageGrowthStepBytes || request.Parents.SizeBytes%fileStorageGrowthStepBytes != 0) {
+		return fmt.Errorf("release qualification requires two parents from 100 GB to 49.9 TB in 100 GB increments, leaving one growth step")
 	}
 	if err := validateCost(request.EstimatedHourlyCostEUR); err != nil {
 		return err
@@ -322,11 +341,11 @@ func (review ProviderReview) validate(requiredParents uint32) error {
 	if err != nil || observed.Location() != time.UTC || observed.Format(time.RFC3339Nano) != review.ObservedAt {
 		return fmt.Errorf("provider review observedAt must be a canonical UTC RFC3339 timestamp")
 	}
-	if review.ProductStatus != "ga" && review.ProductStatus != "public-beta" {
-		return fmt.Errorf("provider review product status must be ga or public-beta")
+	if review.ProductStatus != "ga" {
+		return fmt.Errorf("provider review product status must be ga")
 	}
-	if review.ProductStatus == "public-beta" && !review.PublicBetaAccepted {
-		return fmt.Errorf("provider review must explicitly accept Public Beta implications")
+	if review.PublicBetaAccepted {
+		return fmt.Errorf("publicBetaAccepted must be false for the GA File Storage offer")
 	}
 	if !boundedText(review.ProductStatusSource, 512) || !boundedText(review.QuotaSource, 512) {
 		return fmt.Errorf("provider review sources must be single-line UTF-8 containing 1 to 512 bytes")

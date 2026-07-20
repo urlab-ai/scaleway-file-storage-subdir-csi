@@ -39,6 +39,18 @@ var RequiredScenarios = []string{
 	"official-csi-coexistence",
 }
 
+// SmokeScenarios is the closed, deliberately non-qualifying base-profile
+// matrix used before the first preview. It proves the real provider data path
+// and exact cleanup without claiming the complete release contract.
+var SmokeScenarios = []string{
+	"artifact-and-install-preflight",
+	"virtiofs-mount-api",
+	"rwx-cross-node",
+	"ten-pvc-isolation-and-archive",
+	"controller-hard-failure",
+	"provider-attachment-inventory",
+}
+
 // nonQualifyingScenarios are retained smoke probes whose current implementation
 // does not yet prove the full production invariant named by the specification.
 // Keeping this closed list fail-closes both live execution and evidence
@@ -99,21 +111,24 @@ type ScenarioResult struct {
 	EvidenceSHA  string `json:"evidenceSha256"`
 }
 
-// Evidence is emitted only after cleanup has been re-observed. Succeeded is
-// true only when all fixed scenarios and cleanup are complete.
+// Evidence is emitted only after cleanup has been re-observed. Profile and
+// ReleaseQualified prevent a base smoke result from being consumed as release
+// qualification evidence.
 type Evidence struct {
-	SchemaVersion   string               `json:"schemaVersion"`
-	RunID           string               `json:"runId"`
-	ProjectID       string               `json:"projectId"`
-	Region          string               `json:"region"`
-	CommercialType  string               `json:"commercialType"`
-	StartedAt       string               `json:"startedAt"`
-	CompletedAt     string               `json:"completedAt"`
-	Scenarios       []ScenarioResult     `json:"scenarios"`
-	Cleanup         e2ecleanup.Plan      `json:"cleanup"`
-	FinalInventory  e2ecleanup.Inventory `json:"finalInventory"`
-	Succeeded       bool                 `json:"succeeded"`
-	ArtifactDigests e2eplan.Artifacts    `json:"artifactDigests"`
+	SchemaVersion    string               `json:"schemaVersion"`
+	Profile          string               `json:"profile"`
+	ReleaseQualified bool                 `json:"releaseQualified"`
+	RunID            string               `json:"runId"`
+	ProjectID        string               `json:"projectId"`
+	Region           string               `json:"region"`
+	CommercialType   string               `json:"commercialType"`
+	StartedAt        string               `json:"startedAt"`
+	CompletedAt      string               `json:"completedAt"`
+	Scenarios        []ScenarioResult     `json:"scenarios"`
+	Cleanup          e2ecleanup.Plan      `json:"cleanup"`
+	FinalInventory   e2ecleanup.Inventory `json:"finalInventory"`
+	Succeeded        bool                 `json:"succeeded"`
+	ArtifactDigests  e2eplan.Artifacts    `json:"artifactDigests"`
 }
 
 // Backend is the only mutating boundary. Implementations must durably record
@@ -141,16 +156,18 @@ func executeWithQualificationGate(ctx context.Context, request Request, execute 
 		return Evidence{}, err
 	}
 	if !execute {
-		return Evidence{SchemaVersion: SchemaVersionV1, RunID: plan.RunID, ProjectID: plan.ProjectID, Region: plan.Region, CommercialType: plan.NodePool.CommercialType, ArtifactDigests: plan.Artifacts}, nil
+		return Evidence{SchemaVersion: SchemaVersionV1, Profile: plan.Profile, ReleaseQualified: false, RunID: plan.RunID, ProjectID: plan.ProjectID, Region: plan.Region, CommercialType: plan.NodePool.CommercialType, ArtifactDigests: plan.Artifacts}, nil
 	}
 	if confirmedRunID != plan.RunID {
 		return Evidence{}, fmt.Errorf("execution confirmation must equal the complete run ID")
 	}
-	if qualificationReady == nil {
-		return Evidence{}, fmt.Errorf("qualification readiness gate is nil")
-	}
-	if err := qualificationReady(); err != nil {
-		return Evidence{}, err
+	if plan.Profile == e2eplan.ProfileReleaseCandidate {
+		if qualificationReady == nil {
+			return Evidence{}, fmt.Errorf("qualification readiness gate is nil")
+		}
+		if err := qualificationReady(); err != nil {
+			return Evidence{}, err
+		}
 	}
 	if backend == nil || now == nil {
 		return Evidence{}, fmt.Errorf("real E2E execution backend or clock is nil")
@@ -189,9 +206,9 @@ func executeWithQualificationGate(ctx context.Context, request Request, execute 
 	}
 	scenarios, scenarioErr := backend.RunScenarios(ctx, request, plan, inventory)
 	if scenarioErr != nil {
-		return Evidence{}, fmt.Errorf("run exact qualification scenarios: %w", scenarioErr)
+		return Evidence{}, fmt.Errorf("run exact real E2E scenarios: %w", scenarioErr)
 	}
-	if err := ValidateScenarioResults(scenarios); err != nil {
+	if err := ValidateScenarioResultsForProfile(plan.Profile, scenarios); err != nil {
 		return Evidence{}, err
 	}
 	final, cleanupErr := backend.Cleanup(ctx, request, inventory)
@@ -207,12 +224,14 @@ func executeWithQualificationGate(ctx context.Context, request Request, execute 
 		return Evidence{}, fmt.Errorf("final cleanup inventory retains run-owned resources")
 	}
 	evidence = Evidence{
-		SchemaVersion: SchemaVersionV1, RunID: plan.RunID, ProjectID: plan.ProjectID, Region: plan.Region,
+		SchemaVersion: SchemaVersionV1, Profile: plan.Profile,
+		ReleaseQualified: plan.Profile == e2eplan.ProfileReleaseCandidate,
+		RunID:            plan.RunID, ProjectID: plan.ProjectID, Region: plan.Region,
 		CommercialType: plan.NodePool.CommercialType, StartedAt: started.Format(time.RFC3339Nano),
 		CompletedAt: now().UTC().Format(time.RFC3339Nano), Scenarios: slices.Clone(scenarios),
 		Cleanup: cleanupPlan, FinalInventory: final, Succeeded: true, ArtifactDigests: plan.Artifacts,
 	}
-	return evidence, evidence.Validate()
+	return evidence, validateEvidenceForProfile(evidence)
 }
 
 func (request Request) Validate() error {
@@ -262,7 +281,32 @@ func immutableImageReference(value string) bool {
 	return found && repository != "" && !strings.Contains(digest, "@") && validDigest(digest)
 }
 
+// Validate accepts release-candidate qualification evidence only. Smoke
+// evidence has a separate validator and encoder and is never promotion input.
 func (evidence Evidence) Validate() error {
+	if evidence.Profile != e2eplan.ProfileReleaseCandidate || !evidence.ReleaseQualified {
+		return fmt.Errorf("real E2E evidence is not release qualification")
+	}
+	return evidence.validate(e2eplan.ProfileReleaseCandidate)
+}
+
+// ValidateSmoke accepts only completed base-profile evidence that explicitly
+// disclaims release qualification.
+func (evidence Evidence) ValidateSmoke() error {
+	if evidence.Profile != e2eplan.ProfileBase || evidence.ReleaseQualified {
+		return fmt.Errorf("real E2E evidence is not base smoke evidence")
+	}
+	return evidence.validate(e2eplan.ProfileBase)
+}
+
+func validateEvidenceForProfile(evidence Evidence) error {
+	if evidence.Profile == e2eplan.ProfileBase {
+		return evidence.ValidateSmoke()
+	}
+	return evidence.Validate()
+}
+
+func (evidence Evidence) validate(profile string) error {
 	if evidence.SchemaVersion != SchemaVersionV1 || !evidence.Succeeded {
 		return fmt.Errorf("real E2E evidence is incomplete")
 	}
@@ -283,14 +327,14 @@ func (evidence Evidence) Validate() error {
 	if err != nil || completed.Before(started) {
 		return fmt.Errorf("real E2E evidence time range is invalid")
 	}
-	if err := ValidateScenarioResults(evidence.Scenarios); err != nil {
+	if err := ValidateScenarioResultsForProfile(profile, evidence.Scenarios); err != nil {
 		return err
 	}
 	if err := validateArtifactDigests(evidence.ArtifactDigests); err != nil {
-		return fmt.Errorf("validate qualified artifact identities: %w", err)
+		return fmt.Errorf("validate real E2E artifact identities: %w", err)
 	}
-	if err := validateSuccessfulInventory(evidence.FinalInventory); err != nil {
-		return fmt.Errorf("validate successful qualification inventory: %w", err)
+	if err := validateSuccessfulInventory(evidence.FinalInventory, profile); err != nil {
+		return fmt.Errorf("validate successful real E2E inventory: %w", err)
 	}
 	cleanup, err := e2ecleanup.Build(evidence.FinalInventory, completed)
 	if err != nil {
@@ -333,9 +377,9 @@ func validateArtifactDigests(artifacts e2eplan.Artifacts) error {
 	return nil
 }
 
-func validateSuccessfulInventory(inventory e2ecleanup.Inventory) error {
-	if inventory.Phase != e2ecleanup.PhaseComplete || inventory.Profile != e2eplan.ProfileReleaseCandidate {
-		return fmt.Errorf("successful evidence requires a complete release-candidate inventory")
+func validateSuccessfulInventory(inventory e2ecleanup.Inventory, profile string) error {
+	if inventory.Phase != e2ecleanup.PhaseComplete || inventory.Profile != profile {
+		return fmt.Errorf("successful evidence requires a complete matching-profile inventory")
 	}
 	counts := map[string]int{}
 	for _, resource := range inventory.Resources {
@@ -346,12 +390,23 @@ func validateSuccessfulInventory(inventory e2ecleanup.Inventory) error {
 			}
 			continue
 		}
+		if profile == e2eplan.ProfileBase {
+			return fmt.Errorf("base smoke evidence may contain only run-owned resources")
+		}
 		if resource.Kind != e2ecleanup.ResourceKindCluster || resource.State != e2ecleanup.ResourceStatePresent {
-			return fmt.Errorf("only one conclusively present reused cluster may survive qualification cleanup")
+			return fmt.Errorf("only one conclusively present reused cluster may survive real E2E cleanup")
 		}
 	}
-	if len(inventory.Resources) != 5 || counts[e2ecleanup.ResourceKindCluster] != 1 || counts[e2ecleanup.ResourceKindNodePool] != 1 ||
-		counts[e2ecleanup.ResourceKindParent] != 2 || counts[e2ecleanup.ResourceKindInstance] != 1 || len(counts) != 4 {
+	if counts[e2ecleanup.ResourceKindCluster] != 1 || counts[e2ecleanup.ResourceKindNodePool] != 1 || counts[e2ecleanup.ResourceKindParent] != 2 {
+		return fmt.Errorf("real E2E inventory does not contain the exact cluster, node pool, and two parents")
+	}
+	if profile == e2eplan.ProfileBase {
+		if len(inventory.Resources) != 4 || len(counts) != 3 {
+			return fmt.Errorf("base smoke inventory contains resources outside the exact cluster, node pool, and two parents")
+		}
+		return nil
+	}
+	if profile != e2eplan.ProfileReleaseCandidate || len(inventory.Resources) != 5 || counts[e2ecleanup.ResourceKindInstance] != 1 || len(counts) != 4 {
 		return fmt.Errorf("release-candidate inventory does not contain the exact cluster, node pool, two parents, and disposable Instance")
 	}
 	return nil
@@ -368,6 +423,14 @@ func lowerHex(value string) bool {
 
 func EncodeEvidence(evidence Evidence) ([]byte, error) {
 	if err := evidence.Validate(); err != nil {
+		return nil, err
+	}
+	return canonicaljson.Marshal(evidence)
+}
+
+// EncodeSmokeEvidence emits explicitly non-qualifying base smoke evidence.
+func EncodeSmokeEvidence(evidence Evidence) ([]byte, error) {
+	if err := evidence.ValidateSmoke(); err != nil {
 		return nil, err
 	}
 	return canonicaljson.Marshal(evidence)
@@ -400,33 +463,60 @@ func ValidateCleanupAudit(evidence Evidence, cleanup e2ecleanup.Inventory) error
 // backend is allowed to consume evidence paths or the orchestrator can report
 // success. It intentionally accepts basenames only.
 func ValidateScenarioResults(scenarios []ScenarioResult) error {
+	if err := validateScenarioSet(scenarios, RequiredScenarios); err != nil {
+		return err
+	}
+	return RequireReleaseQualificationReady()
+}
+
+// ValidateSmokeScenarioResults verifies the exact base-profile smoke matrix.
+func ValidateSmokeScenarioResults(scenarios []ScenarioResult) error {
+	return validateScenarioSet(scenarios, SmokeScenarios)
+}
+
+// ValidateScenarioResultsForProfile selects the closed matrix for one plan.
+func ValidateScenarioResultsForProfile(profile string, scenarios []ScenarioResult) error {
+	switch profile {
+	case e2eplan.ProfileBase:
+		return ValidateSmokeScenarioResults(scenarios)
+	case e2eplan.ProfileReleaseCandidate:
+		return ValidateScenarioResults(scenarios)
+	default:
+		return fmt.Errorf("real E2E profile %q is unsupported", profile)
+	}
+}
+
+func validateScenarioSet(scenarios []ScenarioResult, required []string) error {
 	if err := ValidateScenarioSubset(scenarios); err != nil {
 		return err
 	}
-	if len(scenarios) != len(RequiredScenarios) {
-		return fmt.Errorf("real E2E scenario count is %d, want %d", len(scenarios), len(RequiredScenarios))
+	if len(scenarios) != len(required) {
+		return fmt.Errorf("real E2E scenario count is %d, want %d", len(scenarios), len(required))
 	}
 	ordered := slices.Clone(scenarios)
 	slices.SortFunc(ordered, func(left, right ScenarioResult) int { return strings.Compare(left.Name, right.Name) })
-	want := slices.Clone(RequiredScenarios)
+	want := slices.Clone(required)
 	slices.Sort(want)
 	for index, scenario := range ordered {
-		if scenario.Name != want[index] || !scenario.Succeeded || !safeEvidenceName(scenario.EvidenceFile) || !validDigest(scenario.EvidenceSHA) {
-			return fmt.Errorf("real E2E scenario %q is incomplete", scenario.Name)
+		if scenario.Name != want[index] {
+			return fmt.Errorf("real E2E scenario %q is outside the required profile set", scenario.Name)
 		}
 	}
-	return RequireReleaseQualificationReady()
+	return nil
 }
 
 // ValidateScenarioSubset validates a non-empty unique subset emitted by one
 // runner phase. The complete-set check remains ValidateScenarioResults.
 func ValidateScenarioSubset(scenarios []ScenarioResult) error {
-	if len(scenarios) == 0 || len(scenarios) > len(RequiredScenarios) {
-		return fmt.Errorf("real E2E scenario subset count is invalid")
-	}
-	allowed := make(map[string]struct{}, len(RequiredScenarios))
+	allowed := make(map[string]struct{}, len(RequiredScenarios)+len(SmokeScenarios))
 	for _, name := range RequiredScenarios {
 		allowed[name] = struct{}{}
+	}
+	for _, name := range SmokeScenarios {
+		allowed[name] = struct{}{}
+	}
+	if len(scenarios) == 0 || len(scenarios) > len(allowed) {
+		return fmt.Errorf("real E2E scenario subset count is invalid")
 	}
 	seen := make(map[string]struct{}, len(scenarios))
 	for _, scenario := range scenarios {

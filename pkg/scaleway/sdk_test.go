@@ -6,11 +6,17 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	file "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
 	instance "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 )
+
+type timeoutNetworkError struct{}
+
+func (timeoutNetworkError) Error() string { return "transport timeout" }
+func (timeoutNetworkError) Timeout() bool { return true }
 
 func TestClassifySDKErrorKeepsConflictDistinctFromPrecondition(t *testing.T) {
 	conflict := classifySDKError(context.Background(), &scw.ResponseError{
@@ -29,6 +35,25 @@ func TestClassifySDKErrorKeepsConflictDistinctFromPrecondition(t *testing.T) {
 	})
 	if !errors.Is(precondition, ErrFailedPrecondition) || errors.Is(precondition, ErrConflict) {
 		t.Fatalf("classifySDKError(412) = %v, want only ErrFailedPrecondition", precondition)
+	}
+}
+
+func TestClassifySDKErrorUsesOperationContextForDeadlines(t *testing.T) {
+	transportTimeout := classifySDKError(context.Background(), timeoutNetworkError{})
+	if !errors.Is(transportTimeout, ErrUnavailable) || errors.Is(transportTimeout, ErrDeadlineExceeded) {
+		t.Fatalf("classifySDKError(active transport timeout) = %v, want only ErrUnavailable", transportTimeout)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := classifySDKError(canceled, timeoutNetworkError{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("classifySDKError(canceled context) = %v, want context.Canceled", err)
+	}
+
+	expired, cancelDeadline := context.WithTimeout(context.Background(), -time.Second)
+	defer cancelDeadline()
+	if err := classifySDKError(expired, timeoutNetworkError{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("classifySDKError(expired context) = %v, want context.DeadlineExceeded", err)
 	}
 }
 

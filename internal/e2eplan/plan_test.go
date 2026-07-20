@@ -20,13 +20,13 @@ func validRequest() Request {
 		EvidenceDirectory:      "/tmp/sfs-e2e-evidence",
 		Cluster:                ClusterRequest{Disposition: ClusterCreate},
 		NodePool:               NodePoolRequest{Count: 2, CommercialType: "TEST-TYPE-1"},
-		Parents:                ParentRequest{Count: 2, SizeBytes: 2_000_000_000_000},
+		Parents:                ParentRequest{Count: 2, SizeBytes: 25_000_000_000},
 		EstimatedHourlyCostEUR: "1.250000",
 		CostSource:             "operator-reviewed Scaleway pricing snapshot 2026-07-13",
 		ProviderReview: ProviderReview{
-			ObservedAt: "2026-07-13T12:00:00Z", ProductStatus: "public-beta",
+			ObservedAt: "2026-07-13T12:00:00Z", ProductStatus: "ga",
 			ProductStatusSource: "operator-reviewed Scaleway File Storage product page",
-			PublicBetaAccepted:  true, FileStorageQuotaRemaining: 2,
+			PublicBetaAccepted:  false, FileStorageQuotaRemaining: 2,
 			QuotaSource: "operator-reviewed dedicated test Project quota",
 		},
 		Artifacts: Artifacts{
@@ -81,6 +81,8 @@ func TestBuildProducesNonAuthorizingRunOwnedPlan(t *testing.T) {
 
 func TestBuildNeverMarksReusedClusterForDeletion(t *testing.T) {
 	request := validRequest()
+	request.Profile = ProfileReleaseCandidate
+	request.Parents.SizeBytes = 100_000_000_000
 	request.Cluster = ClusterRequest{Disposition: ClusterReuse, ExistingID: "33333333-3333-4333-8333-333333333333"}
 	plan, err := Build(request)
 	if err != nil {
@@ -102,6 +104,7 @@ func TestBuildNeverMarksReusedClusterForDeletion(t *testing.T) {
 func TestBuildReleaseCandidatePlansOneRunOwnedDisposableInstance(t *testing.T) {
 	request := validRequest()
 	request.Profile = ProfileReleaseCandidate
+	request.Parents.SizeBytes = 100_000_000_000
 	plan, err := Build(request)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -130,19 +133,28 @@ func TestRequestValidationRejectsUnsafeOrIncompletePlans(t *testing.T) {
 		"created with ID": func(request *Request) {
 			request.Cluster.ExistingID = "33333333-3333-4333-8333-333333333333"
 		},
-		"reuse without ID":        func(request *Request) { request.Cluster = ClusterRequest{Disposition: ClusterReuse} },
-		"one node":                func(request *Request) { request.NodePool.Count = 1 },
-		"commercial type":         func(request *Request) { request.NodePool.CommercialType = "bad type" },
-		"one parent":              func(request *Request) { request.Parents.Count = 1 },
-		"zero parent size":        func(request *Request) { request.Parents.SizeBytes = 0 },
-		"zero cost":               func(request *Request) { request.EstimatedHourlyCostEUR = "0" },
-		"exponent cost":           func(request *Request) { request.EstimatedHourlyCostEUR = "1e3" },
-		"multiline source":        func(request *Request) { request.CostSource = "line one\nline two" },
-		"missing beta acceptance": func(request *Request) { request.ProviderReview.PublicBetaAccepted = false },
-		"insufficient quota":      func(request *Request) { request.ProviderReview.FileStorageQuotaRemaining = 1 },
-		"bad provider timestamp":  func(request *Request) { request.ProviderReview.ObservedAt = time.Now().String() },
-		"short commit":            func(request *Request) { request.Artifacts.GitCommit = "abc" },
-		"chart tag":               func(request *Request) { request.Artifacts.ChartDigest = "v1.0.0" },
+		"reuse without ID": func(request *Request) { request.Cluster = ClusterRequest{Disposition: ClusterReuse} },
+		"reused base cluster": func(request *Request) {
+			request.Cluster = ClusterRequest{Disposition: ClusterReuse, ExistingID: "33333333-3333-4333-8333-333333333333"}
+		},
+		"one node":               func(request *Request) { request.NodePool.Count = 1 },
+		"three-node base smoke":  func(request *Request) { request.NodePool.Count = 3 },
+		"commercial type":        func(request *Request) { request.NodePool.CommercialType = "bad type" },
+		"one parent":             func(request *Request) { request.Parents.Count = 1 },
+		"nonminimum base parent": func(request *Request) { request.Parents.SizeBytes = 100_000_000_000 },
+		"release parent without growth step": func(request *Request) {
+			request.Profile = ProfileReleaseCandidate
+		},
+		"zero parent size":       func(request *Request) { request.Parents.SizeBytes = 0 },
+		"zero cost":              func(request *Request) { request.EstimatedHourlyCostEUR = "0" },
+		"exponent cost":          func(request *Request) { request.EstimatedHourlyCostEUR = "1e3" },
+		"multiline source":       func(request *Request) { request.CostSource = "line one\nline two" },
+		"stale beta status":      func(request *Request) { request.ProviderReview.ProductStatus = "public-beta" },
+		"stale beta acceptance":  func(request *Request) { request.ProviderReview.PublicBetaAccepted = true },
+		"insufficient quota":     func(request *Request) { request.ProviderReview.FileStorageQuotaRemaining = 1 },
+		"bad provider timestamp": func(request *Request) { request.ProviderReview.ObservedAt = time.Now().String() },
+		"short commit":           func(request *Request) { request.Artifacts.GitCommit = "abc" },
+		"chart tag":              func(request *Request) { request.Artifacts.ChartDigest = "v1.0.0" },
 		"mutable image": func(request *Request) {
 			request.Artifacts.Images[0].Reference = "registry.example/liveness:latest"
 		},

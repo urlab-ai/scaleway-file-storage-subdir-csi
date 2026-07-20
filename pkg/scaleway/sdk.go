@@ -319,9 +319,9 @@ func classifySDKError(ctx context.Context, err error) error {
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) {
-		if networkError.Timeout() {
-			return fmt.Errorf("%w: %v", ErrDeadlineExceeded, err)
-		}
+		// A transport timeout is ambiguous provider availability while the
+		// caller's operation context is still live. Only the operation context
+		// itself authoritatively proves that its deadline was exhausted.
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return fmt.Errorf("%w: %v", ErrUnavailable, err)
