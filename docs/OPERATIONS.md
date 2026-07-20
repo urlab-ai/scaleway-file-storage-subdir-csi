@@ -1,9 +1,10 @@
 # Operations Guide
 
-This repository contains frozen public identities. The `v0.1.0-rc.1` and
-`v0.1.0-rc.2` candidates are superseded and must not be promoted; the next
-candidate will be `v0.1.0-rc.3`, but it is not yet a qualified production
-release. The
+This repository contains frozen public identities. The `v0.1.0-rc.1`,
+`v0.1.0-rc.2`, and `v0.1.0-rc.3` candidates are superseded and must not be
+promoted. The third candidate exposed the Kapsule/container-runtime quarantine
+mount behavior corrected on `main`; the next candidate will be
+`v0.1.0-rc.4`, but it is not yet a qualified production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint
