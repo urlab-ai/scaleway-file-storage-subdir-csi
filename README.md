@@ -29,9 +29,10 @@ The public source, module, CSI, and artifact identities are frozen as:
 - `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
 - `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`.
 
-The first frozen candidate, `v0.1.0-rc.1`, is superseded by the provider and
-smoke-runner corrections on `main` and must not be promoted. The next candidate
-will be `v0.1.0-rc.2`; publication remains blocked until that exact candidate
+The frozen candidates `v0.1.0-rc.1` and `v0.1.0-rc.2` are superseded by the
+provider, smoke-runner, and Linux mountinfo compatibility corrections on `main`
+and must not be promoted. The next candidate will be `v0.1.0-rc.3`; publication
+remains blocked until that exact candidate
 has concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File

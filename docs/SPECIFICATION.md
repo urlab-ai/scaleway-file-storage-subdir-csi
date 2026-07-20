@@ -147,9 +147,10 @@ The public artifact coordinates are:
 Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
 with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
 `vendor_version`, chart `version`, and chart `appVersion` omit the leading `v`.
-The first frozen candidate, `v0.1.0-rc.1`, is superseded by the provider and
-smoke-runner corrections on `main` and must not be promoted. The next candidate
-is `v0.1.0-rc.2`. It is not a production support claim until the exact candidate
+The frozen candidates `v0.1.0-rc.1` and `v0.1.0-rc.2` are superseded by the
+provider, smoke-runner, and Linux mountinfo compatibility corrections on `main`
+and must not be promoted. The next candidate is `v0.1.0-rc.3`. It is not a
+production support claim until the exact candidate
 passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
