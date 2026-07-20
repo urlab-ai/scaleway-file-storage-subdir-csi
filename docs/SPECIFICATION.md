@@ -6597,6 +6597,9 @@ cost and bounded pricing source, exact Git commit and chart SHA-256, and the
 canonical candidate-manifest SHA-256 plus the immutable digest reference of the
 driver and every rendered sidecar. The candidate digest also binds the exact
 release values, checksum manifest, native `csi-admin`, and commercial allowlist.
+Every checksum-manifest entry must contain one lowercase SHA-256 and one plain
+artifact basename. Path-prefixed, recursive, duplicate, or unsafe names fail
+closed before provider mutation.
 Because the pinned APIs do not expose one stable endpoint for product maturity,
 remaining File Storage quota, and pricing, the closed request also carries a
 canonical UTC provider-review timestamp no older than 24 hours, the documented

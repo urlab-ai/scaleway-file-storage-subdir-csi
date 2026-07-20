@@ -61,9 +61,9 @@ PROVENANCE="$DIST_DIR/scaleway-sfs-subdir-csi_${RELEASE_TAG}.provenance.json"
 
 CHECKSUMS="$DIST_DIR/checksums_${RELEASE_TAG}.txt"
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$DIST_DIR" && sha256sum ./*_"$RELEASE_TAG"_linux_* "$(basename "$SBOM")" "$(basename "$PROVENANCE")" >"$CHECKSUMS")
+  (cd "$DIST_DIR" && sha256sum *_"$RELEASE_TAG"_linux_* "$(basename "$SBOM")" "$(basename "$PROVENANCE")" >"$CHECKSUMS")
 elif command -v shasum >/dev/null 2>&1; then
-  (cd "$DIST_DIR" && shasum -a 256 ./*_"$RELEASE_TAG"_linux_* "$(basename "$SBOM")" "$(basename "$PROVENANCE")" >"$CHECKSUMS")
+  (cd "$DIST_DIR" && shasum -a 256 *_"$RELEASE_TAG"_linux_* "$(basename "$SBOM")" "$(basename "$PROVENANCE")" >"$CHECKSUMS")
 else
   echo "sha256sum or shasum is required" >&2
   exit 2

@@ -51,6 +51,13 @@ if [ "$(wc -l <"$CHECKSUMS" | tr -d ' ')" -ne 14 ]; then
   echo "release verification failed: checksum file must cover four binaries, eight sidecars, the SBOM, and provenance" >&2
   exit 1
 fi
+if ! awk '
+  NF != 2 || length($1) != 64 || $2 ~ /\// || index($2, "\\") != 0 { exit 1 }
+  END { if (NR == 0) exit 1 }
+' "$CHECKSUMS"; then
+  echo "release verification failed: checksum entries must use plain artifact basenames" >&2
+  exit 1
+fi
 
 SBOM="$DIST_DIR/scaleway-sfs-subdir-csi_${TAG}.spdx.json"
 PROVENANCE="$DIST_DIR/scaleway-sfs-subdir-csi_${TAG}.provenance.json"
