@@ -157,6 +157,28 @@ func TestBuildSuppressesAllActionsWhenAnyEvidenceIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsBootstrapAbortOnlyAsExplicitUninstallAlternative(t *testing.T) {
+	inventory := validInventory()
+	inventory.Preconditions.UninstallPrepareComplete = false
+	inventory.Preconditions.BootstrapAbortComplete = true
+	plan, err := Build(inventory, testNow)
+	if err != nil {
+		t.Fatalf("Build(bootstrap abort) error = %v", err)
+	}
+	if len(plan.Blockers) != 0 || len(plan.DeleteActions) != 5 {
+		t.Fatalf("bootstrap-abort plan = %#v", plan)
+	}
+
+	inventory.Preconditions.BootstrapAbortComplete = false
+	plan, err = Build(inventory, testNow)
+	if err != nil {
+		t.Fatalf("Build(missing uninstall proof) error = %v", err)
+	}
+	if len(plan.DeleteActions) != 0 || !slices.Contains(plan.Blockers, "neither csi-admin uninstall prepare nor bootstrap-abort absence is proved complete") {
+		t.Fatalf("missing uninstall proof plan = %#v", plan)
+	}
+}
+
 func TestBuildTreatsStaleInventoryAsBlocker(t *testing.T) {
 	inventory := validInventory()
 	inventory.ObservedAt = testNow.Add(-MaximumObservationAge - time.Nanosecond).Format(time.RFC3339Nano)

@@ -6,6 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 KUBECTL=${KUBECTL:-kubectl}
 HELM=${HELM:-helm}
 JQ=${JQ:-jq}
+SCW=${SCW:-scw}
 
 mode=${1:-}
 [ "$mode" = run-smoke ] || [ "$mode" = run-pre ] || [ "$mode" = run-post ] || [ "$mode" = cleanup ] || {
@@ -16,7 +17,7 @@ shift
 
 kubeconfig= chart= values= namespace= release= admin= workload_image=
 project_id= region= run_id= cluster_id= parent_a= parent_b= results= evidence_dir=
-preconditions= validator= previous_chart= previous_values= profile=
+preconditions= validator= previous_chart= previous_values= profile= cluster_created_by_run=
 for argument in "$@"; do
   case "$argument" in
     --kubeconfig=*) kubeconfig=${argument#*=} ;;
@@ -27,6 +28,7 @@ for argument in "$@"; do
     --admin=*) admin=${argument#*=} ;;
     --workload-image=*) workload_image=${argument#*=} ;;
     --profile=*) profile=${argument#*=} ;;
+	    --cluster-created-by-run=*) cluster_created_by_run=${argument#*=} ;;
     --project-id=*) project_id=${argument#*=} ;;
     --region=*) region=${argument#*=} ;;
     --run-id=*) run_id=${argument#*=} ;;
@@ -56,7 +58,7 @@ if [ "$mode" = run-smoke ] || [ "$mode" = run-pre ] || [ "$mode" = run-post ]; t
   done
 fi
 if [ "$mode" = cleanup ]; then
-	  for required in preconditions run_id parent_a parent_b validator; do
+	  for required in preconditions run_id parent_a parent_b validator profile region cluster_created_by_run; do
 	    require_value "$required"
 	  done
 fi
@@ -74,6 +76,10 @@ if [ "$mode" = run-smoke ]; then
   [ "$profile" = base ] || { echo "run-smoke requires profile base" >&2; exit 2; }
 elif [ "$mode" = run-pre ] || [ "$mode" = run-post ]; then
   [ "$profile" = release-candidate ] || { echo "$mode requires profile release-candidate" >&2; exit 2; }
+elif [ "$mode" = cleanup ]; then
+  { [ "$profile" = base ] || [ "$profile" = release-candidate ]; } || { echo "cleanup requires a supported profile" >&2; exit 2; }
+  [ "$region" = fr-par ] || { echo "cleanup requires the v1 region fr-par" >&2; exit 2; }
+  { [ "$cluster_created_by_run" = true ] || [ "$cluster_created_by_run" = false ]; } || { echo "cleanup requires explicit cluster creation provenance" >&2; exit 2; }
 fi
 
 mkdir -p "$evidence_dir"
@@ -82,6 +88,7 @@ export KUBECONFIG=$kubeconfig
 
 k() { "$KUBECTL" "$@"; }
 h() { "$HELM" "$@"; }
+s() { "$SCW" "$@"; }
 one_name() {
   value=$(k -n "$namespace" get "$1" -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=$2" -o name)
   [ "$(printf '%s\n' "$value" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] || return 1
@@ -440,6 +447,7 @@ run_scenario() {
 
 cleanup_cluster() {
 	  uninstall_result="$evidence_dir/uninstall-result-$run_id.json"
+	  bootstrap_result="$evidence_dir/bootstrap-abort-cleanup-$run_id.json"
 	  releases=$(h list -n "$namespace" --all -o json)
 	  release_count=$(printf '%s' "$releases" | "$JQ" -er --arg release "$release" '[.[] | select(.name == $release)] | length')
 	  [ "$release_count" = 0 ] || [ "$release_count" = 1 ] || {
@@ -447,11 +455,23 @@ cleanup_cluster() {
 	    return 1
 	  }
 	  if [ "$release_count" = 1 ]; then
-	    h status "$release" -n "$namespace" -o json >/dev/null
+	    helm_status=$(h status "$release" -n "$namespace" -o json | "$JQ" -er '.info.status // .status // ""')
+	    initial_workload_pods=$(k -n "$namespace" get pods -l "$run_label" -o json | "$JQ" -er '.items | length')
+	    initial_pvcs=$(k -n "$namespace" get pvc -o json | "$JQ" -er '.items | length')
 	    remove_test_workloads
 	    request=$run_id
-	    "$admin" uninstall prepare --kubeconfig="$kubeconfig" --namespace="$namespace" --release="$release" --request-id="$request" --mode=dry-run --timeout=30m |
-	      "$JQ" -e '.ready == true and .completed == false and (.blockers | length == 0)' >/dev/null
+	    uninstall_dry_run="$evidence_dir/.uninstall-dry-run-$run_id.json"
+	    uninstall_error="$evidence_dir/bootstrap-uninstall-unavailable-$run_id.log"
+	    if "$admin" uninstall prepare --kubeconfig="$kubeconfig" --namespace="$namespace" --release="$release" --request-id="$request" --mode=dry-run --timeout=30m >"$uninstall_dry_run" 2>"$uninstall_error"; then
+	      "$JQ" -e '.ready == true and .completed == false and (.blockers | length == 0)' "$uninstall_dry_run" >/dev/null
+	      rm -f "$uninstall_error"
+	    else
+	      chmod 600 "$uninstall_error"
+	      rm -f "$uninstall_dry_run"
+	      bootstrap_abort_cleanup "$helm_status" "$bootstrap_result" "$initial_workload_pods" "$initial_pvcs"
+	      return
+	    fi
+	    rm -f "$uninstall_dry_run"
 	    uninstall_tmp="$uninstall_result.tmp"
 	    "$admin" uninstall prepare --kubeconfig="$kubeconfig" --namespace="$namespace" --release="$release" --request-id="$request" --mode=execute --timeout=60m >"$uninstall_tmp"
 	    "$JQ" -e '.ready == true and .completed == true and (.blockers | length == 0) and (.audit != null)' "$uninstall_tmp" >/dev/null
@@ -460,11 +480,14 @@ cleanup_cluster() {
 	    "$validator" validate-uninstall-result --file="$uninstall_result" --request-id="$request" --parent-a="$parent_a" --parent-b="$parent_b"
 	    h uninstall "$release" -n "$namespace" --wait --timeout 10m
 	  else
-	    [ -s "$uninstall_result" ] || {
-	      echo "Helm release is absent without retained completed safe-uninstall evidence" >&2
+	    if [ -s "$uninstall_result" ]; then
+	      "$validator" validate-uninstall-result --file="$uninstall_result" --request-id="$run_id" --parent-a="$parent_a" --parent-b="$parent_b"
+	    elif [ -s "$bootstrap_result" ]; then
+	      validate_bootstrap_abort_evidence "$bootstrap_result"
+	    else
+	      echo "Helm release is absent without retained completed safe-uninstall or bootstrap-abort evidence" >&2
 	      return 1
-	    }
-	    "$validator" validate-uninstall-result --file="$uninstall_result" --request-id="$run_id" --parent-a="$parent_a" --parent-b="$parent_b"
+	    fi
 	  fi
 	  release_count=$(h list -n "$namespace" --all -o json | "$JQ" -er --arg release "$release" '[.[] | select(.name == $release)] | length')
 	  [ "$release_count" = 0 ] || {
@@ -487,14 +510,99 @@ cleanup_cluster() {
 	  }
 }
 
+validate_bootstrap_abort_evidence() {
+	  file=$1
+	  "$JQ" -e \
+	    --arg run "$run_id" --arg profile "$profile" --arg region "$region" \
+	    --arg namespace "$namespace" --arg release "$release" --arg parent_a "$parent_a" --arg parent_b "$parent_b" '
+	      .schemaVersion == "1" and .runId == $run and .profile == $profile and .region == $region and
+	      .clusterCreatedByRun == true and
+	      .namespace == $namespace and .helmRelease == $release and .helmStatus == "failed" and
+	      .parentA == $parent_a and .parentB == $parent_b and
+	      .scenarioEntries == 0 and .initialWorkloadPods == 0 and .initialPVCs == 0 and
+	      .workloadPods == 0 and .pvcs == 0 and .pvs == 0 and
+	      .volumeAttachments == 0 and .driverCSINodeRegistrations == 0 and .durableRecords == 0 and
+	      .parentAAttachments == 0 and .parentBAttachments == 0 and
+	      .parentAReportedAttachments == 0 and .parentBReportedAttachments == 0 and
+	      .helmUninstalled == true and .namespaceRemoved == true
+	    ' "$file" >/dev/null
+}
+
+bootstrap_abort_cleanup() {
+	  helm_status=$1
+	  bootstrap_result=$2
+	  initial_workload_pods=$3
+	  initial_pvcs=$4
+	  [ "$cluster_created_by_run" = true ] || {
+	    echo "bootstrap-abort cleanup is disabled for a reused cluster" >&2
+	    return 1
+	  }
+	  [ "$helm_status" = failed ] || {
+	    echo "bootstrap-abort cleanup requires a failed Helm release, observed $helm_status" >&2
+	    return 1
+	  }
+	  entries="$evidence_dir/.scenario-results-run-smoke.ndjson"
+	  [ "$profile" != release-candidate ] || entries="$evidence_dir/.scenario-results-run-pre.ndjson"
+	  [ -f "$entries" ] && [ ! -s "$entries" ] || {
+	    echo "bootstrap-abort cleanup requires an empty retained first-scenario result set" >&2
+	    return 1
+	  }
+	  namespace_json=$(k get namespace "$namespace" -o json)
+	  namespace_run=$(printf '%s' "$namespace_json" | "$JQ" -er '.metadata.labels["sfs-subdir-e2e-run"] // ""')
+	  [ "$namespace_run" = "$run_id" ] || {
+	    echo "bootstrap-abort namespace lacks the exact run label" >&2
+	    return 1
+	  }
+	  driver=$(h get values "$release" -n "$namespace" -a -o json | "$JQ" -er '.driver.name')
+	  workload_pods=$(k -n "$namespace" get pods -l "$run_label" -o json | "$JQ" -er '.items | length')
+	  pvcs=$(k -n "$namespace" get pvc -o json | "$JQ" -er '.items | length')
+	  pvs=$(k get pv -o json | "$JQ" -er --arg namespace "$namespace" '[.items[] | select(.spec.claimRef.namespace == $namespace)] | length')
+	  volume_attachments=$(k get volumeattachments -o json | "$JQ" -er --arg driver "$driver" '[.items[] | select(.spec.attacher == $driver)] | length')
+	  csi_nodes=$(k get csinodes -o json | "$JQ" -er --arg driver "$driver" '[.items[] | .spec.drivers[]? | select(.name == $driver)] | length')
+	  durable_records=$(k -n "$namespace" get configmaps -o json | "$JQ" -er '[.items[] | select(.data["record.json"]? != null)] | length')
+	  parent_a_attachments=$(s file attachment list region="$region" filesystem-id="$parent_a" -o json | "$JQ" -er 'length')
+	  parent_b_attachments=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json | "$JQ" -er 'length')
+	  parent_a_reported=$(s file filesystem get "$parent_a" region="$region" -o json | "$JQ" -er '.number_of_attachments')
+	  parent_b_reported=$(s file filesystem get "$parent_b" region="$region" -o json | "$JQ" -er '.number_of_attachments')
+	  [ "$initial_workload_pods" = 0 ] && [ "$initial_pvcs" = 0 ] &&
+	    [ "$workload_pods" = 0 ] && [ "$pvcs" = 0 ] && [ "$pvs" = 0 ] &&
+	    [ "$volume_attachments" = 0 ] && [ "$csi_nodes" = 0 ] && [ "$durable_records" = 0 ] &&
+	    [ "$parent_a_attachments" = 0 ] && [ "$parent_b_attachments" = 0 ] &&
+	    [ "$parent_a_reported" = 0 ] && [ "$parent_b_reported" = 0 ] || {
+	      echo "bootstrap-abort cleanup found CSI state, mounts, or provider attachments" >&2
+	      return 1
+	    }
+	  h uninstall "$release" -n "$namespace" --wait --timeout 10m
+	  k delete namespace "$namespace" --wait=true --timeout=10m
+	  release_count=$(h list -n "$namespace" --all -o json | "$JQ" -er --arg release "$release" '[.[] | select(.name == $release)] | length')
+	  [ "$release_count" = 0 ] && [ -z "$(k get namespace "$namespace" --ignore-not-found -o name)" ] || {
+	    echo "bootstrap-abort Helm release or namespace survived cleanup" >&2
+	    return 1
+	  }
+	  bootstrap_tmp="$bootstrap_result.tmp"
+	  "$JQ" -cn \
+	    --arg run "$run_id" --arg profile "$profile" --arg region "$region" \
+	    --arg namespace "$namespace" --arg release "$release" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+	    '{schemaVersion:"1",runId:$run,profile:$profile,region:$region,clusterCreatedByRun:true,namespace:$namespace,helmRelease:$release,helmStatus:"failed",parentA:$parent_a,parentB:$parent_b,scenarioEntries:0,initialWorkloadPods:0,initialPVCs:0,workloadPods:0,pvcs:0,pvs:0,volumeAttachments:0,driverCSINodeRegistrations:0,durableRecords:0,parentAAttachments:0,parentBAttachments:0,parentAReportedAttachments:0,parentBReportedAttachments:0,helmUninstalled:true,namespaceRemoved:true}' >"$bootstrap_tmp"
+	  chmod 600 "$bootstrap_tmp"
+	  mv "$bootstrap_tmp" "$bootstrap_result"
+	  validate_bootstrap_abort_evidence "$bootstrap_result"
+}
+
 if [ "$mode" = cleanup ]; then
 	cleanup_log="$evidence_dir/cleanup-kubernetes.log"
 	cleanup_cluster >"$cleanup_log" 2>&1
-	"$JQ" -e -c '
-	  if .ready == true and .completed == true and (.blockers | length == 0) and (.audit != null)
-	  then {workloadPodsRemoved:true,pvcsRemoved:true,pvsRemoved:true,volumeAttachmentsRemoved:true,unpublishAndUnstageComplete:true,publishedNodeFencesCleared:true,uninstallPrepareComplete:true,nodeDaemonSetStopped:true,nodeMountsAbsent:true,controllerMountsAbsent:true,parentAttachmentsAbsent:true,controllerStopped:true,helmUninstalled:true}
-	  else error("safe-uninstall evidence is incomplete") end
-	' "$evidence_dir/uninstall-result-$run_id.json" >"$preconditions"
+	bootstrap_result="$evidence_dir/bootstrap-abort-cleanup-$run_id.json"
+	if [ -s "$bootstrap_result" ]; then
+	  validate_bootstrap_abort_evidence "$bootstrap_result"
+	  "$JQ" -n -c '{workloadPodsRemoved:true,pvcsRemoved:true,pvsRemoved:true,volumeAttachmentsRemoved:true,unpublishAndUnstageComplete:true,publishedNodeFencesCleared:true,uninstallPrepareComplete:false,bootstrapAbortComplete:true,nodeDaemonSetStopped:true,nodeMountsAbsent:true,controllerMountsAbsent:true,parentAttachmentsAbsent:true,controllerStopped:true,helmUninstalled:true}' >"$preconditions"
+	else
+	  "$JQ" -e -c '
+	    if .ready == true and .completed == true and (.blockers | length == 0) and (.audit != null)
+	    then {workloadPodsRemoved:true,pvcsRemoved:true,pvsRemoved:true,volumeAttachmentsRemoved:true,unpublishAndUnstageComplete:true,publishedNodeFencesCleared:true,uninstallPrepareComplete:true,bootstrapAbortComplete:false,nodeDaemonSetStopped:true,nodeMountsAbsent:true,controllerMountsAbsent:true,parentAttachmentsAbsent:true,controllerStopped:true,helmUninstalled:true}
+	    else error("safe-uninstall evidence is incomplete") end
+	  ' "$evidence_dir/uninstall-result-$run_id.json" >"$preconditions"
+	fi
 	exit 0
 fi
 

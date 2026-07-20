@@ -2131,7 +2131,13 @@ directory under the fixed private
 `/run/scaleway-sfs-subdir-csi-mount-quarantine` mount. The chart supplies that
 root as a dedicated `emptyDir` mounted only in the privileged driver container,
 with no mount propagation. It is deliberately outside the parent and kubelet
-mount roots.
+mount roots. A container runtime may nevertheless initially expose that
+dedicated mount as a slave of its own mount namespace. Before scanning or using
+the quarantine, startup authenticates the exact mount through an `O_PATH`
+descriptor, records its mountinfo ID and `STATX_MNT_ID_UNIQUE` generation,
+applies `mount_setattr(AT_EMPTY_PATH, MS_PRIVATE)` through that descriptor, and
+then proves that the same ID and generation became private. Any missing,
+stacked, replaced, unreadable, or still-propagating root fails closed.
 
 Linux shared-propagation ancestry can reject `move_mount` of an attached
 kubelet mount with `EINVAL`. After that failed, non-mutating move, v1 repeats
@@ -6723,6 +6729,24 @@ remove the retained kubeconfig is a cleanup error and cannot yield successful
 qualification evidence. Presence of the
 runner does not constitute release evidence: the exact candidate still needs a
 successful retained Kapsule run and a final complete inventory.
+
+If the first install scenario fails before producing any successful scenario
+entry and the exact Helm release is `failed`, cleanup may use the narrower
+bootstrap-abort path instead of claiming a safe uninstall, but only when the
+cluster itself was created by that exact run. Reused clusters always require
+the normal safe-uninstall or operator recovery path. The fallback must prove the
+dedicated namespace has the exact run label; no workload Pod, PVC, namespace
+PV, driver VolumeAttachment, driver CSINode registration, or durable driver
+record exists; and both exact run-owned parents have zero provider attachments.
+The parent check must agree on both the filtered attachment list and each exact
+filesystem's reported attachment count. Workload/PVC absence is captured before
+normal cleanup removes anything, so the fallback cannot manufacture absence.
+Only then may it uninstall that exact failed release, delete that exact
+namespace, retain run-bound bootstrap-abort evidence, and satisfy the cleanup
+barrier through `bootstrapAbortComplete`. Any successful scenario entry,
+non-failed release, missing evidence file, ambiguous read, record, registration,
+volume object, or provider attachment keeps cleanup blocked and requires the
+normal safe-uninstall or operator recovery path.
 
 Cleanup must:
 

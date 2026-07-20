@@ -42,8 +42,11 @@ detach. Driver startup proves those primitives using only its dedicated private
 mount-quarantine `emptyDir` and remains non-ready on failure.
 That quarantine is mounted at
 `/run/scaleway-sfs-subdir-csi-mount-quarantine`, separately from the strict
-`0700` admin-socket directory. Cleanup retries reconcile it before treating an
-absent public target as success or detaching a parent.
+`0700` admin-socket directory. The driver converts the authenticated dedicated
+mount to `MS_PRIVATE` inside its own mount namespace because some container
+runtimes initially expose an `emptyDir` as a slave mount; it then verifies that
+the same mount generation is private. Cleanup retries reconcile it before
+treating an absent public target as success or detaching a parent.
 The two candidates may be in the same Scaleway zone; production preflight does
 not require a multi-zone cluster.
 The chart's sorted `compatibility.qualifiedCommercialTypes` must exactly match
@@ -162,9 +165,13 @@ barriers succeed. A collision or ambiguous read fails closed. The retained
 fsynced ledger is mandatory; losing it is an operator-recovery condition and
 `--cleanup-only` never recreates a permissive seed. Helm and Kubernetes errors
 remain errors, while successful cleanup preconditions are derived from the
-completed structured safe-uninstall audit. After a provisioning error, several
-stable successful discovery reads are required before a partial resource prefix
-can become complete.
+completed structured safe-uninstall audit. A failed first Helm install may use
+the run-bound bootstrap-abort proof only on a cluster created by that run and
+only when no scenario entry, CSI object, durable record, CSINode registration,
+or provider parent attachment exists;
+this path never represents a successful smoke test. After a provisioning error,
+several stable successful discovery reads are required before a partial resource
+prefix can become complete.
 
 After normal workload/PVC/PV cleanup and the complete safe-uninstall procedure,
 render a cleanup review from the separately retained exact-ID inventory:

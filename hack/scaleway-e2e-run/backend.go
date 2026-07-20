@@ -474,6 +474,8 @@ func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.R
 		if err := backend.runScenarioCommand(ctx, "cleanup", "--kubeconfig="+backend.kubeconfig,
 			"--namespace="+request.DriverNamespace, "--release="+request.HelmRelease,
 			"--admin="+request.AdminBinary,
+			"--profile="+backend.plan.Profile, "--region="+backend.plan.Region,
+			fmt.Sprintf("--cluster-created-by-run=%t", backend.plan.Cluster.CreatedByRun),
 			"--run-id="+backend.plan.RunID,
 			"--parent-a="+parentA, "--parent-b="+parentB,
 			"--validator="+validator,
@@ -850,6 +852,6 @@ func providerNotFound(err error) bool {
 func allCleanupPreconditions(value bool) e2ecleanup.Preconditions {
 	return e2ecleanup.Preconditions{WorkloadPodsRemoved: value, PVCsRemoved: value, PVsRemoved: value,
 		VolumeAttachmentsRemoved: value, UnpublishAndUnstageComplete: value, PublishedNodeFencesCleared: value,
-		UninstallPrepareComplete: value, NodeDaemonSetStopped: value, NodeMountsAbsent: value,
+		UninstallPrepareComplete: value, BootstrapAbortComplete: false, NodeDaemonSetStopped: value, NodeMountsAbsent: value,
 		ControllerMountsAbsent: value, ParentAttachmentsAbsent: value, ControllerStopped: value, HelmUninstalled: value}
 }

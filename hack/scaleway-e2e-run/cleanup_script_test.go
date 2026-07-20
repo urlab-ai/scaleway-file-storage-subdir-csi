@@ -46,6 +46,8 @@ func TestCleanupScriptFailsClosedAndRequiresRunID(t *testing.T) {
 	admin := writeExecutable(t, temporary, "admin-unused", "#!/bin/sh\nexit 99\n")
 	command = exec.Command(script, "cleanup", "--kubeconfig=/tmp/kubeconfig", "--namespace=driver-system", "--release=driver",
 		"--admin="+admin, "--validator="+admin,
+		"--profile=base", "--region=fr-par",
+		"--cluster-created-by-run=true",
 		"--run-id=11111111-1111-4111-8111-111111111111",
 		"--parent-a=77777777-7777-4777-8777-777777777777", "--parent-b=88888888-8888-4888-8888-888888888888",
 		"--evidence-dir="+evidence, "--preconditions="+preconditions)
@@ -109,6 +111,8 @@ esac
 `)
 	kubectl := writeExecutable(t, temporary, "kubectl", `#!/bin/sh
 case "$*" in
+  *"get pods -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"get pvc -o json"*) printf '%s\n' '{"items":[]}' ;;
   *"get pv -o json"*) printf '%s\n' '{"items":[]}' ;;
   *"get namespace"*"--ignore-not-found"*)
     if [ "$(sed -n '1p' "$NAMESPACE_STATE")" = present ]; then
@@ -137,6 +141,8 @@ esac
 	preconditions := filepath.Join(temporary, "preconditions.json")
 	command := exec.Command(script, "cleanup", "--kubeconfig=/tmp/kubeconfig", "--namespace=driver-system", "--release=driver",
 		"--admin="+admin, "--validator="+validator,
+		"--profile=base", "--region=fr-par",
+		"--cluster-created-by-run=true",
 		"--run-id=11111111-1111-4111-8111-111111111111",
 		"--parent-a=77777777-7777-4777-8777-777777777777", "--parent-b=88888888-8888-4888-8888-888888888888",
 		"--evidence-dir="+evidence, "--preconditions="+preconditions)
@@ -153,13 +159,166 @@ esac
 	if err := json.Unmarshal(encoded, &observed); err != nil {
 		t.Fatal(err)
 	}
-	if len(observed) != 13 {
-		t.Fatalf("cleanup precondition count = %d, want 13", len(observed))
+	if len(observed) != 14 {
+		t.Fatalf("cleanup precondition count = %d, want 14", len(observed))
 	}
 	for name, value := range observed {
+		if name == "bootstrapAbortComplete" {
+			if value {
+				t.Fatal("normal safe uninstall reported bootstrap-abort completion")
+			}
+			continue
+		}
 		if !value {
 			t.Fatalf("cleanup precondition %q is false", name)
 		}
+	}
+}
+
+func TestCleanupScriptUsesBoundedBootstrapAbortAfterFailedFirstInstall(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in cleanup script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	temporary := t.TempDir()
+	helmState := filepath.Join(temporary, "helm-state")
+	namespaceState := filepath.Join(temporary, "namespace-state")
+	if err := os.WriteFile(helmState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(namespaceState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attachmentState := filepath.Join(temporary, "attachment-state")
+	if err := os.WriteFile(attachmentState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pvcState := filepath.Join(temporary, "pvc-state")
+	if err := os.WriteFile(pvcState, []byte("absent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helm := writeExecutable(t, temporary, "helm", `#!/bin/sh
+case "$1" in
+  list)
+    if [ "$(sed -n '1p' "$HELM_STATE")" = present ]; then
+      printf '%s\n' '[{"name":"driver","status":"failed"}]'
+    else
+      printf '%s\n' '[]'
+    fi
+    ;;
+  status) printf '%s\n' '{"info":{"status":"failed"}}' ;;
+  get) printf '%s\n' '{"driver":{"name":"csi.example.test"}}' ;;
+  uninstall) printf '%s\n' absent >"$HELM_STATE" ;;
+  *) exit 91 ;;
+esac
+`)
+	kubectl := writeExecutable(t, temporary, "kubectl", `#!/bin/sh
+case "$*" in
+  *"get namespace driver-system -o json"*) printf '%s\n' '{"metadata":{"labels":{"sfs-subdir-e2e-run":"11111111-1111-4111-8111-111111111111"}}}' ;;
+  *"get namespace"*"--ignore-not-found"*) ;;
+  *"get pods -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"get pvc -o json"*)
+    if [ "$(sed -n '1p' "$PVC_STATE")" = present ]; then printf '%s\n' '{"items":[{"metadata":{"name":"unexpected"}}]}'; else printf '%s\n' '{"items":[]}'; fi
+    ;;
+  *"get pv -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"get volumeattachments -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"get csinodes -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"get configmaps -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"delete namespace"*) printf '%s\n' absent >"$NAMESPACE_STATE" ;;
+  *"delete pod,pvc"*) printf '%s\n' absent >"$PVC_STATE" ;;
+  *) exit 92 ;;
+esac
+`)
+	admin := writeExecutable(t, temporary, "csi-admin-unavailable", "#!/bin/sh\nexit 1\n")
+	validator := writeExecutable(t, temporary, "validator-unused", "#!/bin/sh\nexit 99\n")
+	scw := writeExecutable(t, temporary, "scw", `#!/bin/sh
+case "$*" in
+  "file attachment list region=fr-par filesystem-id=77777777-7777-4777-8777-777777777777 -o json")
+    if [ "$(sed -n '1p' "$ATTACHMENT_STATE")" = present ]; then printf '%s\n' '[{}]'; else printf '%s\n' '[]'; fi
+    ;;
+  "file attachment list region=fr-par filesystem-id=88888888-8888-4888-8888-888888888888 -o json") printf '%s\n' '[]' ;;
+  "file filesystem get 77777777-7777-4777-8777-777777777777 region=fr-par -o json"|"file filesystem get 88888888-8888-4888-8888-888888888888 region=fr-par -o json") printf '%s\n' '{"number_of_attachments":0}' ;;
+  *) exit 95 ;;
+esac
+`)
+	evidence := filepath.Join(temporary, "evidence")
+	if err := os.MkdirAll(evidence, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidence, ".scenario-results-run-smoke.ndjson"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preconditions := filepath.Join(temporary, "preconditions.json")
+	arguments := []string{"cleanup", "--kubeconfig=/tmp/kubeconfig", "--namespace=driver-system", "--release=driver",
+		"--admin=" + admin, "--validator=" + validator, "--profile=base", "--region=fr-par", "--cluster-created-by-run=true",
+		"--run-id=11111111-1111-4111-8111-111111111111",
+		"--parent-a=77777777-7777-4777-8777-777777777777", "--parent-b=88888888-8888-4888-8888-888888888888",
+		"--evidence-dir=" + evidence, "--preconditions=" + preconditions}
+	reusedArguments := slices.Clone(arguments)
+	for index := range reusedArguments {
+		if reusedArguments[index] == "--cluster-created-by-run=true" {
+			reusedArguments[index] = "--cluster-created-by-run=false"
+		}
+	}
+	command := exec.Command(script, reusedArguments...)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "HELM_STATE="+helmState, "NAMESPACE_STATE="+namespaceState, "ATTACHMENT_STATE="+attachmentState, "PVC_STATE="+pvcState)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("bootstrap cleanup accepted a reused cluster: %s", output)
+	}
+	if state, err := os.ReadFile(helmState); err != nil || string(state) != "present\n" {
+		t.Fatalf("reused-cluster bootstrap cleanup changed Helm state: %q, %v", state, err)
+	}
+	command = exec.Command(script, arguments...)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "HELM_STATE="+helmState, "NAMESPACE_STATE="+namespaceState, "ATTACHMENT_STATE="+attachmentState, "PVC_STATE="+pvcState)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("bootstrap cleanup accepted a provider attachment: %s", output)
+	}
+	if _, err := os.Stat(preconditions); !os.IsNotExist(err) {
+		t.Fatalf("blocked bootstrap cleanup wrote preconditions: %v", err)
+	}
+	if state, err := os.ReadFile(helmState); err != nil || string(state) != "present\n" {
+		t.Fatalf("blocked bootstrap cleanup changed Helm state: %q, %v", state, err)
+	}
+	if err := os.WriteFile(attachmentState, []byte("absent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pvcState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command(script, arguments...)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "HELM_STATE="+helmState, "NAMESPACE_STATE="+namespaceState, "ATTACHMENT_STATE="+attachmentState, "PVC_STATE="+pvcState)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("bootstrap cleanup accepted a pre-cleanup PVC: %s", output)
+	}
+	if _, err := os.Stat(preconditions); !os.IsNotExist(err) {
+		t.Fatalf("PVC-blocked bootstrap cleanup wrote preconditions: %v", err)
+	}
+	command = exec.Command(script, arguments...)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "HELM_STATE="+helmState, "NAMESPACE_STATE="+namespaceState, "ATTACHMENT_STATE="+attachmentState, "PVC_STATE="+pvcState)
+	if output, err := command.CombinedOutput(); err != nil {
+		cleanupLog, _ := os.ReadFile(filepath.Join(evidence, "cleanup-kubernetes.log"))
+		bootstrapEvidence, _ := os.ReadFile(filepath.Join(evidence, "bootstrap-abort-cleanup-11111111-1111-4111-8111-111111111111.json"))
+		files, _ := os.ReadDir(evidence)
+		t.Fatalf("bootstrap cleanup error = %v, output = %s, cleanup log = %s, bootstrap evidence = %s, files = %v", err, output, cleanupLog, bootstrapEvidence, files)
+	}
+	encoded, err := os.ReadFile(preconditions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed e2ecleanup.Preconditions
+	if err := json.Unmarshal(encoded, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed.UninstallPrepareComplete || !observed.BootstrapAbortComplete || !observed.HelmUninstalled || !observed.ParentAttachmentsAbsent {
+		t.Fatalf("bootstrap cleanup preconditions = %#v", observed)
+	}
+	if _, err := os.Stat(filepath.Join(evidence, "bootstrap-abort-cleanup-11111111-1111-4111-8111-111111111111.json")); err != nil {
+		t.Fatalf("bootstrap cleanup evidence: %v", err)
 	}
 }
 

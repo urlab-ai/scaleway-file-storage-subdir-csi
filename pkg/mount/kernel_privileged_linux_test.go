@@ -47,6 +47,7 @@ func runPrivilegedKernelMountAssertions(t *testing.T) {
 	root := t.TempDir()
 	parentRoot := filepath.Join(root, "parents")
 	kubeletRoot := filepath.Join(root, "kubelet")
+	quarantineSource := filepath.Join(root, "quarantine-source")
 	quarantineRoot := filepath.Join(root, "quarantine")
 	parentID := "11111111-1111-4111-8111-111111111111"
 	driverName := "file-storage-subdir.csi.urlab.ai"
@@ -54,7 +55,7 @@ func runPrivilegedKernelMountAssertions(t *testing.T) {
 	backing := filepath.Join(parentTarget, "kubernetes-volumes", "tenant--claim--0123456789ab")
 	stageTarget := filepath.Join(kubeletRoot, "plugins", "kubernetes.io", "csi", driverName, "volume-a", "globalmount")
 	publishTarget := filepath.Join(kubeletRoot, "pods", "pod-a", "volumes", "kubernetes.io~csi", "pv-a", "mount")
-	for _, directory := range []string{parentTarget, stageTarget, publishTarget, quarantineRoot} {
+	for _, directory := range []string{parentTarget, stageTarget, publishTarget, quarantineSource, quarantineRoot} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatalf("create mount test directory %q: %v", directory, err)
 		}
@@ -69,12 +70,23 @@ func runPrivilegedKernelMountAssertions(t *testing.T) {
 	if err := syscall.Mount("", parentRoot, "", syscall.MS_SHARED, ""); err != nil {
 		t.Fatalf("make parent root shared: %v", err)
 	}
-	if err := syscall.Mount("mount-quarantine", quarantineRoot, "tmpfs", 0, "size=1m,mode=0700"); err != nil {
-		t.Fatalf("mount private quarantine: %v", err)
+	// Model the Kapsule/containerd emptyDir shape observed by the real E2E:
+	// the dedicated bind is non-propagating into the host but initially remains
+	// a slave of its runtime mount. KernelPreflight must convert this exact mount
+	// to private before it is ever used as unmount authority.
+	if err := syscall.Mount("mount-quarantine", quarantineSource, "tmpfs", 0, "size=1m,mode=0700"); err != nil {
+		t.Fatalf("mount quarantine source: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Unmount(quarantineSource, syscall.MNT_DETACH) })
+	if err := syscall.Mount("", quarantineSource, "", syscall.MS_SHARED, ""); err != nil {
+		t.Fatalf("make quarantine source shared: %v", err)
+	}
+	if err := syscall.Mount(quarantineSource, quarantineRoot, "", syscall.MS_BIND, ""); err != nil {
+		t.Fatalf("bind quarantine root: %v", err)
 	}
 	t.Cleanup(func() { _ = syscall.Unmount(quarantineRoot, syscall.MNT_DETACH) })
-	if err := syscall.Mount("", quarantineRoot, "", syscall.MS_PRIVATE, ""); err != nil {
-		t.Fatalf("make quarantine private: %v", err)
+	if err := syscall.Mount("", quarantineRoot, "", syscall.MS_SLAVE, ""); err != nil {
+		t.Fatalf("make quarantine root a runtime slave mount: %v", err)
 	}
 	if err := syscall.Mount(parentID, parentTarget, "tmpfs", 0, "size=4m,mode=0700"); err != nil {
 		t.Fatalf("mount disposable parent: %v", err)
@@ -98,8 +110,24 @@ func runPrivilegedKernelMountAssertions(t *testing.T) {
 	}
 	kernel := configured.(*KernelMounter)
 	kernel.config.quarantineRoot = quarantineRoot
+	before, err := kernel.quarantineMountEntry()
+	if err != nil || quarantineMountIsPrivate(before) {
+		t.Fatalf("Kapsule-shaped quarantine before preflight = %#v, %v", before, err)
+	}
+	beforeGeneration, err := uniqueMountGeneration(quarantineRoot, before.MountID)
+	if err != nil {
+		t.Fatalf("quarantine generation before preflight: %v", err)
+	}
 	if err := kernel.KernelPreflight(context.Background()); err != nil {
 		t.Fatalf("KernelPreflight() error = %v", err)
+	}
+	after, err := kernel.quarantineMountEntry()
+	if err != nil || !quarantineMountIsPrivate(after) || after.MountID != before.MountID {
+		t.Fatalf("private quarantine after preflight = %#v, %v", after, err)
+	}
+	afterGeneration, err := uniqueMountGeneration(quarantineRoot, after.MountID)
+	if err != nil || afterGeneration != beforeGeneration {
+		t.Fatalf("quarantine generation before/after preflight = %d/%d, %v", beforeGeneration, afterGeneration, err)
 	}
 	// MountParent acts through the opened target inode. If that inode is
 	// renamed before move_mount(2), post-validation must rollback only the newly

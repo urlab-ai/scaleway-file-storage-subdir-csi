@@ -754,9 +754,9 @@ func quarantineMountName(mountID uint64) string {
 }
 
 // KernelPreflight proves the mount API quarantine and recovers any interrupted
-// detach left in this still-running container namespace. The emptyDir itself is
-// private to the container, so a container crash destroys both the namespace
-// and any mount that had already moved into it.
+// detach left in this still-running container namespace. It first makes the
+// authenticated dedicated emptyDir private, so a container crash destroys both
+// the namespace and any mount that had already moved into it.
 func (mounter *KernelMounter) KernelPreflight(ctx context.Context) error {
 	if err := mounter.ReconcileQuarantines(ctx); err != nil {
 		return err
@@ -765,7 +765,7 @@ func (mounter *KernelMounter) KernelPreflight(ctx context.Context) error {
 }
 
 func (mounter *KernelMounter) recoverPrivateQuarantinesLocked(ctx context.Context) (returnErr error) {
-	if err := mounter.validatePrivateQuarantine(); err != nil {
+	if err := mounter.ensurePrivateQuarantine(ctx); err != nil {
 		return err
 	}
 	rootFD, err := unix.Open(mounter.config.quarantineRoot, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -898,26 +898,68 @@ func (mounter *KernelMounter) probeMountAPI(ctx context.Context) (returnErr erro
 	return nil
 }
 
-func (mounter *KernelMounter) validatePrivateQuarantine() (returnErr error) {
-	file, err := os.Open(mounter.config.mountInfoPath)
+func (mounter *KernelMounter) ensurePrivateQuarantine(ctx context.Context) (returnErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entry, err := mounter.quarantineMountEntry()
 	if err != nil {
 		return err
+	}
+	if quarantineMountIsPrivate(entry) {
+		return nil
+	}
+	rootFD, err := unix.Open(mounter.config.quarantineRoot, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open mount quarantine root: %w", err)
+	}
+	defer func() { returnErr = errors.Join(returnErr, unix.Close(rootFD)) }()
+	generation, err := uniqueMountGenerationForFD(rootFD, entry.MountID)
+	if err != nil {
+		return fmt.Errorf("authenticate mount quarantine root before making it private: %w", err)
+	}
+	attribute := unix.MountAttr{Propagation: unix.MS_PRIVATE}
+	if err := unix.MountSetattr(rootFD, "", unix.AT_EMPTY_PATH, &attribute); err != nil {
+		return fmt.Errorf("make mount quarantine root private: %w", err)
+	}
+	observedGeneration, err := uniqueMountGenerationForFD(rootFD, entry.MountID)
+	if err != nil || observedGeneration != generation {
+		return fmt.Errorf("mount quarantine generation changed from %d to %d while making it private: %w", generation, observedGeneration, errors.Join(err, ErrForeignMount))
+	}
+	observed, err := mounter.quarantineMountEntry()
+	if err != nil {
+		return err
+	}
+	if observed.MountID != entry.MountID || !quarantineMountIsPrivate(observed) {
+		return fmt.Errorf("mount quarantine root %q did not become the same private mount: %w", mounter.config.quarantineRoot, ErrForeignMount)
+	}
+	return nil
+}
+
+func (mounter *KernelMounter) quarantineMountEntry() (entry MountInfoEntry, returnErr error) {
+	file, err := os.Open(mounter.config.mountInfoPath)
+	if err != nil {
+		return MountInfoEntry{}, err
 	}
 	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
 	entries, err := ParseMountInfo(file)
 	if err != nil {
-		return err
+		return MountInfoEntry{}, err
 	}
-	entry, err := exactStartupMount(entries, "mount quarantine root", mounter.config.quarantineRoot, false)
+	entry, err = exactStartupMount(entries, "mount quarantine root", mounter.config.quarantineRoot, false)
 	if err != nil {
-		return err
+		return MountInfoEntry{}, err
 	}
+	return entry, nil
+}
+
+func quarantineMountIsPrivate(entry MountInfoEntry) bool {
 	for _, option := range entry.Optional {
-		if strings.HasPrefix(option, "shared:") || strings.HasPrefix(option, "master:") || strings.HasPrefix(option, "propagate_from:") {
-			return fmt.Errorf("mount quarantine root %q is not private", mounter.config.quarantineRoot)
+		if strings.HasPrefix(option, "shared:") || strings.HasPrefix(option, "master:") || strings.HasPrefix(option, "propagate_from:") || option == "unbindable" {
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
 func (mounter *KernelMounter) detachQuarantinedMount(rootFD int, name string, mountID uint64) (returnErr error) {

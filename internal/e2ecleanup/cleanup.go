@@ -103,6 +103,7 @@ type Preconditions struct {
 	UnpublishAndUnstageComplete bool `json:"unpublishAndUnstageComplete"`
 	PublishedNodeFencesCleared  bool `json:"publishedNodeFencesCleared"`
 	UninstallPrepareComplete    bool `json:"uninstallPrepareComplete"`
+	BootstrapAbortComplete      bool `json:"bootstrapAbortComplete"`
 	NodeDaemonSetStopped        bool `json:"nodeDaemonSetStopped"`
 	NodeMountsAbsent            bool `json:"nodeMountsAbsent"`
 	ControllerMountsAbsent      bool `json:"controllerMountsAbsent"`
@@ -435,7 +436,7 @@ func preconditionBlockers(preconditions Preconditions) []string {
 		{preconditions.VolumeAttachmentsRemoved, "VolumeAttachments are not proved removed"},
 		{preconditions.UnpublishAndUnstageComplete, "normal unpublish and unstage are not proved complete"},
 		{preconditions.PublishedNodeFencesCleared, "published-node fences are not proved cleared"},
-		{preconditions.UninstallPrepareComplete, "csi-admin uninstall prepare is not proved complete"},
+		{preconditions.UninstallPrepareComplete || preconditions.BootstrapAbortComplete, "neither csi-admin uninstall prepare nor bootstrap-abort absence is proved complete"},
 		{preconditions.NodeDaemonSetStopped, "node DaemonSet is not proved stopped"},
 		{preconditions.NodeMountsAbsent, "node mounts are not proved absent"},
 		{preconditions.ControllerMountsAbsent, "controller mounts are not proved absent"},
