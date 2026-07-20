@@ -164,7 +164,7 @@ func (backend *scalewayBackend) discoverPrivateNetwork(ctx context.Context) (*e2
 	for _, privateNetwork := range response.PrivateNetworks {
 		if privateNetwork != nil && privateNetwork.Name == name {
 			if privateNetwork.ProjectID != backend.plan.ProjectID || privateNetwork.Region.String() != backend.plan.Region || !slices.Contains(privateNetwork.Tags, backend.plan.OwnershipTag) {
-				return nil, fmt.Errorf("Private Network name %q collides with a resource not owned by this run", name)
+				return nil, fmt.Errorf("private network name %q collides with a resource not owned by this run", name)
 			}
 			matches = append(matches, privateNetwork)
 		}
