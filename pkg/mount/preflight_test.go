@@ -197,6 +197,12 @@ func TestValidateNodeMountTopologyRejectsMissingStackedUnpropagatedAndAliasedMou
 			values[parentIndex].DeviceID = "bad"
 			return values
 		}, want: "device ID"},
+		{name: "opaque nsfs parent root", mutate: func(values []MountInfoEntry) []MountInfoEntry {
+			values[parentIndex].Root = "mnt:[4026532372]"
+			values[parentIndex].FilesystemType = "nsfs"
+			values[parentIndex].MountSource = "nsfs"
+			return values
+		}, want: "incomplete mount identity"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -114,6 +114,29 @@ func TestParseMountInfoDecodesEscapesAndRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+func TestParseMountInfoAcceptsOnlyClosedNSFSNamespaceRoots(t *testing.T) {
+	line := "617 594 0:4 mnt:[4026532372] /run/snapd/ns/lxd.mnt rw - nsfs nsfs rw"
+	entries, err := ParseMountInfo(strings.NewReader(line))
+	if err != nil {
+		t.Fatalf("ParseMountInfo(nsfs) error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Root != "mnt:[4026532372]" || entries[0].FilesystemType != "nsfs" {
+		t.Fatalf("ParseMountInfo(nsfs) entries = %#v", entries)
+	}
+	for _, invalid := range []string{
+		"1 2 0:1 relative /target rw - tmpfs tmpfs rw",
+		"1 2 0:1 mnt:[] /target rw - nsfs nsfs rw",
+		"1 2 0:1 mnt:[0] /target rw - nsfs nsfs rw",
+		"1 2 0:1 MNT:[1] /target rw - nsfs nsfs rw",
+		"1 2 0:1 mnt:[1] /target rw - nsfs foreign rw",
+		"1 2 0:1 ../mnt:[1] /target rw - nsfs nsfs rw",
+	} {
+		if _, err := ParseMountInfo(strings.NewReader(invalid)); err == nil {
+			t.Fatalf("ParseMountInfo(%q) error = nil", invalid)
+		}
+	}
+}
+
 func TestParseMountInfoRejectsSnapshotBeyondAggregateBound(t *testing.T) {
 	first := "1 1 0:1 / / rw - tmpfs tmpfs rw"
 	second := "2 1 0:1 / /other rw - tmpfs tmpfs rw"

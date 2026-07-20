@@ -2436,6 +2436,13 @@ The parser bounds the complete snapshot to 64 MiB in addition to its per-line
 and entry-count limits. An empty mountinfo read is never interpreted as an empty
 mount namespace, and duplicate mount IDs cannot form a coherent snapshot;
 either condition fails closed before any absence or mount-boundary decision.
+Linux `nsfs` entries are the only accepted exception to an absolute normalized
+filesystem root: the parser accepts only the closed kernel namespace-handle
+form `<lowercase-alphanumeric-or-underscore-name>:[<positive-decimal-inode>]`,
+with a lowercase first character, when both filesystem type and source are
+exactly `nsfs`. That opaque value is inventory only and can never authorize a
+path comparison or mutation; every protected driver anchor still requires an
+absolute normalized mount root.
 For every unstacked driver target, the runtime opens the exact target without
 following, matches the descriptor fdinfo mount ID to that snapshot, and records
 the non-reusable `STATX_MNT_ID_UNIQUE` generation. Unpublish, unstage, rollback,

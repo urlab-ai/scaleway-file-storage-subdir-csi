@@ -19,7 +19,9 @@ const (
 
 // MountInfoEntry is one losslessly normalized /proc/self/mountinfo line. Linux
 // exposes the bind's filesystem root and device, not the source pathname used
-// by the original bind syscall.
+// by the original bind syscall. Root is normally an absolute filesystem path;
+// nsfs instead exposes an opaque namespace handle such as mnt:[4026532372]. A
+// non-absolute Root must never be used as path authority.
 type MountInfoEntry struct {
 	MountID        uint64
 	ParentMountID  uint64
@@ -147,9 +149,6 @@ func parseMountInfoLine(line string) (MountInfoEntry, error) {
 	if err != nil {
 		return MountInfoEntry{}, fmt.Errorf("mount point: %w", err)
 	}
-	if root == "" || root[0] != '/' || path.Clean(root) != root {
-		return MountInfoEntry{}, fmt.Errorf("root %q is not absolute and normalized", root)
-	}
 	if mountPoint != "/" {
 		if err := ValidateAbsoluteNormalizedPath(mountPoint); err != nil {
 			return MountInfoEntry{}, err
@@ -162,14 +161,46 @@ func parseMountInfoLine(line string) (MountInfoEntry, error) {
 	if fields[separator+1] == "" || mountSource == "" {
 		return MountInfoEntry{}, fmt.Errorf("filesystem type or mount source is empty")
 	}
+	filesystemType := fields[separator+1]
+	if !validMountInfoRoot(root, filesystemType, mountSource) {
+		return MountInfoEntry{}, fmt.Errorf("root %q is neither an absolute normalized path nor a valid nsfs namespace handle", root)
+	}
 	return MountInfoEntry{
 		MountID: mountID, ParentMountID: parentID, DeviceID: fields[2],
 		Root: root, MountPoint: mountPoint,
 		MountOptions:   splitMountOptions(fields[5]),
 		Optional:       append([]string(nil), fields[6:separator]...),
-		FilesystemType: fields[separator+1], MountSource: mountSource,
+		FilesystemType: filesystemType, MountSource: mountSource,
 		SuperOptions: splitMountOptions(fields[separator+3]),
 	}, nil
+}
+
+// validMountInfoRoot accepts the one kernel-defined exception to path-shaped
+// mount roots. nsfs dentries name namespace handles rather than filesystem
+// paths. Keeping that exception narrow lets callers inspect a complete live
+// mount table without allowing an opaque root to authorize path mutation.
+func validMountInfoRoot(root, filesystemType, mountSource string) bool {
+	if root != "" && path.IsAbs(root) && path.Clean(root) == root {
+		return true
+	}
+	if filesystemType != "nsfs" || mountSource != "nsfs" {
+		return false
+	}
+	marker := strings.Index(root, ":[")
+	if marker <= 0 || !strings.HasSuffix(root, "]") {
+		return false
+	}
+	for index := 0; index < marker; index++ {
+		candidate := root[index]
+		if candidate < 'a' || candidate > 'z' {
+			if index == 0 || (candidate < '0' || candidate > '9') && candidate != '_' {
+				return false
+			}
+		}
+	}
+	inode := root[marker+2 : len(root)-1]
+	parsed, err := strconv.ParseUint(inode, 10, 64)
+	return err == nil && parsed != 0
 }
 
 func parsePositiveMountID(name, value string) (uint64, error) {
