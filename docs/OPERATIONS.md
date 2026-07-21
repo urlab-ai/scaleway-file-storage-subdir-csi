@@ -443,7 +443,9 @@ record manually.
 
 ## Manual archive/retain garbage collection
 
-Always run a dry-run with a fresh UUID and the exact current terminal state:
+Start a new operation with a fresh dry-run UUID and the exact current terminal
+state. Keep that UUID unchanged when retrying the same dry-run because the
+controller persists its bounded request/audit envelope:
 
 ```bash
 csi-admin gc submit \
@@ -461,7 +463,11 @@ After reviewing the exact parent and paths, use a new request ID for
 declared explicitly when it is the current state. The operator binary only
 submits and audits the request; the active controller owns all locks, fencing,
 durable phases, quarantine rename, deletion, and terminal compaction. Never
-edit GC lifecycle fields or delete a tombstone ConfigMap manually.
+edit GC lifecycle fields or delete a tombstone ConfigMap manually. Automated
+cleanup may adopt an already persisted dry-run ID only after validating the
+exact logical volume, expected terminal state, installation, parent set, and
+absence of GC lifecycle progress; it must never adopt an unplanned execute
+request.
 
 ## Safe uninstall
 

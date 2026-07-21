@@ -220,9 +220,16 @@ func TestE2ECleanupAllocationInventoryFailsClosed(t *testing.T) {
 		installationID string
 		state          string
 		parentID       string
+		gcRequestID    string
+		gcMode         string
+		gcExpected     string
+		gcRequestedAt  string
 		wantSuccess    bool
 	}{
 		{name: "exact archived allocation", installationID: runID, state: "Archived", parentID: parentA, wantSuccess: true},
+		{name: "exact prior dry run", installationID: runID, state: "Archived", parentID: parentA, gcRequestID: "33333333-3333-4333-8333-333333333333", gcMode: "dry-run", gcExpected: "Archived", gcRequestedAt: "2026-07-21T10:00:00Z", wantSuccess: true},
+		{name: "partial GC request", installationID: runID, state: "Archived", parentID: parentA, gcRequestID: "33333333-3333-4333-8333-333333333333"},
+		{name: "wrong GC expected state", installationID: runID, state: "Archived", parentID: parentA, gcRequestID: "33333333-3333-4333-8333-333333333333", gcMode: "dry-run", gcExpected: "Retained", gcRequestedAt: "2026-07-21T10:00:00Z"},
 		{name: "foreign installation", installationID: "22222222-2222-4222-8222-222222222222", state: "Archived", parentID: parentA},
 		{name: "active allocation", installationID: runID, state: "Ready", parentID: parentA},
 		{name: "foreign parent", installationID: runID, state: "Archived", parentID: "99999999-9999-4999-8999-999999999999"},
@@ -231,6 +238,8 @@ func TestE2ECleanupAllocationInventoryFailsClosed(t *testing.T) {
 			record, err := json.Marshal(map[string]string{
 				"logicalVolumeID": logicalID, "state": test.state, "parentFilesystemID": test.parentID,
 				"createVolumeRequestName": "pvc-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				"gcRequestID":             test.gcRequestID, "gcRequestedMode": test.gcMode,
+				"gcExpectedState": test.gcExpected, "gcRequestedAt": test.gcRequestedAt,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -410,6 +419,18 @@ func TestCleanupScriptDerivesPreconditionsFromCompletedUninstall(t *testing.T) {
 	if err := os.WriteFile(allocationState, []byte("Archived\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	evidence := filepath.Join(temporary, "evidence")
+	if err := os.MkdirAll(evidence, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The persisted plan deliberately contains a different dry-run request.
+	// Cleanup must adopt the exact bounded request already recorded by the
+	// controller without changing the independently planned execute identity.
+	initialPlan := `{"schemaVersion":"1","runId":"11111111-1111-4111-8111-111111111111","namespace":"driver-system","parentFilesystemIDs":["77777777-7777-4777-8777-777777777777","88888888-8888-4888-8888-888888888888"],"allocationIDs":["lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"operations":[{"logicalVolumeID":"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedState":"Archived","dryRunRequestID":"44444444-4444-4444-8444-444444444444","executeRequestID":"55555555-5555-4555-8555-555555555555"}],"reconciliations":[]}`
+	planPath := filepath.Join(evidence, "cleanup-gc-plan-11111111-1111-4111-8111-111111111111.json")
+	if err := os.WriteFile(planPath, []byte(initialPlan), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	helm := writeExecutable(t, temporary, "helm", `#!/bin/sh
 case "$1" in
   list)
@@ -430,7 +451,7 @@ case "$*" in
   "-n driver-system get secret scaleway-sfs-subdir-csi-identity -o jsonpath={.data.installationID}") printf '%s' 'MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx' ;;
   "-n driver-system get configmaps -l app.kubernetes.io/name=scaleway-sfs-subdir-csi -o json")
     state=$(sed -n '1p' "$ALLOCATION_STATE")
-    printf '%s\n' "{\"items\":[{\"metadata\":{\"labels\":{\"file-storage-subdir.csi.urlab.ai/installation-id\":\"11111111-1111-4111-8111-111111111111\",\"file-storage-subdir.csi.urlab.ai/logical-volume-id\":\"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"data\":{\"record.json\":\"{\\\"logicalVolumeID\\\":\\\"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"state\\\":\\\"$state\\\",\\\"parentFilesystemID\\\":\\\"77777777-7777-4777-8777-777777777777\\\",\\\"createVolumeRequestName\\\":\\\"pvc-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\\\"}\"}}]}"
+    printf '%s\n' "{\"items\":[{\"metadata\":{\"labels\":{\"file-storage-subdir.csi.urlab.ai/installation-id\":\"11111111-1111-4111-8111-111111111111\",\"file-storage-subdir.csi.urlab.ai/logical-volume-id\":\"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"data\":{\"record.json\":\"{\\\"logicalVolumeID\\\":\\\"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"state\\\":\\\"$state\\\",\\\"parentFilesystemID\\\":\\\"77777777-7777-4777-8777-777777777777\\\",\\\"createVolumeRequestName\\\":\\\"pvc-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\\\",\\\"gcRequestID\\\":\\\"33333333-3333-4333-8333-333333333333\\\",\\\"gcRequestedMode\\\":\\\"dry-run\\\",\\\"gcExpectedState\\\":\\\"Archived\\\",\\\"gcRequestedAt\\\":\\\"2026-07-21T10:00:00Z\\\"}\"}}]}"
     ;;
   *"get pods -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o json"*) printf '%s\n' '{"items":[]}' ;;
   *"get pvc -o json"*) printf '%s\n' '{"items":[]}' ;;
@@ -457,6 +478,7 @@ case "$1" in
       esac
     done
     if [ "$mode" = dry-run ]; then
+	  [ "$request" = 33333333-3333-4333-8333-333333333333 ] || exit 96
       printf '{"requestID":"%s","mode":"dry-run","logicalVolumeID":"%s","parentFilesystemID":"77777777-7777-4777-8777-777777777777","previousState":"%s","finalState":"%s","targetPath":"/archive","completed":false}\n' "$request" "$logical" "$expected" "$expected"
     elif [ "$mode" = execute ]; then
       printf '%s\n' Deleted >"$ALLOCATION_STATE"
@@ -481,7 +503,6 @@ case "$*" in
   *) exit 94 ;;
 esac
 `)
-	evidence := filepath.Join(temporary, "evidence")
 	preconditions := filepath.Join(temporary, "preconditions.json")
 	command := exec.Command(script, "cleanup", "--kubeconfig=/tmp/kubeconfig", "--namespace=driver-system", "--release=driver",
 		"--admin="+admin, "--validator="+validator,
@@ -519,6 +540,28 @@ esac
 	}
 	if state, err := os.ReadFile(allocationState); err != nil || string(state) != "Deleted\n" {
 		t.Fatalf("cleanup GC state = %q, %v", state, err)
+	}
+	encodedPlan, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan struct {
+		Operations []struct {
+			DryRunRequestID  string `json:"dryRunRequestID"`
+			ExecuteRequestID string `json:"executeRequestID"`
+		} `json:"operations"`
+		Reconciliations []struct {
+			AdoptedDryRunRequestID string `json:"adoptedDryRunRequestID"`
+		} `json:"reconciliations"`
+	}
+	if err := json.Unmarshal(encodedPlan, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Operations) != 1 || plan.Operations[0].DryRunRequestID != "33333333-3333-4333-8333-333333333333" || plan.Operations[0].ExecuteRequestID != "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("reconciled cleanup operation = %+v", plan.Operations)
+	}
+	if len(plan.Reconciliations) != 1 || plan.Reconciliations[0].AdoptedDryRunRequestID != "33333333-3333-4333-8333-333333333333" {
+		t.Fatalf("cleanup plan reconciliations = %+v", plan.Reconciliations)
 	}
 	for _, name := range []string{
 		"cleanup-gc-plan-11111111-1111-4111-8111-111111111111.json",

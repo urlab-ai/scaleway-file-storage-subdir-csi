@@ -428,6 +428,11 @@ read_test_allocations() {
 	        state: $record.state,
 	        parentFilesystemID: ($record.parentFilesystemID // ""),
 	        createVolumeRequestName: ($record.createVolumeRequestName // ""),
+	        gcRequestID: ($record.gcRequestID // ""),
+	        gcRequestedMode: ($record.gcRequestedMode // ""),
+	        gcExpectedState: ($record.gcExpectedState // ""),
+	        gcRequestedAt: ($record.gcRequestedAt // ""),
+	        gcOperationID: ($record.gcOperationID // ""),
 	        installationID: (.metadata.labels["file-storage-subdir.csi.urlab.ai/installation-id"] // ""),
 	        labelledLogicalVolumeID: (.metadata.labels["file-storage-subdir.csi.urlab.ai/logical-volume-id"] // "")
 	      }
@@ -437,14 +442,47 @@ read_test_allocations() {
 	      (.logicalVolumeID | test("^lv-[0-9a-f]{32}$") | not) or
 	      .installationID != $run or .labelledLogicalVolumeID != .logicalVolumeID or
 	      (.state != "Archived" and .state != "Retained" and .state != "Deleted") or
-	      ((.state == "Archived" or .state == "Retained") and
-	        ((.parentFilesystemID != $parent_a and .parentFilesystemID != $parent_b) or
-	         (.createVolumeRequestName | test("^pvc-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$") | not))))
+	      ((.state == "Archived" or .state == "Retained") and (
+	        (.parentFilesystemID != $parent_a and .parentFilesystemID != $parent_b) or
+	        (.createVolumeRequestName | test("^pvc-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$") | not) or
+	        ((([.gcRequestID,.gcRequestedMode,.gcExpectedState,.gcRequestedAt] | all(. == "")) | not) and (
+	          (.gcRequestID | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$") | not) or
+	          (.gcRequestedMode != "dry-run" and .gcRequestedMode != "execute") or
+	          .gcExpectedState != .state or .gcRequestedAt == ""
+	        ))
+	      ))
+	    )
 	      then error("E2E allocation is foreign, malformed, non-terminal, or outside the exact parent set")
 	    elif ($records | map(.logicalVolumeID) | unique | length) != ($records | length)
 	      then error("E2E allocation inventory contains a duplicate logical volume")
 	    else $records | sort_by(.logicalVolumeID) end
 	  '
+}
+
+validate_gc_plan() {
+	plan_to_validate=$1
+	current_to_validate=$2
+	"$JQ" -e --arg run "$run_id" --arg namespace "$namespace" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+	  --slurpfile current "$current_to_validate" '
+	    .schemaVersion == "1" and .runId == $run and .namespace == $namespace and
+	    .parentFilesystemIDs == ([$parent_a,$parent_b]|sort) and
+	    .allocationIDs == ($current[0]|map(.logicalVolumeID)) and
+	    (.operations|map(.logicalVolumeID)|unique|length) == (.operations|length) and
+	    (($current[0]|map(select(.state == "Archived" or .state == "Retained")|.logicalVolumeID)) -
+	      (.operations|map(.logicalVolumeID)) | length) == 0 and
+	    all(.operations[];
+	      (.logicalVolumeID|test("^lv-[0-9a-f]{32}$")) and
+	      (.expectedState == "Archived" or .expectedState == "Retained") and
+	      (.dryRunRequestID|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+	      (.executeRequestID|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+	      .dryRunRequestID != .executeRequestID and
+	      (. as $operation | ($current[0][] | select(.logicalVolumeID == $operation.logicalVolumeID)) as $record |
+	        ($record.state == "Deleted" or
+	         ($record.state == $operation.expectedState and
+	          (($record.gcRequestID == "" and $record.gcOperationID == "") or
+	           ($record.gcRequestedMode == "dry-run" and $record.gcRequestID == $operation.dryRunRequestID and $record.gcOperationID == "") or
+	           ($record.gcRequestedMode == "execute" and $record.gcRequestID == $operation.executeRequestID))))))
+	  ' "$plan_to_validate" >/dev/null
 }
 
 gc_test_allocations() {
@@ -464,12 +502,21 @@ gc_test_allocations() {
 	read_test_allocations >"$current_allocations"
 	chmod 600 "$current_allocations"
 	if [ ! -s "$gc_plan" ]; then
+	  "$JQ" -e 'all(.[] | select(.state == "Archived" or .state == "Retained");
+	    .gcRequestedMode != "execute" and .gcOperationID == "")' "$current_allocations" >/dev/null || {
+	    echo "refuse to adopt an executing E2E GC operation without its persisted exact plan" >&2
+	    return 1
+	  }
 	  operations="$evidence_dir/.cleanup-gc-operations-$run_id.ndjson"
 	  : >"$operations"
-	  "$JQ" -r '.[] | select(.state == "Archived" or .state == "Retained") | [.logicalVolumeID, .state] | @tsv' "$current_allocations" |
-	    while IFS="$(printf '\t')" read -r logical_id expected_state; do
+	  "$JQ" -r '.[] | select(.state == "Archived" or .state == "Retained") | [.logicalVolumeID, .state, .gcRequestID, .gcRequestedMode] | @tsv' "$current_allocations" |
+	    while IFS="$(printf '\t')" read -r logical_id expected_state existing_request existing_mode; do
 	      [ -n "$logical_id" ] || continue
-	      dry_run_request=$(new_uuid)
+	      if [ "$existing_mode" = dry-run ]; then
+	        dry_run_request=$existing_request
+	      else
+	        dry_run_request=$(new_uuid)
+	      fi
 	      execute_request=$(new_uuid)
 	      "$JQ" -cn --arg logical "$logical_id" --arg state "$expected_state" \
 	        --arg dry "$dry_run_request" --arg execute "$execute_request" \
@@ -478,25 +525,44 @@ gc_test_allocations() {
 	  gc_plan_tmp="$gc_plan.tmp"
 	  "$JQ" -n -c --arg run "$run_id" --arg namespace "$namespace" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
 	    --slurpfile allocations "$current_allocations" --slurpfile operations "$operations" \
-	    '{schemaVersion:"1",runId:$run,namespace:$namespace,parentFilesystemIDs:([$parent_a,$parent_b]|sort),allocationIDs:($allocations[0]|map(.logicalVolumeID)),operations:$operations}' >"$gc_plan_tmp"
+	    '{schemaVersion:"1",runId:$run,namespace:$namespace,parentFilesystemIDs:([$parent_a,$parent_b]|sort),allocationIDs:($allocations[0]|map(.logicalVolumeID)),operations:$operations,reconciliations:[]}' >"$gc_plan_tmp"
 	  chmod 600 "$gc_plan_tmp"
+	  validate_gc_plan "$gc_plan_tmp" "$current_allocations"
 	  mv "$gc_plan_tmp" "$gc_plan"
 	  sync
 	  rm -f "$operations"
+	else
+	  # A prior read-only dry-run may have durably recorded its bounded request
+	  # envelope before this cleanup plan existed. Adopt only that exact request
+	  # after proving there is no GC progress; execute identities remain immutable.
+	  reconciled_plan="$gc_plan.reconciled.tmp"
+	  "$JQ" -c --slurpfile current "$current_allocations" '
+	    reduce $current[0][] as $record (.;
+	      if (($record.state == "Archived" or $record.state == "Retained") and
+	          $record.gcRequestedMode == "dry-run" and $record.gcOperationID == "") then
+	        ([.operations[] | select(.logicalVolumeID == $record.logicalVolumeID and .expectedState == $record.state)]) as $matches |
+	        if ($matches | length) != 1 then error("persisted GC plan does not contain one exact terminal allocation operation")
+	        else $matches[0] as $operation |
+	          if $operation.dryRunRequestID == $record.gcRequestID then .
+	          else
+	            .operations |= map(if .logicalVolumeID == $record.logicalVolumeID then .dryRunRequestID = $record.gcRequestID else . end) |
+	            .reconciliations = (((.reconciliations // []) + [{
+	              logicalVolumeID:$record.logicalVolumeID,
+	              previousDryRunRequestID:$operation.dryRunRequestID,
+	              adoptedDryRunRequestID:$record.gcRequestID,
+	              reason:"pre-existing bounded dry-run request envelope"
+	            }]) | unique_by([.logicalVolumeID,.adoptedDryRunRequestID]))
+	          end
+	        end
+	      else . end)
+	  ' "$gc_plan" >"$reconciled_plan"
+	  chmod 600 "$reconciled_plan"
+	  validate_gc_plan "$reconciled_plan" "$current_allocations"
+	  mv "$reconciled_plan" "$gc_plan"
+	  sync
 	fi
 
-	"$JQ" -e --arg run "$run_id" --arg namespace "$namespace" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
-	  --slurpfile current "$current_allocations" '
-	    .schemaVersion == "1" and .runId == $run and .namespace == $namespace and
-	    .parentFilesystemIDs == ([$parent_a,$parent_b]|sort) and
-	    .allocationIDs == ($current[0]|map(.logicalVolumeID)) and
-	    (.operations|map(.logicalVolumeID)|unique|length) == (.operations|length) and
-	    all(.operations[];
-	      (.logicalVolumeID|test("^lv-[0-9a-f]{32}$")) and
-	      (.expectedState == "Archived" or .expectedState == "Retained") and
-	      (.dryRunRequestID|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
-	      (.executeRequestID|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")))
-	  ' "$gc_plan" >/dev/null
+	validate_gc_plan "$gc_plan" "$current_allocations"
 
 	"$JQ" -r '.operations[] | [.logicalVolumeID,.expectedState,.dryRunRequestID,.executeRequestID] | @tsv' "$gc_plan" |
 	  while IFS="$(printf '\t')" read -r logical_id expected_state dry_run_request execute_request; do

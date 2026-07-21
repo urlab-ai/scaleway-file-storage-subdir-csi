@@ -6075,7 +6075,8 @@ Required unit tests:
 - delete policy `delete`;
 - delete policy `retain`;
 - manual GC refuses non-terminal records;
-- manual GC dry-run does not mutate records or filesystem paths;
+- manual GC dry-run may persist only its bounded request/audit envelope; it
+  does not write lifecycle progress, ownership metadata, or filesystem paths;
 - manual GC for archived/retained data releases logical capacity only after
   validated cleanup;
 - manual GC mutating path is rejected outside the active leader;
@@ -6808,8 +6809,14 @@ Cleanup must:
   normal request-bound `csi-admin gc submit` dry-run and execute workflow to
   collect only those exact run-owned `Archived` or `Retained` volumes, retain
   each audit, and require every allocation to be a permanent non-reserving
-  `Deleted` tombstone. A foreign, malformed, non-terminal, unlabelled, or
-  out-of-parent allocation blocks cleanup; then run and verify
+  `Deleted` tombstone. The cleanup plan is persisted before execution. A retry
+  reuses its planned execute request ID. If an earlier read-only dry-run
+  already persisted a valid bounded request envelope for the same exact
+  terminal state without lifecycle progress, the plan adopts and audits that
+  dry-run request ID instead of submitting a conflicting identity. An execute
+  request or lifecycle progress without the matching persisted plan is never
+  adopted. A foreign, malformed, non-terminal, unlabelled, or out-of-parent
+  allocation blocks cleanup; then run and verify
   `csi-admin uninstall prepare` before deleting Helm-managed RBAC, controller,
   or node resources;
 - never delete reused or pre-existing clusters, Private Networks, or
