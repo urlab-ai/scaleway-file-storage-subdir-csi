@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -385,7 +384,7 @@ func (backend *scalewayBackend) allocationParent(ctx context.Context, request e2
 
 func (backend *scalewayBackend) kubectl(ctx context.Context, request e2erunner.Request, stdin *strings.Reader, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, "kubectl", arguments...)
-	command.Env = append(os.Environ(), "KUBECONFIG="+backend.kubeconfig)
+	command.Env = append(environmentWithoutScalewayCredentials(), "KUBECONFIG="+backend.kubeconfig)
 	if stdin != nil {
 		command.Stdin = stdin
 	}

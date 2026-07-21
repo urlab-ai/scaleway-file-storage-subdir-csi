@@ -137,6 +137,14 @@ go run ./hack/scaleway-e2e-run \
   --confirm-run-id=11111111-1111-4111-8111-111111111111
 ```
 
+Load those credentials from process memory or a root-only volatile filesystem
+such as a verified Linux `tmpfs`. Never copy them into the repository, evidence
+directory, shell arguments, a systemd unit, or another persistent runner path.
+The executor streams the controller Secret, removes the keys from unrelated
+child-process environments, and retains no plaintext credential artifact. The
+volatile source must be removed after execution; destroying the disposable
+cluster removes the controller Secret.
+
 For a `base` request, this command executes only the fixed non-qualifying smoke:
 ten logical PVCs, cross-node RWX, isolation and archive, controller replacement,
 provider attachment inventory bounded to the two parents and two nodes,

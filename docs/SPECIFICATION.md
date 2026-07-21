@@ -6836,6 +6836,13 @@ reviewed first, then a new immediate approval is required before the operator
 runs `hack/scaleway-e2e-run --execute` from a dedicated non-production test
 environment. This keeps the cloud safety boundary visible and avoids a second
 CI control plane while preserving the required real-provider evidence.
+Provider credentials used by that environment must remain in process memory or
+on a root-only volatile filesystem; they must never be copied into the retained
+evidence directory or another persistent runner path. The scenario runner must
+remove the credentials from the inherited child-process environment, expose
+them only to exact provider CLI calls, and stream the controller-only Kubernetes
+Secret without putting plaintext or its rendered manifest in a file or process
+argument. Success and failure logs must not contain credential values.
 
 A v1 release candidate must record a successful real Kapsule E2E result for the
 exact Git commit, chart package, driver image digest, and every CSI sidecar image

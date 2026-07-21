@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,6 +74,119 @@ func TestScenarioRunnerDoesNotSuppressShellErrexit(t *testing.T) {
 	contents := string(encoded)
 	if strings.Contains(contents, `if ! "$function_name"`) || !strings.Contains(contents, `"$function_name" >"$evidence" 2>&1`) {
 		t.Fatal("scenario functions must run as simple commands so set -e remains effective inside them")
+	}
+}
+
+func TestScenarioCredentialSecretIsStreamedAndNotPersisted(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	temporary := t.TempDir()
+	evidence := filepath.Join(temporary, "evidence")
+	streamProof := filepath.Join(temporary, "stream-proof")
+	argumentLeak := filepath.Join(temporary, "argument-leak")
+	environmentLeak := filepath.Join(temporary, "environment-leak")
+
+	kubectl := writeExecutable(t, temporary, "kubectl", `#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    *SCWTESTACCESSFIXTURE*|*test-secret-fixture*) : >"$ARGUMENT_LEAK" ;;
+  esac
+done
+if [ "${SCW_ACCESS_KEY+x}" = x ] || [ "${SCW_SECRET_KEY+x}" = x ]; then
+  : >"$ENVIRONMENT_LEAK"
+fi
+case "$*" in
+  "get namespace driver-system") exit 1 ;;
+  "create namespace driver-system") exit 0 ;;
+  "label namespace driver-system "*) exit 0 ;;
+  *"create secret generic scaleway-sfs-subdir-csi-credentials --from-env-file=/dev/stdin --dry-run=client -o yaml")
+    streamed=$(cat)
+    expected='SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE
+SCW_SECRET_KEY=test-secret-fixture'
+    [ "$streamed" = "$expected" ] || exit 91
+    printf '%s\n' streamed >"$STREAM_PROOF"
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-credentials'
+    ;;
+  "apply -f -")
+    applied=$(cat)
+    case "$applied" in
+      *"name: scaleway-sfs-subdir-csi-credentials"*) exit 0 ;;
+      *) exit 92 ;;
+    esac
+    ;;
+  *) exit 93 ;;
+esac
+`)
+	admin := writeExecutable(t, temporary, "csi-admin", "#!/bin/sh\n[ \"$1\" = version ]\n")
+	unused := writeExecutable(t, temporary, "unused", "#!/bin/sh\nexit 99\n")
+	results := filepath.Join(temporary, "results.json")
+	command := exec.Command(script, "run-smoke",
+		"--kubeconfig=/tmp/kubeconfig", "--chart=/tmp/chart.tgz", "--values=/tmp/values.yaml",
+		"--namespace=driver-system", "--release=driver", "--admin="+admin,
+		"--workload-image=example.invalid/workload@sha256:"+strings.Repeat("a", 64), "--profile=base",
+		"--project-id=22222222-2222-4222-8222-222222222222", "--region=fr-par",
+		"--run-id=11111111-1111-4111-8111-111111111111", "--cluster-id=33333333-3333-4333-8333-333333333333",
+		"--parent-a=77777777-7777-4777-8777-777777777777", "--parent-b=88888888-8888-4888-8888-888888888888",
+		"--results="+results, "--evidence-dir="+evidence)
+	command.Env = append(environmentWithoutScalewayCredentials(),
+		"SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE", // gitleaks:allow -- non-secret test fixture.
+		"SCW_SECRET_KEY=test-secret-fixture",  // gitleaks:allow -- non-secret test fixture.
+		"KUBECTL="+kubectl, "HELM="+unused, "JQ="+unused, "SCW="+unused,
+		"STREAM_PROOF="+streamProof, "ARGUMENT_LEAK="+argumentLeak, "ENVIRONMENT_LEAK="+environmentLeak)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("scenario unexpectedly continued after the intentional identity-Secret failure: %s", output)
+	}
+	if proof, err := os.ReadFile(streamProof); err != nil || string(proof) != "streamed\n" {
+		t.Fatalf("credential stdin proof = %q, %v", proof, err)
+	}
+	if _, err := os.Stat(argumentLeak); !os.IsNotExist(err) {
+		t.Fatalf("credential appeared in a kubectl process argument: %v", err)
+	}
+	if _, err := os.Stat(environmentLeak); !os.IsNotExist(err) {
+		t.Fatalf("kubectl inherited Scaleway credentials: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(evidence, ".credentials.*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("persistent credential files = %v, %v", matches, err)
+	}
+	err = filepath.WalkDir(evidence, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		contents, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(contents), "SCWTESTACCESSFIXTURE") || strings.Contains(string(contents), "test-secret-fixture") {
+			return fmt.Errorf("credential fixture persisted in %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChildToolEnvironmentOmitsScalewayCredentials(t *testing.T) {
+	t.Setenv("SCW_ACCESS_KEY", "SCWTESTACCESSFIXTURE") // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("SCW_SECRET_KEY", "test-secret-fixture")  // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("SFS_SUBDIR_E2E_ENVIRONMENT_FIXTURE", "retained-fixture")
+
+	retained := false
+	for _, entry := range environmentWithoutScalewayCredentials() {
+		name, value, _ := strings.Cut(entry, "=")
+		if name == "SCW_ACCESS_KEY" || name == "SCW_SECRET_KEY" {
+			t.Fatalf("credential environment entry survived filtering: %s", name)
+		}
+		if name == "SFS_SUBDIR_E2E_ENVIRONMENT_FIXTURE" && value == "retained-fixture" {
+			retained = true
+		}
+	}
+	if !retained {
+		t.Fatal("environment filtering removed an unrelated entry")
 	}
 }
 

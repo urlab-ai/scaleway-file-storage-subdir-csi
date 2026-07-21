@@ -8,6 +8,16 @@ HELM=${HELM:-helm}
 JQ=${JQ:-jq}
 SCW=${SCW:-scw}
 
+# The live executor must receive provider credentials, but kubectl, Helm, jq,
+# and the other scenario tools must not inherit them. Keep an unexported copy
+# in this shell and expose it only to the exact scw invocation that needs it.
+# The controller Secret is populated through stdin below, never through process
+# arguments or a plaintext file in the retained evidence directory.
+provider_access_key=${SCW_ACCESS_KEY-}
+provider_secret_key=${SCW_SECRET_KEY-}
+unset SCW_ACCESS_KEY SCW_SECRET_KEY
+readonly provider_access_key provider_secret_key
+
 mode=${1:-}
 [ "$mode" = run-smoke ] || [ "$mode" = run-pre ] || [ "$mode" = run-post ] || [ "$mode" = cleanup ] || {
   echo "usage: run-kapsule-e2e.sh <run-smoke|run-pre|run-post|cleanup> --closed-flags" >&2
@@ -88,7 +98,7 @@ export KUBECONFIG=$kubeconfig
 
 k() { "$KUBECTL" "$@"; }
 h() { "$HELM" "$@"; }
-s() { "$SCW" "$@"; }
+s() { SCW_ACCESS_KEY=$provider_access_key SCW_SECRET_KEY=$provider_secret_key "$SCW" "$@"; }
 one_name() {
   value=$(k -n "$namespace" get "$1" -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=$2" -o name)
   [ "$(printf '%s\n' "$value" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] || return 1
@@ -106,16 +116,15 @@ short_run=$(printf '%s' "$run_id" | cut -c1-8)
 run_label="sfs-subdir-e2e-run=$run_id"
 
 write_credentials() {
-  : "${SCW_ACCESS_KEY:?SCW_ACCESS_KEY is required only for approved live execution}"
-  : "${SCW_SECRET_KEY:?SCW_SECRET_KEY is required only for approved live execution}"
-  secret_file=$(mktemp "$evidence_dir/.credentials.XXXXXX")
-  chmod 600 "$secret_file"
-  trap 'rm -f "$secret_file"' EXIT HUP INT TERM
-  printf 'SCW_ACCESS_KEY=%s\nSCW_SECRET_KEY=%s\n' "$SCW_ACCESS_KEY" "$SCW_SECRET_KEY" >"$secret_file"
-  k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-credentials \
-    --from-env-file="$secret_file" --dry-run=client -o yaml | k apply -f -
-  rm -f "$secret_file"
-  trap - EXIT HUP INT TERM
+  : "${provider_access_key:?SCW_ACCESS_KEY is required only for approved live execution}"
+  : "${provider_secret_key:?SCW_SECRET_KEY is required only for approved live execution}"
+  # /dev/stdin keeps plaintext and the generated Secret manifest out of the
+  # persistent evidence directory. The following install preflight also proves
+  # that both expected Secret keys are present before Helm can install anything.
+  printf 'SCW_ACCESS_KEY=%s\nSCW_SECRET_KEY=%s\n' "$provider_access_key" "$provider_secret_key" |
+    k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-credentials \
+      --from-env-file=/dev/stdin --dry-run=client -o yaml |
+    k apply -f -
 }
 
 helm_candidate() {

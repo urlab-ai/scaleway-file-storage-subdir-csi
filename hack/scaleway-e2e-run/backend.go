@@ -788,6 +788,9 @@ func (backend *scalewayBackend) exactPresent(ctx context.Context, kind, id strin
 
 func (backend *scalewayBackend) runScenarioCommand(ctx context.Context, arguments ...string) error {
 	command := exec.CommandContext(ctx, backend.scenarioTool, arguments...)
+	// The checked-in scenario tool immediately moves the two credentials into
+	// unexported shell variables and scopes them to its exact scw calls. It also
+	// needs their values once over stdin to create the controller-only Secret.
 	command.Env = os.Environ()
 	output, err := command.CombinedOutput()
 	logPath := filepath.Join(filepath.Dir(backend.plan.CleanupInventoryPath), "scenario-runner.log")
@@ -798,6 +801,23 @@ func (backend *scalewayBackend) runScenarioCommand(ctx context.Context, argument
 		return fmt.Errorf("Kapsule scenario command failed: %w", err) //nolint:staticcheck // Kapsule is a product name.
 	}
 	return nil
+}
+
+// environmentWithoutScalewayCredentials prevents general-purpose child tools
+// from inheriting provider authority they do not need. The scenario shell has a
+// narrower explicit boundary because it creates the controller Secret and runs
+// the few provider CLI observations required by the real E2E contract.
+func environmentWithoutScalewayCredentials() []string {
+	environment := os.Environ()
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "SCW_ACCESS_KEY" || name == "SCW_SECRET_KEY" {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func (backend *scalewayBackend) resource(kind, id, name string, created bool, tags []string) e2ecleanup.Resource {
