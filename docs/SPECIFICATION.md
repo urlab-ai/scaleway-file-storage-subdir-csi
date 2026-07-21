@@ -6803,8 +6803,15 @@ Cleanup must:
 - refuse broad selectors;
 - delete run-owned workload Pods and PVCs through normal Kubernetes workflows,
   wait for PV deletion, VolumeAttachment removal, unpublish, and unstage, then
-  run and verify `csi-admin uninstall prepare` before deleting Helm-managed
-  RBAC, controller, or node resources;
+  inventory every remaining terminal allocation through the exact run-labelled
+  namespace and installation identity. Before safe uninstall it must use the
+  normal request-bound `csi-admin gc submit` dry-run and execute workflow to
+  collect only those exact run-owned `Archived` or `Retained` volumes, retain
+  each audit, and require every allocation to be a permanent non-reserving
+  `Deleted` tombstone. A foreign, malformed, non-terminal, unlabelled, or
+  out-of-parent allocation blocks cleanup; then run and verify
+  `csi-admin uninstall prepare` before deleting Helm-managed RBAC, controller,
+  or node resources;
 - never delete reused or pre-existing clusters, Private Networks, or
   filesystems unless they were created by the same run ID;
 - print an audit summary before deletion;

@@ -416,6 +416,128 @@ remove_test_workloads() {
   done
 }
 
+read_test_allocations() {
+	# The E2E installation ID is the exact run ID. This remains a durable
+	# ownership boundary after Kubernetes has removed the labelled PVCs.
+	k -n "$namespace" get configmaps -l app.kubernetes.io/name=scaleway-sfs-subdir-csi -o json | "$JQ" -e -c \
+	  --arg run "$run_id" --arg parent_a "$parent_a" --arg parent_b "$parent_b" '
+	    [.items[] | select(.data["record.json"]? != null) |
+	      (.data["record.json"] | fromjson) as $record |
+	      {
+	        logicalVolumeID: $record.logicalVolumeID,
+	        state: $record.state,
+	        parentFilesystemID: ($record.parentFilesystemID // ""),
+	        createVolumeRequestName: ($record.createVolumeRequestName // ""),
+	        installationID: (.metadata.labels["file-storage-subdir.csi.urlab.ai/installation-id"] // ""),
+	        labelledLogicalVolumeID: (.metadata.labels["file-storage-subdir.csi.urlab.ai/logical-volume-id"] // "")
+	      }
+	    ] as $records |
+	    if ($records | length) > 2000 then error("E2E allocation inventory exceeds the supported scale envelope")
+	    elif any($records[];
+	      (.logicalVolumeID | test("^lv-[0-9a-f]{32}$") | not) or
+	      .installationID != $run or .labelledLogicalVolumeID != .logicalVolumeID or
+	      (.state != "Archived" and .state != "Retained" and .state != "Deleted") or
+	      ((.state == "Archived" or .state == "Retained") and
+	        ((.parentFilesystemID != $parent_a and .parentFilesystemID != $parent_b) or
+	         (.createVolumeRequestName | test("^pvc-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$") | not))))
+	      then error("E2E allocation is foreign, malformed, non-terminal, or outside the exact parent set")
+	    elif ($records | map(.logicalVolumeID) | unique | length) != ($records | length)
+	      then error("E2E allocation inventory contains a duplicate logical volume")
+	    else $records | sort_by(.logicalVolumeID) end
+	  '
+}
+
+gc_test_allocations() {
+	namespace_run=$(k get namespace "$namespace" -o json | "$JQ" -er '.metadata.labels["sfs-subdir-e2e-run"] // ""')
+	[ "$namespace_run" = "$run_id" ] || {
+	  echo "refuse E2E GC outside the exact run-labelled namespace" >&2
+	  return 1
+	}
+	identity_run=$(k -n "$namespace" get secret scaleway-sfs-subdir-csi-identity -o jsonpath='{.data.installationID}' | base64 -d)
+	[ "$identity_run" = "$run_id" ] || {
+	  echo "refuse E2E GC for an installation identity outside the exact run" >&2
+	  return 1
+	}
+
+	gc_plan="$evidence_dir/cleanup-gc-plan-$run_id.json"
+	current_allocations="$evidence_dir/.cleanup-current-allocations-$run_id.json"
+	read_test_allocations >"$current_allocations"
+	chmod 600 "$current_allocations"
+	if [ ! -s "$gc_plan" ]; then
+	  operations="$evidence_dir/.cleanup-gc-operations-$run_id.ndjson"
+	  : >"$operations"
+	  "$JQ" -r '.[] | select(.state == "Archived" or .state == "Retained") | [.logicalVolumeID, .state] | @tsv' "$current_allocations" |
+	    while IFS="$(printf '\t')" read -r logical_id expected_state; do
+	      [ -n "$logical_id" ] || continue
+	      dry_run_request=$(new_uuid)
+	      execute_request=$(new_uuid)
+	      "$JQ" -cn --arg logical "$logical_id" --arg state "$expected_state" \
+	        --arg dry "$dry_run_request" --arg execute "$execute_request" \
+	        '{logicalVolumeID:$logical,expectedState:$state,dryRunRequestID:$dry,executeRequestID:$execute}' >>"$operations"
+	    done
+	  gc_plan_tmp="$gc_plan.tmp"
+	  "$JQ" -n -c --arg run "$run_id" --arg namespace "$namespace" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+	    --slurpfile allocations "$current_allocations" --slurpfile operations "$operations" \
+	    '{schemaVersion:"1",runId:$run,namespace:$namespace,parentFilesystemIDs:([$parent_a,$parent_b]|sort),allocationIDs:($allocations[0]|map(.logicalVolumeID)),operations:$operations}' >"$gc_plan_tmp"
+	  chmod 600 "$gc_plan_tmp"
+	  mv "$gc_plan_tmp" "$gc_plan"
+	  sync
+	  rm -f "$operations"
+	fi
+
+	"$JQ" -e --arg run "$run_id" --arg namespace "$namespace" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+	  --slurpfile current "$current_allocations" '
+	    .schemaVersion == "1" and .runId == $run and .namespace == $namespace and
+	    .parentFilesystemIDs == ([$parent_a,$parent_b]|sort) and
+	    .allocationIDs == ($current[0]|map(.logicalVolumeID)) and
+	    (.operations|map(.logicalVolumeID)|unique|length) == (.operations|length) and
+	    all(.operations[];
+	      (.logicalVolumeID|test("^lv-[0-9a-f]{32}$")) and
+	      (.expectedState == "Archived" or .expectedState == "Retained") and
+	      (.dryRunRequestID|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+	      (.executeRequestID|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")))
+	  ' "$gc_plan" >/dev/null
+
+	"$JQ" -r '.operations[] | [.logicalVolumeID,.expectedState,.dryRunRequestID,.executeRequestID] | @tsv' "$gc_plan" |
+	  while IFS="$(printf '\t')" read -r logical_id expected_state dry_run_request execute_request; do
+	    observed_state=$(read_test_allocations | "$JQ" -er --arg logical "$logical_id" '[.[]|select(.logicalVolumeID==$logical)|.state] | if length == 1 then .[0] else error("planned E2E allocation is absent or duplicated") end')
+	    [ "$observed_state" != Deleted ] || continue
+	    [ "$observed_state" = "$expected_state" ] || {
+	      echo "planned E2E GC state changed unexpectedly for $logical_id" >&2
+	      return 1
+	    }
+	    dry_run_result="$evidence_dir/gc-$logical_id-dry-run.json"
+	    execute_result="$evidence_dir/gc-$logical_id-execute.json"
+	    "$admin" gc submit --kubeconfig="$kubeconfig" --namespace="$namespace" --release="$release" \
+	      --request-id="$dry_run_request" --logical-volume-id="$logical_id" --mode=dry-run \
+	      --expected-state="$expected_state" --timeout=30m >"$dry_run_result.tmp"
+	    "$JQ" -e --arg request "$dry_run_request" --arg logical "$logical_id" --arg state "$expected_state" \
+	      --arg parent_a "$parent_a" --arg parent_b "$parent_b" '
+	        .requestID == $request and .mode == "dry-run" and .logicalVolumeID == $logical and
+	        .previousState == $state and .finalState == $state and .completed == false and
+	        (.parentFilesystemID == $parent_a or .parentFilesystemID == $parent_b)
+	      ' "$dry_run_result.tmp" >/dev/null
+	    chmod 600 "$dry_run_result.tmp"
+	    mv "$dry_run_result.tmp" "$dry_run_result"
+	    "$admin" gc submit --kubeconfig="$kubeconfig" --namespace="$namespace" --release="$release" \
+	      --request-id="$execute_request" --logical-volume-id="$logical_id" --mode=execute \
+	      --expected-state="$expected_state" --timeout=30m >"$execute_result.tmp"
+	    "$JQ" -e --arg request "$execute_request" --arg logical "$logical_id" --arg state "$expected_state" \
+	      --arg parent_a "$parent_a" --arg parent_b "$parent_b" '
+	        .requestID == $request and .mode == "execute" and .logicalVolumeID == $logical and
+	        .previousState == $state and .finalState == "Deleted" and .completed == true and
+	        (.quarantinePath|length) > 0 and
+	        (.parentFilesystemID == $parent_a or .parentFilesystemID == $parent_b)
+	      ' "$execute_result.tmp" >/dev/null
+	    chmod 600 "$execute_result.tmp"
+	    mv "$execute_result.tmp" "$execute_result"
+	  done
+
+	read_test_allocations >"$current_allocations"
+	"$JQ" -e 'all(.[]; .state == "Deleted")' "$current_allocations" >/dev/null
+	rm -f "$current_allocations"
+}
+
 scenario_decommission() {
   remove_test_workloads
   draining="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"},{\"id\":\"$parent_b\",\"name\":\"e2e-parent-b\",\"state\":\"draining\"}]"
@@ -470,6 +592,9 @@ cleanup_cluster() {
 	    initial_workload_pods=$(k -n "$namespace" get pods -l "$run_label" -o json | "$JQ" -er '.items | length')
 	    initial_pvcs=$(k -n "$namespace" get pvc -o json | "$JQ" -er '.items | length')
 	    remove_test_workloads
+	    if [ "$helm_status" = deployed ]; then
+	      gc_test_allocations
+	    fi
 	    request=$run_id
 	    uninstall_dry_run="$evidence_dir/.uninstall-dry-run-$run_id.json"
 	    uninstall_error="$evidence_dir/bootstrap-uninstall-unavailable-$run_id.log"

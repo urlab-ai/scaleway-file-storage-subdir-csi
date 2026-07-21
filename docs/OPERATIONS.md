@@ -224,6 +224,14 @@ credentialed cleanup command
 repeats live reads, but still requires a new explicit approval immediately
 before mutation.
 
+The E2E cleanup owns only its dedicated run-labelled namespace, installation
+identity, parents, and terminal test allocations. If the test delete policy
+produced `Archived` or `Retained` records, the runner durably records an exact
+GC plan, runs and retains one `csi-admin gc submit` dry-run and execute audit per
+logical volume, and requires every record to reach the permanent `Deleted`
+tombstone before safe uninstall. It never weakens the production uninstall
+contract or makes `csi-admin uninstall prepare` delete retained user data.
+
 Run the focused local trust-boundary tests with `make test-e2e-safety`. This
 does not contact Kubernetes or Scaleway and does not replace real E2E evidence.
 

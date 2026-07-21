@@ -184,6 +184,96 @@ func TestPVCCountFilterKeepsTheKubernetesListAsInput(t *testing.T) {
 	}
 }
 
+func TestE2ECleanupAllocationInventoryFailsClosed(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in cleanup script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	encoded, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "read_test_allocations() {")
+	if start < 0 {
+		t.Fatal("E2E allocation inventory function is missing")
+	}
+	end := strings.Index(contents[start:], "\n}\n\ngc_test_allocations()")
+	if end < 0 {
+		t.Fatal("E2E allocation inventory function boundary is missing")
+	}
+	readAllocations := contents[start : start+end+2]
+
+	const (
+		runID     = "11111111-1111-4111-8111-111111111111"
+		logicalID = "lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		parentA   = "77777777-7777-4777-8777-777777777777"
+		parentB   = "88888888-8888-4888-8888-888888888888"
+	)
+	for _, test := range []struct {
+		name           string
+		installationID string
+		state          string
+		parentID       string
+		wantSuccess    bool
+	}{
+		{name: "exact archived allocation", installationID: runID, state: "Archived", parentID: parentA, wantSuccess: true},
+		{name: "foreign installation", installationID: "22222222-2222-4222-8222-222222222222", state: "Archived", parentID: parentA},
+		{name: "active allocation", installationID: runID, state: "Ready", parentID: parentA},
+		{name: "foreign parent", installationID: runID, state: "Archived", parentID: "99999999-9999-4999-8999-999999999999"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := json.Marshal(map[string]string{
+				"logicalVolumeID": logicalID, "state": test.state, "parentFilesystemID": test.parentID,
+				"createVolumeRequestName": "pvc-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture, err := json.Marshal(map[string]any{"items": []any{map[string]any{
+				"metadata": map[string]any{"labels": map[string]string{
+					"file-storage-subdir.csi.urlab.ai/installation-id":   test.installationID,
+					"file-storage-subdir.csi.urlab.ai/logical-volume-id": logicalID,
+				}},
+				"data": map[string]string{"record.json": string(record)},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			temporary := t.TempDir()
+			fixturePath := filepath.Join(temporary, "configmaps.json")
+			if err := os.WriteFile(fixturePath, fixture, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			harness := `set -eu
+JQ=$1
+fixture=$2
+namespace=driver-system
+run_id=` + runID + `
+parent_a=` + parentA + `
+parent_b=` + parentB + `
+k() { cat "$fixture"; }
+` + readAllocations + `
+read_test_allocations
+`
+			command := exec.Command("sh", "-c", harness, "allocation-inventory-test", jq, fixturePath)
+			output, runErr := command.CombinedOutput()
+			if test.wantSuccess {
+				if runErr != nil || !strings.Contains(string(output), logicalID) {
+					t.Fatalf("valid inventory error = %v, output = %s", runErr, output)
+				}
+			} else if runErr == nil {
+				t.Fatalf("unsafe inventory succeeded: %s", output)
+			}
+		})
+	}
+}
+
 func TestScenarioCredentialSecretIsStreamedAndNotPersisted(t *testing.T) {
 	working, err := os.Getwd()
 	if err != nil {
@@ -310,10 +400,14 @@ func TestCleanupScriptDerivesPreconditionsFromCompletedUninstall(t *testing.T) {
 	temporary := t.TempDir()
 	helmState := filepath.Join(temporary, "helm-state")
 	namespaceState := filepath.Join(temporary, "namespace-state")
+	allocationState := filepath.Join(temporary, "allocation-state")
 	if err := os.WriteFile(helmState, []byte("present\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(namespaceState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(allocationState, []byte("Archived\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	helm := writeExecutable(t, temporary, "helm", `#!/bin/sh
@@ -325,13 +419,19 @@ case "$1" in
       printf '%s\n' '[]'
     fi
     ;;
-  status) printf '%s\n' '{"name":"driver"}' ;;
+  status) printf '%s\n' '{"name":"driver","info":{"status":"deployed"}}' ;;
   uninstall) printf '%s\n' absent >"$HELM_STATE" ;;
   *) exit 91 ;;
 esac
 `)
 	kubectl := writeExecutable(t, temporary, "kubectl", `#!/bin/sh
 case "$*" in
+  "get namespace driver-system -o json") printf '%s\n' '{"metadata":{"labels":{"sfs-subdir-e2e-run":"11111111-1111-4111-8111-111111111111"}}}' ;;
+  "-n driver-system get secret scaleway-sfs-subdir-csi-identity -o jsonpath={.data.installationID}") printf '%s' 'MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx' ;;
+  "-n driver-system get configmaps -l app.kubernetes.io/name=scaleway-sfs-subdir-csi -o json")
+    state=$(sed -n '1p' "$ALLOCATION_STATE")
+    printf '%s\n' "{\"items\":[{\"metadata\":{\"labels\":{\"file-storage-subdir.csi.urlab.ai/installation-id\":\"11111111-1111-4111-8111-111111111111\",\"file-storage-subdir.csi.urlab.ai/logical-volume-id\":\"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"data\":{\"record.json\":\"{\\\"logicalVolumeID\\\":\\\"lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"state\\\":\\\"$state\\\",\\\"parentFilesystemID\\\":\\\"77777777-7777-4777-8777-777777777777\\\",\\\"createVolumeRequestName\\\":\\\"pvc-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\\\"}\"}}]}"
+    ;;
   *"get pods -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o json"*) printf '%s\n' '{"items":[]}' ;;
   *"get pvc -o json"*) printf '%s\n' '{"items":[]}' ;;
   *"get pv -o json"*) printf '%s\n' '{"items":[]}' ;;
@@ -346,10 +446,33 @@ case "$*" in
 esac
 `)
 	admin := writeExecutable(t, temporary, "csi-admin", `#!/bin/sh
-case "$*" in
-  *"--mode=dry-run"*) printf '%s\n' '{"ready":true,"completed":false,"blockers":[]}' ;;
-  *"--mode=execute"*) printf '%s\n' '{"ready":true,"completed":true,"blockers":[],"audit":{}}' ;;
-  *) exit 93 ;;
+case "$1" in
+  gc)
+    for argument in "$@"; do
+      case "$argument" in
+        --request-id=*) request=${argument#*=} ;;
+        --logical-volume-id=*) logical=${argument#*=} ;;
+        --mode=*) mode=${argument#*=} ;;
+        --expected-state=*) expected=${argument#*=} ;;
+      esac
+    done
+    if [ "$mode" = dry-run ]; then
+      printf '{"requestID":"%s","mode":"dry-run","logicalVolumeID":"%s","parentFilesystemID":"77777777-7777-4777-8777-777777777777","previousState":"%s","finalState":"%s","targetPath":"/archive","completed":false}\n' "$request" "$logical" "$expected" "$expected"
+    elif [ "$mode" = execute ]; then
+      printf '%s\n' Deleted >"$ALLOCATION_STATE"
+      printf '{"requestID":"%s","mode":"execute","logicalVolumeID":"%s","parentFilesystemID":"77777777-7777-4777-8777-777777777777","previousState":"%s","finalState":"Deleted","targetPath":"/archive","quarantinePath":"/quarantine","completed":true}\n' "$request" "$logical" "$expected"
+    else
+      exit 93
+    fi
+    ;;
+  uninstall)
+    case "$*" in
+      *"--mode=dry-run"*) printf '%s\n' '{"ready":true,"completed":false,"blockers":[]}' ;;
+      *"--mode=execute"*) printf '%s\n' '{"ready":true,"completed":true,"blockers":[],"audit":{}}' ;;
+      *) exit 94 ;;
+    esac
+    ;;
+  *) exit 95 ;;
 esac
 `)
 	validator := writeExecutable(t, temporary, "validator", `#!/bin/sh
@@ -367,7 +490,7 @@ esac
 		"--run-id=11111111-1111-4111-8111-111111111111",
 		"--parent-a=77777777-7777-4777-8777-777777777777", "--parent-b=88888888-8888-4888-8888-888888888888",
 		"--evidence-dir="+evidence, "--preconditions="+preconditions)
-	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "HELM_STATE="+helmState, "NAMESPACE_STATE="+namespaceState)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "HELM_STATE="+helmState, "NAMESPACE_STATE="+namespaceState, "ALLOCATION_STATE="+allocationState)
 	if output, err := command.CombinedOutput(); err != nil {
 		cleanupLog, _ := os.ReadFile(filepath.Join(evidence, "cleanup-kubernetes.log"))
 		t.Fatalf("cleanup error = %v, output = %s, cleanup log = %s", err, output, cleanupLog)
@@ -392,6 +515,18 @@ esac
 		}
 		if !value {
 			t.Fatalf("cleanup precondition %q is false", name)
+		}
+	}
+	if state, err := os.ReadFile(allocationState); err != nil || string(state) != "Deleted\n" {
+		t.Fatalf("cleanup GC state = %q, %v", state, err)
+	}
+	for _, name := range []string{
+		"cleanup-gc-plan-11111111-1111-4111-8111-111111111111.json",
+		"gc-lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dry-run.json",
+		"gc-lv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-execute.json",
+	} {
+		if info, err := os.Stat(filepath.Join(evidence, name)); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("cleanup GC evidence %q info = %v, %v", name, info, err)
 		}
 	}
 }
