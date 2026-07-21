@@ -6608,6 +6608,11 @@ release values, checksum manifest, native `csi-admin`, and commercial allowlist.
 Every checksum-manifest entry must contain one lowercase SHA-256 and one plain
 artifact basename. Path-prefixed, recursive, duplicate, or unsafe names fail
 closed before provider mutation.
+Candidate construction must also fail before writing a candidate manifest
+unless the chart, release values, and checksum manifest are exact files in one
+artifact directory and the checksum manifest covers both the chart and release
+values. Every checksum entry is verified against that directory during
+construction; qualification and real-E2E preflight repeat the same proof.
 Because the pinned APIs do not expose one stable endpoint for product maturity,
 remaining File Storage quota, and pricing, the closed request also carries a
 canonical UTC provider-review timestamp no older than 24 hours, the documented

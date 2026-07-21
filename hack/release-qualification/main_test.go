@@ -107,6 +107,78 @@ func TestCandidateAndQualificationVerifyExactArtifacts(t *testing.T) {
 	}
 }
 
+func TestCandidateRejectsIncompleteChecksumManifestBeforeWriting(t *testing.T) {
+	candidateDir := t.TempDir()
+	chart := filepath.Join(candidateDir, "chart.tgz")
+	values := filepath.Join(candidateDir, "values.yaml")
+	checksums := filepath.Join(candidateDir, "checksums.txt")
+	if err := os.WriteFile(chart, []byte("chart"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(values, []byte("values"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chartSum := sha256.Sum256([]byte("chart"))
+	if err := os.WriteFile(checksums, []byte(hex.EncodeToString(chartSum[:])+"  chart.tgz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	digest := "sha256:" + strings.Repeat("1", 64)
+	output := filepath.Join(candidateDir, "candidate.json")
+	err := run([]string{"candidate", "--output=" + output, "--release-tag=v1.2.3", "--commit=" + strings.Repeat("a", 40),
+		"--driver-name=driver.example.org", "--commercial-types=TYPE-A", "--chart=" + chart, "--values=" + values, "--checksums=" + checksums,
+		"--driver-image=registry.example/driver@" + digest,
+		"--provisioner-image=registry.example/provisioner@" + digest,
+		"--attacher-image=registry.example/attacher@" + digest,
+		"--registrar-image=registry.example/registrar@" + digest,
+		"--liveness-image=registry.example/liveness@" + digest})
+	if err == nil || !strings.Contains(err.Error(), `does not cover artifact "values.yaml"`) {
+		t.Fatalf("candidate error = %v, want missing values checksum", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("candidate output exists after rejected artifact set: %v", statErr)
+	}
+}
+
+func TestCandidateRequiresOneArtifactDirectory(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	if err := os.MkdirAll(left, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(right, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chart := filepath.Join(left, "chart.tgz")
+	values := filepath.Join(right, "values.yaml")
+	checksums := filepath.Join(left, "checksums.txt")
+	if err := os.WriteFile(chart, []byte("chart"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(values, []byte("values"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chartSum := sha256.Sum256([]byte("chart"))
+	valuesSum := sha256.Sum256([]byte("values"))
+	checksumContent := hex.EncodeToString(chartSum[:]) + "  chart.tgz\n" + hex.EncodeToString(valuesSum[:]) + "  values.yaml\n"
+	if err := os.WriteFile(checksums, []byte(checksumContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	digest := "sha256:" + strings.Repeat("1", 64)
+	err := run([]string{"candidate", "--output=" + filepath.Join(root, "candidate.json"), "--release-tag=v1.2.3", "--commit=" + strings.Repeat("a", 40),
+		"--driver-name=driver.example.org", "--commercial-types=TYPE-A", "--chart=" + chart, "--values=" + values, "--checksums=" + checksums,
+		"--driver-image=registry.example/driver@" + digest,
+		"--provisioner-image=registry.example/provisioner@" + digest,
+		"--attacher-image=registry.example/attacher@" + digest,
+		"--registrar-image=registry.example/registrar@" + digest,
+		"--liveness-image=registry.example/liveness@" + digest})
+	if err == nil || !strings.Contains(err.Error(), "must share one artifact directory") {
+		t.Fatalf("candidate error = %v, want artifact-directory rejection", err)
+	}
+}
+
 func TestCleanupAuditMustMatchItsExactRunEvidence(t *testing.T) {
 	inventory := e2ecleanup.Inventory{
 		SchemaVersion: e2ecleanup.SchemaVersionV1, Phase: e2ecleanup.PhaseComplete,

@@ -108,11 +108,37 @@ func writeCandidate(arguments []string) error {
 			{Name: "livenessprobe", Reference: livenessImage},
 		},
 	}
+	candidateDirectory, err := commonArtifactDirectory(chart, values, checksums)
+	if err != nil {
+		return err
+	}
+	if err := releasequalification.VerifyCandidateDirectory(candidateDirectory, manifest); err != nil {
+		return fmt.Errorf("verify candidate artifact set: %w", err)
+	}
 	encoded, err := releasequalification.EncodeCandidate(manifest)
 	if err != nil {
 		return err
 	}
 	return writeNew(output, append(encoded, '\n'))
+}
+
+func commonArtifactDirectory(paths ...string) (string, error) {
+	var common string
+	for _, path := range paths {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve candidate artifact directory: %w", err)
+		}
+		directory := filepath.Dir(absolute)
+		if common == "" {
+			common = directory
+			continue
+		}
+		if directory != common {
+			return "", fmt.Errorf("candidate chart, values, and checksum manifest must share one artifact directory")
+		}
+	}
+	return common, nil
 }
 
 func verifyQualification(arguments []string) error {
