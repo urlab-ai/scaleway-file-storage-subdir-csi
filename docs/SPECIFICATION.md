@@ -6613,6 +6613,10 @@ unless the chart, release values, and checksum manifest are exact files in one
 artifact directory and the checksum manifest covers both the chart and release
 values. Every checksum entry is verified against that directory during
 construction; qualification and real-E2E preflight repeat the same proof.
+Live preflight treats the provider's typed Kapsule availability values
+`available` and `scarce` as creatable because `scarce` explicitly means limited
+availability. It fails closed for `shortage`, missing types, and unknown or
+empty availability values before provider mutation.
 Because the pinned APIs do not expose one stable endpoint for product maturity,
 remaining File Storage quota, and pricing, the closed request also carries a
 canonical UTC provider-review timestamp no older than 24 hours, the documented

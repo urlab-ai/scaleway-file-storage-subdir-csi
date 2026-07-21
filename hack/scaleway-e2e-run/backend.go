@@ -123,8 +123,11 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 		return fmt.Errorf("verify candidate artifacts: %w", err)
 	}
 	candidateDigest, err := releasequalification.CandidateManifestDigest(candidateBytes)
-	if err != nil || candidateDigest != plan.Artifacts.CandidateDigest {
-		return fmt.Errorf("candidate manifest differs from the planned digest: %w", err)
+	if err != nil {
+		return fmt.Errorf("digest candidate manifest: %w", err)
+	}
+	if candidateDigest != plan.Artifacts.CandidateDigest {
+		return fmt.Errorf("candidate manifest differs from the planned digest")
 	}
 	adminInfo, err := os.Lstat(request.AdminBinary)
 	if err != nil || !adminInfo.Mode().IsRegular() || adminInfo.Mode()&0o111 == 0 {
@@ -162,14 +165,25 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 	if err != nil {
 		return err
 	}
+	if types == nil {
+		return fmt.Errorf("list regional Kapsule types returned an empty response")
+	}
 	typeFound := false
+	var typeAvailability k8sapi.ClusterTypeAvailability
 	for _, clusterType := range types.ClusterTypes {
-		if clusterType != nil && clusterType.Name == request.KapsuleType && clusterType.Availability.String() == "available" {
+		if clusterType != nil && clusterType.Name == request.KapsuleType {
+			if typeFound {
+				return fmt.Errorf("regional catalog contains duplicate Kapsule type %q", request.KapsuleType)
+			}
 			typeFound = true
+			typeAvailability = clusterType.Availability
 		}
 	}
 	if !typeFound {
-		return fmt.Errorf("planned Kapsule type is not currently available")
+		return fmt.Errorf("planned Kapsule type %q is absent from the regional catalog", request.KapsuleType)
+	}
+	if !creatableClusterTypeAvailability(typeAvailability) {
+		return fmt.Errorf("planned Kapsule type %q has non-creatable availability %q", request.KapsuleType, string(typeAvailability))
 	}
 	serverTypes, err := backend.instance.ListServersTypes(&instanceapi.ListServersTypesRequest{Zone: scw.Zone(request.Zone)}, scw.WithAllPages(), scw.WithContext(ctx))
 	if err != nil {
@@ -196,6 +210,13 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 		return fmt.Errorf("validate File Storage regional availability returned an empty response")
 	}
 	return nil
+}
+
+// creatableClusterTypeAvailability follows the provider's closed stock
+// contract: scarce means limited availability and still permits creation,
+// while shortage and any future or missing value fail closed.
+func creatableClusterTypeAvailability(availability k8sapi.ClusterTypeAvailability) bool {
+	return availability == k8sapi.ClusterTypeAvailabilityAvailable || availability == k8sapi.ClusterTypeAvailabilityScarce
 }
 
 func validateProviderReviewFresh(review e2eplan.ProviderReview, now time.Time) error {
