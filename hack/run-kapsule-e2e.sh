@@ -144,7 +144,7 @@ wait_pvcs_bound() {
   selector=$1
   deadline=$(( $(date +%s) + 900 ))
   while :; do
-    counts=$(k -n "$namespace" get pvc -l "$selector" -o json | "$JQ" -r '[.items | length, [.items[] | select(.status.phase == "Bound")] | length] | @tsv')
+    counts=$(k -n "$namespace" get pvc -l "$selector" -o json | "$JQ" -r '[ (.items | length), ([.items[] | select(.status.phase == "Bound")] | length) ] | @tsv')
     total=$(printf '%s' "$counts" | cut -f1)
     bound=$(printf '%s' "$counts" | cut -f2)
     [ "$total" -gt 0 ] && [ "$total" = "$bound" ] && return 0

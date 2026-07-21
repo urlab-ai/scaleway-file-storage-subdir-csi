@@ -77,6 +77,36 @@ func TestScenarioRunnerDoesNotSuppressShellErrexit(t *testing.T) {
 	}
 }
 
+func TestPVCCountFilterKeepsTheKubernetesListAsInput(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in scenario script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	encoded, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const filter = `[ (.items | length), ([.items[] | select(.status.phase == "Bound")] | length) ] | @tsv`
+	if !strings.Contains(string(encoded), `"$JQ" -r '`+filter+`'`) {
+		t.Fatal("scenario script does not use the regression-tested PVC count filter")
+	}
+	fixture := `{"items":[{"status":{"phase":"Bound"}},{"status":{"phase":"Pending"}},{"status":{"phase":"Bound"}}]}`
+	command := exec.Command(jq, "-r", filter)
+	command.Stdin = strings.NewReader(fixture)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("PVC count filter error = %v, output = %s", err, output)
+	}
+	if string(output) != "3\t2\n" {
+		t.Fatalf("PVC count output = %q, want %q", output, "3\\t2\\n")
+	}
+}
+
 func TestScenarioCredentialSecretIsStreamedAndNotPersisted(t *testing.T) {
 	working, err := os.Getwd()
 	if err != nil {

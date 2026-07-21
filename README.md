@@ -29,13 +29,15 @@ The public source, module, CSI, and artifact identities are frozen as:
 - `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
 - `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`.
 
-The frozen candidates `v0.1.0-rc.1`, `v0.1.0-rc.2`, and `v0.1.0-rc.3` are
-superseded and must not be promoted. The third candidate exposed a real Kapsule
-container-runtime mount-propagation difference; `main` now authenticates and
-privatizes that exact quarantine mount before use and has a bounded cleanup path
-for an aborted first install. The next candidate will be `v0.1.0-rc.4`;
-publication remains blocked until that exact candidate
-has concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
+The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.7` are superseded and
+must not be promoted. The seventh candidate reached real Kapsule provisioning,
+installed the chart, and created its first logical volume, then proved that
+Scaleway File Storage `virtiofs` rejects directory
+`renameat2(RENAME_NOREPLACE)` and exposed an incorrect PVC-count expression in
+the smoke harness. The narrowly scoped descriptor-relative compatibility path
+and the harness regression test are now part of `main`. The next candidate will
+be `v0.1.0-rc.8`; publication remains blocked until that exact candidate has
+concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
 Storage slots. It is not supported or advertised until retained real-provider

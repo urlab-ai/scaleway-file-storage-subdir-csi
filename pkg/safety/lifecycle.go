@@ -27,7 +27,10 @@ const (
 // LifecycleFS is the narrow filesystem mutation boundary for logical data
 // directories. Implementations must anchor every operation under an already
 // opened parent root, reject final symlinks where stated, and make
-// RemoveTreeNoFollow refuse every nested mount boundary.
+// RemoveTreeNoFollow refuse every nested mount boundary. RenameNoReplace must
+// use the strongest filesystem primitive available and preserve the narrowly
+// scoped release-qualified virtiofs compatibility contract in section 6.15 of
+// the specification.
 type LifecycleFS interface {
 	MkdirExclusive(ctx context.Context, relative string, mode uint32) error
 	ChownNoFollow(ctx context.Context, relative string, uid, gid uint32) error

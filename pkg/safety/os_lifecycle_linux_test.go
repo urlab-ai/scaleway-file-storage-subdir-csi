@@ -77,6 +77,123 @@ func TestOSLifecycleCreateArchiveAndNoReplace(t *testing.T) {
 	}
 }
 
+func TestOSLifecycleVirtiofsRenameFallbackPreservesAuthenticatedSource(t *testing.T) {
+	filesystem, root := openTestOSLifecycle(t)
+	filesystem.renameDirectoryNoReplace = func(int, string, int, string) error {
+		return syscall.EINVAL
+	}
+	lifecycle, err := NewDirectoryLifecycle(filesystem)
+	if err != nil {
+		t.Fatalf("NewDirectoryLifecycle() error = %v", err)
+	}
+	if err := lifecycle.CreateLogicalDirectory(
+		context.Background(), "/kubernetes-volumes", testDirectory, "0770",
+		uint32(os.Getuid()), uint32(os.Getgid()),
+	); err != nil {
+		t.Fatalf("CreateLogicalDirectory() error = %v", err)
+	}
+	source := filepath.Join(root, "kubernetes-volumes", testDirectory)
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("Stat(source) error = %v", err)
+	}
+	target := "/kubernetes-volumes/.archived/virtiofs-fallback-target"
+	if err := lifecycle.Archive(context.Background(), "/kubernetes-volumes", testDirectory, target); err != nil {
+		t.Fatalf("Archive(unsupported RENAME_NOREPLACE) error = %v", err)
+	}
+	if _, err := os.Lstat(source); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fallback source Lstat() error = %v", err)
+	}
+	targetInfo, err := os.Stat(filepath.Join(root, strings.TrimPrefix(target, "/")))
+	if err != nil {
+		t.Fatalf("Stat(target) error = %v", err)
+	}
+	if !os.SameFile(sourceInfo, targetInfo) {
+		t.Fatal("fallback target does not reference the authenticated source directory")
+	}
+}
+
+func TestOSLifecycleVirtiofsRenameFallbackRefusesExistingTarget(t *testing.T) {
+	filesystem, root := openTestOSLifecycle(t)
+	filesystem.renameDirectoryNoReplace = func(int, string, int, string) error {
+		return syscall.EOPNOTSUPP
+	}
+	lifecycle, err := NewDirectoryLifecycle(filesystem)
+	if err != nil {
+		t.Fatalf("NewDirectoryLifecycle() error = %v", err)
+	}
+	source := filepath.Join(root, "kubernetes-volumes", testDirectory)
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatalf("Mkdir(source) error = %v", err)
+	}
+	target := filepath.Join(root, "kubernetes-volumes/.archived/existing-fallback-target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("Mkdir(target) error = %v", err)
+	}
+	marker := filepath.Join(target, "must-survive")
+	if err := os.WriteFile(marker, []byte("safe"), 0o600); err != nil {
+		t.Fatalf("WriteFile(marker) error = %v", err)
+	}
+	err = lifecycle.Archive(
+		context.Background(), "/kubernetes-volumes", testDirectory,
+		"/kubernetes-volumes/.archived/existing-fallback-target",
+	)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("Archive(existing fallback target) error = %v", err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("fallback changed source after collision: %v", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "safe" {
+		t.Fatalf("fallback changed existing target marker = %q, %v", data, err)
+	}
+}
+
+func TestOSLifecycleRenameDoesNotFallbackOnUnexpectedError(t *testing.T) {
+	filesystem, root := openTestOSLifecycle(t)
+	filesystem.renameDirectoryNoReplace = func(int, string, int, string) error {
+		return syscall.EPERM
+	}
+	if err := os.Mkdir(filepath.Join(root, "kubernetes-volumes", testDirectory), 0o700); err != nil {
+		t.Fatalf("Mkdir(source) error = %v", err)
+	}
+	lifecycle, err := NewDirectoryLifecycle(filesystem)
+	if err != nil {
+		t.Fatalf("NewDirectoryLifecycle() error = %v", err)
+	}
+	err = lifecycle.Archive(
+		context.Background(), "/kubernetes-volumes", testDirectory,
+		"/kubernetes-volumes/.archived/unexpected-error-target",
+	)
+	if !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Archive(unexpected rename error) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "kubernetes-volumes", testDirectory)); err != nil {
+		t.Fatalf("unexpected rename error changed source: %v", err)
+	}
+}
+
+func TestOSLifecycleRenameFallbackIsLimitedToReservedTargets(t *testing.T) {
+	filesystem, root := openTestOSLifecycle(t)
+	filesystem.renameDirectoryNoReplace = func(int, string, int, string) error {
+		return syscall.EINVAL
+	}
+	source := filepath.Join(root, "kubernetes-volumes", testDirectory)
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatalf("Mkdir(source) error = %v", err)
+	}
+	err := filesystem.RenameNoReplace(
+		context.Background(), "kubernetes-volumes/"+testDirectory,
+		"kubernetes-volumes/foreign-target",
+	)
+	if err == nil || !strings.Contains(err.Error(), "not in a driver-only reserved directory") {
+		t.Fatalf("RenameNoReplace(non-reserved target) error = %v", err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("non-reserved fallback changed source: %v", err)
+	}
+}
+
 func TestOSLifecycleRecursiveRemovalUnlinksSymlinkWithoutEscaping(t *testing.T) {
 	filesystem, root := openTestOSLifecycle(t)
 	lifecycle, err := NewDirectoryLifecycle(filesystem)

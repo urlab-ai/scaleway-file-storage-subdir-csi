@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	drivermount "github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -34,11 +35,12 @@ const (
 // use O_NOFOLLOW, and the kernel mount ID is checked on every opened directory
 // so same-device bind mounts cannot bypass the mount-boundary rule.
 type OSLifecycleFS struct {
-	rootFD      int
-	rootPath    string
-	rootDevice  uint64
-	rootMountID uint64
-	mountInfo   string
+	rootFD                   int
+	rootPath                 string
+	rootDevice               uint64
+	rootMountID              uint64
+	mountInfo                string
+	renameDirectoryNoReplace func(oldFD int, oldName string, newFD int, newName string) error
 }
 
 // OpenOSLifecycleFS opens a normalized, symlink-free parent mount root. The
@@ -76,7 +78,7 @@ func OpenOSLifecycleFS(parentRoot string) (*OSLifecycleFS, error) {
 	}
 	return &OSLifecycleFS{
 		rootFD: fd, rootPath: filepath.ToSlash(parentRoot), rootDevice: uint64(stat.Dev),
-		rootMountID: mountID, mountInfo: "/proc/self/mountinfo",
+		rootMountID: mountID, mountInfo: "/proc/self/mountinfo", renameDirectoryNoReplace: renameat2NoReplace,
 	}, nil
 }
 
@@ -176,9 +178,12 @@ func (filesystem *OSLifecycleFS) SyncDir(ctx context.Context, relative string) (
 	return nil
 }
 
-// RenameNoReplace atomically moves one real directory without overwriting a
-// destination. A coherent mountinfo read rejects any mount at or below the
-// source before rename; renameat2 failure is never degraded to replacement.
+// RenameNoReplace moves one real directory to an absent driver-owned lifecycle
+// target. A coherent mountinfo read rejects any mount at or below the source.
+// Linux renameat2 with RENAME_NOREPLACE remains the primary operation. The
+// release-qualified Scaleway virtiofs stack rejects that flag with EINVAL, so
+// only an explicit unsupported-primitive error permits the descriptor-anchored
+// compatibility path documented in specification section 6.15.
 func (filesystem *OSLifecycleFS) RenameNoReplace(ctx context.Context, source, destination string) (returnErr error) {
 	if err := validateLifecycleOSCall(ctx, source); err != nil {
 		return err
@@ -220,11 +225,85 @@ func (filesystem *OSLifecycleFS) RenameNoReplace(ctx context.Context, source, de
 	if currentSource.Mode&syscall.S_IFMT != syscall.S_IFDIR || currentSource.Dev != sourceIdentity.Dev || currentSource.Ino != sourceIdentity.Ino {
 		return fmt.Errorf("lifecycle rename source %q was replaced during validation", source)
 	}
-	if err := renameat2NoReplace(sourceParentFD, path.Base(source), destinationParentFD, path.Base(destination)); err != nil {
+	renameNoReplace := filesystem.renameDirectoryNoReplace
+	if renameNoReplace == nil {
+		renameNoReplace = renameat2NoReplace
+	}
+	if err := renameNoReplace(sourceParentFD, path.Base(source), destinationParentFD, path.Base(destination)); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
 			return ErrAlreadyExists
 		}
-		return fmt.Errorf("rename lifecycle directory %q to %q without replacement: %w", source, destination, err)
+		if !renameNoReplaceUnsupported(err) {
+			return fmt.Errorf("rename lifecycle directory %q to %q without replacement: %w", source, destination, err)
+		}
+		if err := filesystem.renameAfterUnsupportedNoReplace(
+			source, destination, sourceFD, sourceParentFD, destinationParentFD, sourceIdentity,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renameNoReplaceUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP)
+}
+
+// renameAfterUnsupportedNoReplace is deliberately limited to lifecycle
+// directories. Their exact operation-bound targets live below driver-only
+// reserved directories and are serialized by the controller's per-volume lock.
+// Parent claims and durable metadata never use this compatibility path.
+func (filesystem *OSLifecycleFS) renameAfterUnsupportedNoReplace(
+	source, destination string,
+	sourceFD, sourceParentFD, destinationParentFD int,
+	sourceIdentity syscall.Stat_t,
+) error {
+	destinationKind := path.Base(path.Dir(destination))
+	if destinationKind != archivedDirectory && destinationKind != deletedDirectory {
+		return fmt.Errorf("lifecycle rename compatibility target %q is not in a driver-only reserved directory", destination)
+	}
+	// The failed flagged rename is non-mutating, but repeat every proof at the
+	// actual fallback boundary rather than relying on the earlier observation.
+	if err := filesystem.rejectNestedMounts(source); err != nil {
+		return err
+	}
+	var currentSource syscall.Stat_t
+	if err := lifecycleFstatat(sourceParentFD, path.Base(source), &currentSource, atSymlinkNoFollow); err != nil {
+		return fmt.Errorf("revalidate lifecycle fallback source %q: %w", source, err)
+	}
+	if currentSource.Mode&syscall.S_IFMT != syscall.S_IFDIR || currentSource.Dev != sourceIdentity.Dev || currentSource.Ino != sourceIdentity.Ino {
+		return fmt.Errorf("lifecycle fallback source %q was replaced during validation", source)
+	}
+	var destinationIdentity syscall.Stat_t
+	if err := lifecycleFstatat(destinationParentFD, path.Base(destination), &destinationIdentity, atSymlinkNoFollow); err == nil {
+		return ErrAlreadyExists
+	} else if !errors.Is(err, syscall.ENOENT) {
+		return fmt.Errorf("prove lifecycle fallback destination %q absent: %w", destination, err)
+	}
+	if err := unix.Renameat(sourceParentFD, path.Base(source), destinationParentFD, path.Base(destination)); err != nil {
+		if errors.Is(err, syscall.EEXIST) || errors.Is(err, syscall.ENOTEMPTY) {
+			return ErrAlreadyExists
+		}
+		return fmt.Errorf("rename lifecycle directory %q to %q with virtiofs compatibility path: %w", source, destination, err)
+	}
+	var movedIdentity syscall.Stat_t
+	if err := lifecycleFstatat(destinationParentFD, path.Base(destination), &movedIdentity, atSymlinkNoFollow); err != nil {
+		return fmt.Errorf("verify lifecycle fallback destination %q: %w", destination, err)
+	}
+	if movedIdentity.Mode&syscall.S_IFMT != syscall.S_IFDIR || movedIdentity.Dev != sourceIdentity.Dev || movedIdentity.Ino != sourceIdentity.Ino {
+		return fmt.Errorf("lifecycle fallback destination %q does not reference the authenticated source", destination)
+	}
+	var staleSource syscall.Stat_t
+	if err := lifecycleFstatat(sourceParentFD, path.Base(source), &staleSource, atSymlinkNoFollow); err == nil {
+		return fmt.Errorf("lifecycle fallback source %q remains present after rename", source)
+	} else if !errors.Is(err, syscall.ENOENT) {
+		return fmt.Errorf("verify lifecycle fallback source %q absent: %w", source, err)
+	}
+	if err := syscall.Fstat(sourceFD, &currentSource); err != nil {
+		return fmt.Errorf("verify open lifecycle source after fallback rename %q: %w", source, err)
+	}
+	if currentSource.Dev != sourceIdentity.Dev || currentSource.Ino != sourceIdentity.Ino {
+		return fmt.Errorf("open lifecycle source identity changed after fallback rename %q", source)
 	}
 	return nil
 }

@@ -147,12 +147,13 @@ The public artifact coordinates are:
 Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
 with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
 `vendor_version`, chart `version`, and chart `appVersion` omit the leading `v`.
-The frozen candidates `v0.1.0-rc.1`, `v0.1.0-rc.2`, and `v0.1.0-rc.3` are
-superseded and must not be promoted. The third candidate exposed a real Kapsule
-container-runtime mount-propagation difference; `main` now authenticates and
-privatizes that exact quarantine mount before use and has a bounded cleanup path
-for an aborted first install. The next candidate is `v0.1.0-rc.4`. It is not a
-production support claim until that exact candidate
+The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.7` are superseded and
+must not be promoted. The seventh candidate reached real Kapsule provisioning,
+installed the chart, and created its first logical volume, then proved that
+Scaleway File Storage `virtiofs` rejects directory
+`renameat2(RENAME_NOREPLACE)` and exposed an incorrect PVC-count expression in
+the smoke harness. The next candidate is `v0.1.0-rc.8`. It is not a production
+support claim until that exact candidate
 passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -2096,7 +2097,9 @@ Required behavior:
 - verify the final bind source is a real directory, not a symlink;
 - never follow symlinks during archive/delete;
 - never cross mount boundaries during archive/delete;
-- avoid check-then-act filesystem races for destructive operations;
+- avoid check-then-act filesystem races for destructive operations, except for
+  the narrowly bounded lifecycle-directory rename compatibility path below on
+  a release-qualified filesystem that rejects `RENAME_NOREPLACE`;
 - anchor destructive traversal under an already-open trusted `basePath`
   directory and use no-follow, descriptor-relative operations where the Go/Linux
   implementation allows it;
@@ -2204,12 +2207,13 @@ mutation outside kubelet and this driver are outside the v1 security model.
 
 The production durable-record backend applies the same descriptor rule to
 metadata mutation. The descriptor that proves the parent directory's device
-and mount ID remains open through `openat`, `linkat`, `renameat2`, `unlinkat`,
-and the required directory `fsync`; it is never closed and replaced by a
-second pathname walk before the action. Privileged Linux tests inject a late
-nested mount at that boundary, and real-backend barrier tests close and reopen
-the store after each file/link/rename/directory-sync interruption to prove that
-only an old or new complete generation is accepted.
+and mount ID remains open through `openat`, `linkat`, lifecycle `renameat2` or
+the qualified `renameat` fallback below, `unlinkat`, and the required directory
+`fsync`; it is never closed and replaced by a second pathname walk before the
+action. Privileged Linux tests inject a late nested mount at that boundary, and
+real-backend barrier tests close and reopen the store after each
+file/link/rename/directory-sync interruption to prove that only an old or new
+complete generation is accepted.
 
 Absence of kernel support for `open_tree(2)`, `move_mount(2)`,
 `mount_setattr(2)`, `fsopen(2)`, `fsconfig(2)`, `fsmount(2)`, procfs mount-FD resolution, or
@@ -2217,14 +2221,33 @@ Absence of kernel support for `open_tree(2)`, `move_mount(2)`,
 identities keeps the node and controller non-serving and never falls back to
 reusable mount IDs or pathname unmount. Startup performs a real scratch probe
 inside the private quarantine mount and recovers any exact interrupted entry
-before serving. Rename uses atomic
-`renameat2(RENAME_NOREPLACE)` and fails closed if the kernel or filesystem does
-not provide that primitive. Recursive removal unlinks symlinks and other
-non-directory entries as entries, never follows them, revalidates directory
-identity before removal, rejects any mount at or below the tree, honors context
-cancellation between bounded directory batches, and enforces a bounded open
-descriptor/depth limit. `os.RemoveAll` cannot satisfy this contract and must not
-be used for lifecycle data.
+before serving. Directory lifecycle rename first uses atomic
+`renameat2(RENAME_NOREPLACE)`. Real Kapsule release evidence established that
+Scaleway File Storage `virtiofs` returns `EINVAL` for this flag even though the
+ordinary atomic rename operation is supported. Only `EINVAL`, `ENOSYS`, or
+`EOPNOTSUPP` from the flagged call permits the compatibility path, and only for
+the exact operation-bound archive or quarantine target already persisted under
+the driver-only `.archived` or `.deleted` directory. The path must remain
+collision-resistant, workloads must never receive either reserved directory,
+and the single active controller plus the per-logical-volume lock must
+serialize every cooperating lifecycle writer. After the failed flagged call,
+the backend repeats the nested-mount and authenticated source-inode proofs,
+proves the destination absent without following symlinks through its already
+opened parent descriptor, performs descriptor-relative atomic `renameat`, then
+proves the destination is the same authenticated source inode and the source
+name is conclusively absent before the durability barriers run. A destination
+that already exists, is unreadable, or appears in any cooperating retry is
+never replaced and fails closed. The only remaining race requires an unrelated
+process with root access to the protected parent mount; that actor is outside
+the explicit v1 threat model above and already has direct authority to replace
+or remove workload data. Parent claims and durable ownership metadata retain
+their separate atomic `linkat` create-if-absent protocol and never use this
+fallback. Any other flagged-rename error fails closed. Recursive removal
+unlinks symlinks and other non-directory entries as entries, never follows
+them, revalidates directory identity before removal, rejects any mount at or
+below the tree, honors context cancellation between bounded directory batches,
+and enforces a bounded open descriptor/depth limit. `os.RemoveAll` cannot
+satisfy this contract and must not be used for lifecycle data.
 
 The persisted v1 archive and quarantine target is derived exactly as:
 
@@ -6397,9 +6420,10 @@ artifacts. Its closed scenario set must:
 3. prove one PVC is readable and writable from Pods on two distinct nodes;
 4. bind exactly ten logical PVCs, write one unique marker through every logical
    mount, and fail if any new mount exposes another marker;
-5. delete one of those PVCs with `archive`, observe the matching durable
-   allocation in `Archived` with archive completion evidence, and re-read an
-   untouched sibling marker;
+5. delete one of those PVCs with `archive`, thereby exercising the
+   release-qualified `virtiofs` directory-rename path, observe the matching
+   durable allocation in `Archived` with archive completion evidence, and
+   re-read an untouched sibling marker;
 6. force replacement of the singleton controller Pod, create another PVC, and
    re-read the existing cross-node volume;
 7. retain provider attachment inventory for only the two planned parent IDs,
@@ -6441,8 +6465,10 @@ Required e2e scenario:
 10. verify every schedulable Linux workload node has a Ready node-plugin pod and
     CSINode registration;
 11. mount a parent from the controller with `virtiofs`, run `statfs`, create a
-    directory, archive/delete it, verify the immutable root claim was installed
-    atomically, then restart or reschedule the controller;
+    directory, archive/delete it through the primary no-replace rename or the
+    exact qualified compatibility path from section 6.15, verify the immutable
+    root claim was installed atomically, then restart or reschedule the
+    controller;
 12. create 100 PVCs;
 13. verify all PVCs bind;
 14. on one eligible node, read its live
