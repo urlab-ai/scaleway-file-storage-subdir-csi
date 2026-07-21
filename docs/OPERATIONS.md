@@ -1,7 +1,7 @@
 # Operations Guide
 
 This repository contains frozen public identities. The `v0.1.0-rc.1` through
-`v0.1.0-rc.8` candidates are superseded and must not be promoted. The third
+`v0.1.0-rc.9` candidates are superseded and must not be promoted. The third
 candidate exposed the Kapsule/container-runtime quarantine mount behavior. The
 fourth candidate was rejected before provider mutation because its release
 checksum manifest omitted the chart and values; candidate construction now
@@ -16,8 +16,13 @@ directory `renameat2(RENAME_NOREPLACE)`; it also exposed an incorrect PVC-count
 expression in the smoke harness. The eighth candidate proved automatic recovery
 of that prepared real archive, but pre-scenario review found a second copy of
 the same incorrect count expression. The compatibility path and both harness
-sites now have focused regression coverage. The next candidate will be
-`v0.1.0-rc.9`, but it is not yet a qualified
+sites now have focused regression coverage. The ninth candidate completed the
+five functional `run-smoke` scenarios on real Kapsule, but its POSIX-shell result
+collector allowed scenario code to overwrite the generic scenario-name
+variable. The operation logs and their ordered hashes were retained, but the
+resulting scenario names and evidence filenames were not admissible evidence.
+The collector now uses reserved variables with behavioral regression coverage.
+The next candidate will be `v0.1.0-rc.10`, but it is not yet a qualified
 production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and

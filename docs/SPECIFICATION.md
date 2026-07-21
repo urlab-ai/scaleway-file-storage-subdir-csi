@@ -147,7 +147,7 @@ The public artifact coordinates are:
 Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
 with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
 `vendor_version`, chart `version`, and chart `appVersion` omit the leading `v`.
-The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.8` are superseded and
+The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.9` are superseded and
 must not be promoted. The seventh candidate reached real Kapsule provisioning,
 installed the chart, and created its first logical volume, then proved that
 Scaleway File Storage `virtiofs` rejects directory
@@ -155,8 +155,15 @@ Scaleway File Storage `virtiofs` rejects directory
 the smoke harness. The eighth candidate proved automatic recovery of the
 prepared `Deleting` archive through the descriptor-relative compatibility
 path, but pre-scenario review found a second copy of the same incorrect count
-expression. Both count sites now use the regression-tested filter. The next
-candidate is `v0.1.0-rc.9`. It is not a production
+expression. Both count sites now use the regression-tested filter. The ninth
+candidate completed all five functional `run-smoke` scenarios on real Kapsule,
+but its
+POSIX-shell result collector allowed scenario code to overwrite the generic
+scenario-name variable. The real operation logs and their ordered hashes were
+retained, but the resulting scenario names and evidence filenames were not
+admissible evidence. The collector now uses reserved runner variables and has a
+focused behavioral regression test. The next candidate is `v0.1.0-rc.10`. It is
+not a production
 support claim until that exact candidate
 passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions

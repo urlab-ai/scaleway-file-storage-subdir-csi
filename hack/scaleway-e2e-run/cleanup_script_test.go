@@ -72,8 +72,80 @@ func TestScenarioRunnerDoesNotSuppressShellErrexit(t *testing.T) {
 		t.Fatal(err)
 	}
 	contents := string(encoded)
-	if strings.Contains(contents, `if ! "$function_name"`) || !strings.Contains(contents, `"$function_name" >"$evidence" 2>&1`) {
+	if strings.Contains(contents, `if ! "$scenario_runner_function"`) || !strings.Contains(contents, `"$scenario_runner_function" >"$scenario_runner_evidence" 2>&1`) {
 		t.Fatal("scenario functions must run as simple commands so set -e remains effective inside them")
+	}
+}
+
+func TestScenarioRunnerIdentitySurvivesScenarioAssignments(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in scenario script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	encoded, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "run_scenario() {")
+	if start < 0 {
+		t.Fatal("scenario runner function is missing")
+	}
+	end := strings.Index(contents[start:], "\n}\n\ncleanup_cluster()")
+	if end < 0 {
+		t.Fatal("scenario runner function boundary is missing")
+	}
+	runScenario := contents[start : start+end+2]
+
+	temporary := t.TempDir()
+	evidence := filepath.Join(temporary, "evidence")
+	if err := os.Mkdir(evidence, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries := filepath.Join(evidence, "results.ndjson")
+	const digest = "0000000000000000000000000000000000000000000000000000000000000000"
+	writeExecutable(t, temporary, "sha256sum", "#!/bin/sh\nprintf '%s  %s\\n' '"+digest+"' \"$1\"\n")
+	harness := `set -eu
+JQ=$1
+evidence_dir=$2
+entries=$3
+` + runScenario + `
+scenario_clobbers_generic_name() {
+  name=resource-name
+  printf '%s\n' scenario-proof
+}
+run_scenario expected-scenario scenario_clobbers_generic_name
+`
+	command := exec.Command("sh", "-c", harness, "scenario-runner-test", jq, evidence, entries)
+	command.Env = append(os.Environ(), "PATH="+temporary+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("scenario runner failed: %v, output = %s", err, output)
+	}
+
+	encodedResult, err := os.ReadFile(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Name         string `json:"name"`
+		Succeeded    bool   `json:"succeeded"`
+		EvidenceFile string `json:"evidenceFile"`
+		EvidenceSHA  string `json:"evidenceSha256"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(encodedResult))), &result); err != nil {
+		t.Fatalf("decode scenario result: %v", err)
+	}
+	if result.Name != "expected-scenario" || !result.Succeeded || result.EvidenceFile != "expected-scenario.log" || result.EvidenceSHA != "sha256:"+digest {
+		t.Fatalf("scenario result = %+v", result)
+	}
+	proof, err := os.ReadFile(filepath.Join(evidence, "expected-scenario.log"))
+	if err != nil || string(proof) != "scenario-proof\n" {
+		t.Fatalf("scenario evidence = %q, %v", proof, err)
 	}
 }
 

@@ -442,15 +442,17 @@ scenario_official_coexistence() {
 }
 
 run_scenario() {
-  name=$1
-  function_name=$2
-  evidence="$evidence_dir/$name.log"
+  # POSIX function assignments are process-global. Keep runner-owned state under
+  # a reserved prefix so scenario helpers cannot rewrite the evidence identity.
+  scenario_runner_name=$1
+  scenario_runner_function=$2
+  scenario_runner_evidence="$evidence_dir/$scenario_runner_name.log"
   # Keep the function call out of an if/!/|| condition. POSIX shells suppress
   # errexit inside a function used as a conditional, which could otherwise turn
   # an intermediate failed assertion into a successful scenario.
-  "$function_name" >"$evidence" 2>&1
-  digest=$(sha256sum "$evidence" | awk '{print $1}')
-  "$JQ" -cn --arg name "$name" --arg file "$name.log" --arg digest "sha256:$digest" \
+  "$scenario_runner_function" >"$scenario_runner_evidence" 2>&1
+  scenario_runner_digest=$(sha256sum "$scenario_runner_evidence" | awk '{print $1}')
+  "$JQ" -cn --arg name "$scenario_runner_name" --arg file "$scenario_runner_name.log" --arg digest "sha256:$scenario_runner_digest" \
     '{name:$name,succeeded:true,evidenceFile:$file,evidenceSha256:$digest}' >>"$entries"
 }
 
