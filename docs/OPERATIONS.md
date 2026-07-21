@@ -1,7 +1,7 @@
 # Operations Guide
 
 This repository contains frozen public identities. The `v0.1.0-rc.1` through
-`v0.1.0-rc.7` candidates are superseded and must not be promoted. The third
+`v0.1.0-rc.8` candidates are superseded and must not be promoted. The third
 candidate exposed the Kapsule/container-runtime quarantine mount behavior. The
 fourth candidate was rejected before provider mutation because its release
 checksum manifest omitted the chart and values; candidate construction now
@@ -13,8 +13,11 @@ the persistent evidence directory; credentials are now streamed and removed
 from unrelated child-process environments. The seventh candidate reached the
 real archive path and proved that Scaleway File Storage `virtiofs` rejects
 directory `renameat2(RENAME_NOREPLACE)`; it also exposed an incorrect PVC-count
-expression in the smoke harness. Both paths now have focused regression tests.
-The next candidate will be `v0.1.0-rc.8`, but it is not yet a qualified
+expression in the smoke harness. The eighth candidate proved automatic recovery
+of that prepared real archive, but pre-scenario review found a second copy of
+the same incorrect count expression. The compatibility path and both harness
+sites now have focused regression coverage. The next candidate will be
+`v0.1.0-rc.9`, but it is not yet a qualified
 production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and

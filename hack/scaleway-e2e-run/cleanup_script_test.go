@@ -92,8 +92,13 @@ func TestPVCCountFilterKeepsTheKubernetesListAsInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	const filter = `[ (.items | length), ([.items[] | select(.status.phase == "Bound")] | length) ] | @tsv`
-	if !strings.Contains(string(encoded), `"$JQ" -r '`+filter+`'`) {
-		t.Fatal("scenario script does not use the regression-tested PVC count filter")
+	const brokenFilter = `[.items | length, [.items[] | select(.status.phase == "Bound")] | length] | @tsv`
+	contents := string(encoded)
+	if strings.Contains(contents, brokenFilter) {
+		t.Fatal("scenario script still contains the broken PVC count filter")
+	}
+	if count := strings.Count(contents, `"$JQ" -r '`+filter+`'`); count != 2 {
+		t.Fatalf("scenario script contains %d regression-tested PVC count filters, want 2", count)
 	}
 	fixture := `{"items":[{"status":{"phase":"Bound"}},{"status":{"phase":"Pending"}},{"status":{"phase":"Bound"}}]}`
 	command := exec.Command(jq, "-r", filter)

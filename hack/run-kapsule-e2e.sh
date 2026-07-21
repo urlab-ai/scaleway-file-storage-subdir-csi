@@ -266,7 +266,7 @@ scenario_ten_pvc_isolation_and_archive() {
     index=$((index + 1))
   done
   wait_pvcs_bound "$run_label"
-  counts=$(k -n "$namespace" get pvc -l "$run_label" -o json | "$JQ" -r '[.items | length, [.items[] | select(.status.phase == "Bound")] | length] | @tsv')
+  counts=$(k -n "$namespace" get pvc -l "$run_label" -o json | "$JQ" -r '[ (.items | length), ([.items[] | select(.status.phase == "Bound")] | length) ] | @tsv')
   [ "$(printf '%s' "$counts" | cut -f1)" = 10 ]
   [ "$(printf '%s' "$counts" | cut -f2)" = 10 ]
 
