@@ -1,14 +1,17 @@
 # Operations Guide
 
 This repository contains frozen public identities. The `v0.1.0-rc.1` through
-`v0.1.0-rc.5` candidates are superseded and must not be promoted. The third
+`v0.1.0-rc.6` candidates are superseded and must not be promoted. The third
 candidate exposed the Kapsule/container-runtime quarantine mount behavior. The
 fourth candidate was rejected before provider mutation because its release
 checksum manifest omitted the chart and values; candidate construction now
 rejects that incomplete artifact set. The fifth candidate exposed that live
 preflight incorrectly rejected the provider's creatable but limited `scarce`
-Kapsule availability. The next candidate will be `v0.1.0-rc.6`, but it is not
-yet a qualified production release. The
+Kapsule availability. The sixth candidate was superseded before provider
+mutation because its scenario runner briefly staged controller credentials in
+the persistent evidence directory; credentials are now streamed and removed
+from unrelated child-process environments. The next candidate will be
+`v0.1.0-rc.7`, but it is not yet a qualified production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint
