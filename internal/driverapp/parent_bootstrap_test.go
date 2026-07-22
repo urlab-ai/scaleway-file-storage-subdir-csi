@@ -87,11 +87,23 @@ type fakeParentBootstrapAccess struct {
 	nodeID   string
 	root     string
 	events   *[]string
+	failures []error
+	err      error
+	calls    int
 }
 
 func (access *fakeParentBootstrapAccess) EnsureMounted(_ context.Context, parentID string) (string, error) {
+	access.calls++
 	*access.events = append(*access.events, "mount")
 	seedBootstrapProviderAttachment(access.provider, access.nodeID, parentID)
+	if len(access.failures) != 0 {
+		err := access.failures[0]
+		access.failures = access.failures[1:]
+		return "", err
+	}
+	if access.err != nil {
+		return "", access.err
+	}
 	return access.root, nil
 }
 

@@ -562,6 +562,7 @@ func buildControllerRuntime(
 		provisionalDrained := false
 		discovery, err := newFreshInstallationDiscovery(
 			bootstrap, allocations, volumeAttachments, reservationJournals, configuredPoolNames, clusterUID,
+			configured.Controller.AttachReadyDeadline, scaleway.RandomJitter{},
 		)
 		if err != nil {
 			return nil, err

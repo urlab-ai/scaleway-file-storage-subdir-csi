@@ -176,9 +176,22 @@ Kapsule. Its fresh qualification run then stopped before Helm because the
 profile-free Scaleway CLI needed an explicit Organization scope, while the
 cleanup path did not yet admit a conclusively absent pre-Helm release. Those
 runner-only gaps now fail before billable mutation or use the bounded
-bootstrap-abort proof described below. The next candidate is
-`v0.1.0-rc.13`. It is not a production support claim until that exact candidate
-passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
+bootstrap-abort proof described below. The public `v0.1.0-rc.13` artifacts are
+also superseded and must not be promoted. Its qualification run installed RC12
+as the N-1 predecessor, then stopped during fresh bootstrap after RC12 attached
+the first parent and restarted before establishing its immutable claim. The
+fail-closed restart correctly refused to adopt that pre-existing attachment,
+but the run exposed the missing bounded same-process retry for transient
+provider, mount-readiness, and final Kubernetes-inventory failures. Diagnostics
+also exposed that client-side Secret apply duplicated credential bytes into its
+last-applied annotation. Both defects now have focused regression coverage.
+
+Because RC13 contains the same startup defect and cannot safely serve as the
+N-1 predecessor, `v0.1.0-rc.14` is a supersedable bridge candidate carrying the
+correction. The intended full qualification candidate is `v0.1.0-rc.15`, using
+the exact public RC14 artifacts as its predecessor. Neither candidate is a
+production support claim until RC15 passes every Linux, kind, CSI, Helm, real
+Kapsule, and final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
 commercial type for the first controlled run because it is the lowest-priced
@@ -4935,7 +4948,13 @@ then attaches and mounts the parent, revalidates that the exact current
 controller Instance is its sole available attachment, proves the immutable
 parent claim absent, and requires the literal filesystem root to be empty. A
 partial retry in the same process may recognize only an exact attachment whose
-empty observation it recorded before issuing the attach. The all-parent proof
+empty observation it recorded before issuing the attach. Transient Scaleway
+inventory, `virtiofs` mount-readiness, or final Kubernetes-inventory failures
+are retried only inside that same verifier process, preserving those
+observations, with cancellation and bounded exponential backoff plus jitter up
+to the configured controller attach-readiness deadline. Deadline exhaustion,
+ownership or inventory conflict, a non-empty root, a parent claim, and every
+unclassified failure remain fail-closed without retry. The all-parent proof
 hands those process-local observations to bootstrap only after successful Lease
 promotion; bootstrap must persist the per-parent attempt journal before its
 first filesystem write. A restart loses this evidence, so a pre-attached parent
@@ -6132,6 +6151,11 @@ Required unit tests:
 - absent-or-empty-Lease recovery with durable state requires a consumed
   same-cluster approval, while discovery proves a fresh empty installation
   before initialization;
+- fresh empty-installation discovery retries transient provider, `virtiofs`,
+  and final Kubernetes reads only inside the process that observed each empty
+  parent, with bounded backoff, deadline, and cancellation tests; foreign or
+  pre-existing attachments and every stronger safety failure remain immediate
+  failures;
 - provisional discovery never replaces an expired non-empty holder before the
   exact approval is consumed, and Helm lifecycle operations do not render or
   alter the runtime Lease coordination annotations and fields;
@@ -6878,8 +6902,9 @@ on a root-only volatile filesystem; they must never be copied into the retained
 evidence directory or another persistent runner path. The scenario runner must
 remove the credentials from the inherited child-process environment, expose
 them only to exact provider CLI calls, and stream the controller-only Kubernetes
-Secret without putting plaintext or its rendered manifest in a file or process
-argument. The nested install preflight must repeat that boundary: `kubectl` and
+Secret without putting plaintext or its rendered manifest in a file, process
+argument, or client-side-apply annotation. The nested install preflight must
+repeat that boundary: `kubectl` and
 `jq` receive no Scaleway credentials, while only its exact read-only `scw`
 cluster-identity call receives them. Success and failure logs must not contain
 credential values.

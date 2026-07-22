@@ -452,9 +452,9 @@ SCW_SECRET_KEY=test-secret-fixture'
     printf '%s\n' streamed >"$STREAM_PROOF"
     printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-credentials'
     ;;
-  "apply -f -")
-    applied=$(cat)
-    case "$applied" in
+  "create -f -")
+    created=$(cat)
+    case "$created" in
       *"name: scaleway-sfs-subdir-csi-credentials"*) exit 0 ;;
       *) exit 92 ;;
     esac

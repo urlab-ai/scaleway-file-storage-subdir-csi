@@ -38,12 +38,16 @@ the smoke harness. The eighth candidate then proved that the narrowly scoped
 descriptor-relative compatibility path safely resumes a prepared `Deleting`
 allocation and completes the real archive, but review before the ten-PVC
 scenario found a second copy of the same incorrect count expression. Both
-count sites and the regression test are now corrected. The public rc.10
-artifacts were not production-qualified; review of the deeper E2E runner found
-and fixed its ambient-kubeconfig, nil-stdin, and premature-qualification-gate
-defects before a billable release-candidate run. The next candidate will be
-`v0.1.0-rc.11`; publication remains blocked until that exact candidate has
-concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
+count sites and the regression test are now corrected. The public rc.10 through
+rc.13 artifacts were not production-qualified and must not be promoted. The
+RC13 qualification attempt installed RC12 as its N-1 predecessor and exposed a
+missing bounded same-process retry during fresh parent bootstrap, plus
+client-side Secret apply retaining credential bytes in an annotation. Both
+defects are corrected with focused regression tests. RC14 is a bridge
+candidate; the intended full RC15 qualification will use corrected RC14 as its
+exact public predecessor. Publication remains blocked until the exact RC15
+artifacts have concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup
+evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
 Storage slots. It is not supported or advertised until retained real-provider

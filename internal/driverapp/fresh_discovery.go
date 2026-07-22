@@ -7,6 +7,15 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
+)
+
+const (
+	freshDiscoveryInitialBackoff = time.Second
+	freshDiscoveryMaximumBackoff = 15 * time.Second
 )
 
 // freshInstallationDiscovery is the only provisional-Lease path allowed to
@@ -21,27 +30,37 @@ type freshInstallationDiscovery struct {
 	journals    freshReservationJournalBootstrap
 	poolNames   []string
 	clusterUID  string
+	retry       freshDiscoveryRetry
 
 	gate     chan struct{}
 	mu       sync.Mutex
 	observed map[string]time.Time
 }
 
+type freshDiscoveryRetry struct {
+	deadline time.Duration
+	jitter   scaleway.Jitter
+}
+
 type freshReservationJournalBootstrap interface {
 	BootstrapFresh(ctx context.Context, pools []string, clusterUID string) error
 }
 
-func newFreshInstallationDiscovery(manager *parentBootstrapManager, allocations parentBootstrapAllocationLister, pvs parentBootstrapPVLister, journals freshReservationJournalBootstrap, poolNames []string, clusterUID string) (*freshInstallationDiscovery, error) {
-	if manager == nil || allocations == nil || pvs == nil || journals == nil {
+func newFreshInstallationDiscovery(manager *parentBootstrapManager, allocations parentBootstrapAllocationLister, pvs parentBootstrapPVLister, journals freshReservationJournalBootstrap, poolNames []string, clusterUID string, retryDeadline time.Duration, retryJitter scaleway.Jitter) (*freshInstallationDiscovery, error) {
+	if manager == nil || allocations == nil || pvs == nil || journals == nil || retryJitter == nil {
 		return nil, fmt.Errorf("fresh installation discovery dependency is nil")
 	}
 	if len(poolNames) == 0 || clusterUID == "" {
 		return nil, fmt.Errorf("fresh installation journal scope is incomplete")
 	}
+	if retryDeadline <= 0 {
+		return nil, fmt.Errorf("fresh installation retry deadline must be positive")
+	}
 	return &freshInstallationDiscovery{
 		manager: manager, allocations: allocations, pvs: pvs, journals: journals,
 		poolNames: slices.Clone(poolNames), clusterUID: clusterUID,
-		gate: make(chan struct{}, 1), observed: make(map[string]time.Time),
+		retry: freshDiscoveryRetry{deadline: retryDeadline, jitter: retryJitter},
+		gate:  make(chan struct{}, 1), observed: make(map[string]time.Time),
 	}, nil
 }
 
@@ -70,6 +89,37 @@ func (discovery *freshInstallationDiscovery) VerifyFreshInstallation(ctx context
 		parentIDs = append(parentIDs, parentID)
 	}
 	slices.Sort(parentIDs)
+	retryCtx, cancelRetry := context.WithTimeout(ctx, discovery.retry.deadline)
+	defer cancelRetry()
+	deadline := discovery.manager.operationClock.Now().Add(discovery.retry.deadline)
+	backoff := freshDiscoveryInitialBackoff
+	for attempt := uint32(0); ; attempt++ {
+		verificationErr := discovery.verifyParentsAndFinalize(retryCtx, parentIDs)
+		if verificationErr == nil {
+			return nil
+		}
+		if !freshDiscoveryRetryable(verificationErr) {
+			return verificationErr
+		}
+		if err := retryCtx.Err(); err != nil {
+			return err
+		}
+		remaining := deadline.Sub(discovery.manager.operationClock.Now())
+		if remaining <= 0 {
+			return errors.Join(verificationErr, fmt.Errorf("fresh installation discovery retry deadline expired: %w", scaleway.ErrDeadlineExceeded))
+		}
+		delay := discovery.retry.jitter.Delay(backoff, attempt)
+		if delay <= 0 || delay > remaining {
+			delay = remaining
+		}
+		if err := discovery.wait(retryCtx, delay); err != nil {
+			return err
+		}
+		backoff = nextFreshDiscoveryBackoff(backoff)
+	}
+}
+
+func (discovery *freshInstallationDiscovery) verifyParentsAndFinalize(ctx context.Context, parentIDs []string) error {
 	for _, parentID := range parentIDs {
 		if err := discovery.inspectParent(ctx, parentID); err != nil {
 			return err
@@ -78,7 +128,42 @@ func (discovery *freshInstallationDiscovery) VerifyFreshInstallation(ctx context
 	if err := discovery.requireKubernetesEmpty(ctx); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return discovery.manager.authorizeFreshBootstrap(discovery.observedSnapshot())
+}
+
+func freshDiscoveryRetryable(err error) bool {
+	// Some provider inventory failures deliberately carry ErrUnavailable in
+	// addition to a stronger safety classification. Never let the retry marker
+	// hide a conclusive foreign attachment, identity, authorization, or
+	// precondition failure.
+	if errors.Is(err, scaleway.ErrInvalidArgument) || errors.Is(err, scaleway.ErrNotFound) ||
+		errors.Is(err, scaleway.ErrPermissionDenied) || errors.Is(err, scaleway.ErrResourceExhausted) ||
+		errors.Is(err, scaleway.ErrFailedPrecondition) || errors.Is(err, scaleway.ErrUnknownAttachmentNode) ||
+		errors.Is(err, scaleway.ErrForeignAttachmentType) {
+		return false
+	}
+	return errors.Is(err, scaleway.ErrUnavailable) || errors.Is(err, mount.ErrMountUnavailable) || errors.Is(err, k8s.ErrUnavailable)
+}
+
+func nextFreshDiscoveryBackoff(current time.Duration) time.Duration {
+	if current >= freshDiscoveryMaximumBackoff || current > freshDiscoveryMaximumBackoff-current {
+		return freshDiscoveryMaximumBackoff
+	}
+	return current * 2
+}
+
+func (discovery *freshInstallationDiscovery) wait(ctx context.Context, delay time.Duration) error {
+	timer := discovery.manager.operationClock.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C():
+		return nil
+	}
 }
 
 func (discovery *freshInstallationDiscovery) inspectParent(ctx context.Context, parentID string) error {

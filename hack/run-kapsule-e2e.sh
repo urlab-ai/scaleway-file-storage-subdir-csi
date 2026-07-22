@@ -128,7 +128,7 @@ write_credentials() {
   printf 'SCW_ACCESS_KEY=%s\nSCW_SECRET_KEY=%s\n' "$provider_access_key" "$provider_secret_key" |
     k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-credentials \
       --from-env-file=/dev/stdin --dry-run=client -o yaml |
-    k apply -f -
+    k create -f -
 }
 
 helm_candidate() {
@@ -711,7 +711,7 @@ scenario_artifact_and_install() {
   k label namespace "$namespace" sfs-subdir-e2e-run="$run_id" --overwrite
   write_credentials
   k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-identity \
-    --from-literal="installationID=$run_id" --dry-run=client -o yaml | k apply -f -
+    --from-literal="installationID=$run_id" --dry-run=client -o yaml | k create -f -
   parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"},{\"id\":\"$parent_b\",\"name\":\"e2e-parent-b\",\"state\":\"active\"}]"
   if [ "$profile" = release-candidate ]; then
     # First prove that logical-volume fan-out exceeds one Instance's physical

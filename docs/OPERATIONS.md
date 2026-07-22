@@ -22,10 +22,14 @@ collector allowed scenario code to overwrite the generic scenario-name
 variable. The operation logs and their ordered hashes were retained, but the
 resulting scenario names and evidence filenames were not admissible evidence.
 The collector now uses reserved variables with behavioral regression coverage.
-The public rc.10 artifacts were never production-qualified. Pre-cloud review
-of the deeper runner found and fixed ambient-kubeconfig inheritance, a nil-stdin
-panic, and a prematurely opened qualification interlock. The next candidate
-will be `v0.1.0-rc.11`, but it is not yet a qualified production release. The
+The public rc.10 through rc.13 artifacts were never production-qualified and
+must not be promoted. RC11/RC12 hardened repeated recovery and proved
+cross-node RWX, while the RC13 qualification attempt exposed a missing bounded
+same-process retry during fresh parent bootstrap and client-side Secret apply
+retaining credential bytes in an annotation. Those defects are corrected with
+focused regression coverage. RC14 is a bridge candidate so the intended full
+RC15 qualification can use a corrected public N-1 predecessor. Neither is a
+qualified production release until the exact RC15 artifacts pass every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint
