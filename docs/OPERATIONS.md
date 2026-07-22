@@ -155,8 +155,12 @@ go run ./hack/scaleway-e2e-run \
 ```
 
 Load those credentials from process memory or a root-only volatile filesystem
-such as a verified Linux `tmpfs`. Never copy them into the repository, evidence
-directory, shell arguments, a systemd unit, or another persistent runner path.
+such as a verified Linux `tmpfs`. The same process environment must set
+`SCW_DEFAULT_PROJECT_ID` to the exact dedicated test Project and
+`SCW_DEFAULT_ORGANIZATION_ID` to that Project's Organization. The Organization
+ID is a non-secret provider scope, but it is still kept out of retained test
+artifacts. Never copy credentials into the repository, evidence directory,
+shell arguments, a systemd unit, or another persistent runner path.
 The executor streams the controller Secret, removes the keys from unrelated
 child-process environments, and retains no plaintext credential artifact. The
 volatile source must be removed after execution; destroying the disposable
@@ -198,10 +202,11 @@ barriers succeed. A collision or ambiguous read fails closed. The retained
 fsynced ledger is mandatory; losing it is an operator-recovery condition and
 `--cleanup-only` never recreates a permissive seed. Helm and Kubernetes errors
 remain errors, while successful cleanup preconditions are derived from the
-completed structured safe-uninstall audit. A failed first Helm install may use
-the run-bound bootstrap-abort proof only on a cluster created by that run and
-only when no scenario entry, CSI object, durable record, CSINode registration,
-or provider parent attachment exists;
+completed structured safe-uninstall audit. A failed first Helm install, or a
+conclusively absent release after the pre-Helm gate fails, may use the run-bound
+bootstrap-abort proof only on a cluster created by that run and only when no
+scenario entry, CSI object, durable record, CSINode registration, or provider
+parent attachment exists;
 this path never represents a successful smoke test. After a provisioning error,
 several stable successful discovery reads are required before a partial resource
 prefix can become complete.

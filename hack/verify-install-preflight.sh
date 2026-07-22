@@ -52,6 +52,7 @@ cat >"$TMP_DIR/scw" <<'EOF'
 set -eu
 [ "${SCW_ACCESS_KEY-}" = SCWTESTACCESSFIXTURE ]
 [ "${SCW_SECRET_KEY-}" = test-secret-fixture ]
+[ "$*" = "k8s cluster get cluster-id=11111111-1111-4111-8111-111111111111 region=fr-par -o json" ]
 if [ "${PREFLIGHT_SCENARIO:-success}" = missing-cluster-tag ]; then
   tags='[]'
 else

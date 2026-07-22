@@ -7,6 +7,8 @@ KUBECTL=${KUBECTL:-kubectl}
 HELM=${HELM:-helm}
 JQ=${JQ:-jq}
 SCW=${SCW:-scw}
+BOOTSTRAP_DRIVER_NAME=file-storage-subdir.csi.urlab.ai
+readonly BOOTSTRAP_DRIVER_NAME
 
 # The live executor must receive provider credentials, but kubectl, Helm, jq,
 # and the other scenario tools must not inherit them. Keep an unexported copy
@@ -1053,7 +1055,7 @@ bootstrap_crash_add_parent() {
   trap bootstrap_cleanup EXIT
   trap bootstrap_interrupted HUP INT TERM
 
-  bootstrap_parent_before=$(s file filesystem get "$parent_b" region="$region" -o json)
+  bootstrap_parent_before=$(s file filesystem get filesystem-id="$parent_b" region="$region" -o json)
   printf '%s' "$bootstrap_parent_before" | "$JQ" -e --arg parent "$parent_b" '
     .id == $parent and .status == "available" and .number_of_attachments == 0
   ' >/dev/null
@@ -1118,7 +1120,7 @@ bootstrap_crash_add_parent() {
 
   bootstrap_deadline=$(( $(date +%s) + 600 ))
   while :; do
-    bootstrap_server=$(s instance server get "$bootstrap_instance" zone="$bootstrap_zone" -o json)
+    bootstrap_server=$(s instance server get server-id="$bootstrap_instance" zone="$bootstrap_zone" -o json)
     bootstrap_transition=$(printf '%s' "$bootstrap_server" | "$JQ" -r --arg parent "$parent_b" '
       [(.filesystems // .server.filesystems // [])[] | select(.filesystem_id == $parent)] |
       if length == 0 then "" elif length == 1 then .[0].state else error("bootstrap parent is attached more than once") end
@@ -1144,7 +1146,7 @@ bootstrap_crash_add_parent() {
 
   bootstrap_deadline=$(( $(date +%s) + 600 ))
   while :; do
-    bootstrap_server=$(s instance server get "$bootstrap_instance" zone="$bootstrap_zone" -o json)
+    bootstrap_server=$(s instance server get server-id="$bootstrap_instance" zone="$bootstrap_zone" -o json)
     bootstrap_available=$(printf '%s' "$bootstrap_server" | "$JQ" -r --arg parent "$parent_b" '
       [(.filesystems // .server.filesystems // [])[] | select(.filesystem_id == $parent and .state == "available")] | length
     ')
@@ -1467,7 +1469,7 @@ scenario_scale() {
       [.[] | select(.filesystem_id == $parent and .resource_id == $instance and
         .resource_type == "instance_server" and .zone == $zone)] | length')
   [ "$regional_same_node_count" = 1 ]
-  same_node_server=$(s instance server get "$same_node_instance" zone="$same_node_zone" -o json)
+  same_node_server=$(s instance server get server-id="$same_node_instance" zone="$same_node_zone" -o json)
   server_parent_count=$(printf '%s' "$same_node_server" | "$JQ" -er --arg parent "$parent_a" '
     [(.filesystems // .server.filesystems // [])[] |
       select(.filesystem_id == $parent and .state == "available")] | length')
@@ -1974,7 +1976,7 @@ scenario_decommission() {
     fi
   done
   [ "$(s file attachment list region="$region" filesystem-id="$parent_b" -o json | "$JQ" -er 'length')" = 0 ]
-  [ "$(s file filesystem get "$parent_b" region="$region" -o json | "$JQ" -er '.number_of_attachments')" = 0 ]
+  [ "$(s file filesystem get filesystem-id="$parent_b" region="$region" -o json | "$JQ" -er '.number_of_attachments')" = 0 ]
 
   read_test_allocations >"$allocations_after.tmp"
   tombstones_after=$("$JQ" -c --arg parent "$parent_b" '[.[] | select(.parentFilesystemID == $parent) | .logicalVolumeID] | sort' "$allocations_after.tmp")
@@ -2154,8 +2156,14 @@ cleanup_cluster() {
 	    elif [ -s "$bootstrap_result" ]; then
 	      validate_bootstrap_abort_evidence "$bootstrap_result"
 	    else
-	      echo "Helm release is absent without retained completed safe-uninstall or bootstrap-abort evidence" >&2
-	      return 1
+	      # The first install preflight creates only the exact run namespace and
+	      # its two external Secrets before Helm is invoked. If that read-only
+	      # gate fails, safe-uninstall has no controller to contact. The bounded
+	      # bootstrap proof still requires an empty first-scenario result set,
+	      # the exact namespace label, zero CSI state, and zero attachments.
+	      initial_workload_pods=$(k -n "$namespace" get pods -l "$run_label" -o json | "$JQ" -er '.items | length')
+	      initial_pvcs=$(k -n "$namespace" get pvc -o json | "$JQ" -er '.items | length')
+	      bootstrap_abort_cleanup absent "$bootstrap_result" "$initial_workload_pods" "$initial_pvcs"
 	    fi
 	  fi
 	  release_count=$(h list -n "$namespace" --all -o json | "$JQ" -er --arg release "$release" '[.[] | select(.name == $release)] | length')
@@ -2186,7 +2194,8 @@ validate_bootstrap_abort_evidence() {
 	    --arg namespace "$namespace" --arg release "$release" --arg parent_a "$parent_a" --arg parent_b "$parent_b" '
 	      .schemaVersion == "1" and .runId == $run and .profile == $profile and .region == $region and
 	      .clusterCreatedByRun == true and
-	      .namespace == $namespace and .helmRelease == $release and .helmStatus == "failed" and
+	      .namespace == $namespace and .helmRelease == $release and
+	      (.helmStatus == "failed" or .helmStatus == "absent") and
 	      .parentA == $parent_a and .parentB == $parent_b and
 	      .scenarioEntries == 0 and .initialWorkloadPods == 0 and .initialPVCs == 0 and
 	      .workloadPods == 0 and .pvcs == 0 and .pvs == 0 and
@@ -2206,23 +2215,36 @@ bootstrap_abort_cleanup() {
 	    echo "bootstrap-abort cleanup is disabled for a reused cluster" >&2
 	    return 1
 	  }
-	  [ "$helm_status" = failed ] || {
-	    echo "bootstrap-abort cleanup requires a failed Helm release, observed $helm_status" >&2
-	    return 1
-	  }
+	  case "$helm_status" in
+	    failed|absent) ;;
+	    *)
+	      echo "bootstrap-abort cleanup requires a failed or conclusively absent Helm release, observed $helm_status" >&2
+	      return 1
+	      ;;
+	  esac
 	  entries="$evidence_dir/.scenario-results-run-smoke.ndjson"
 	  [ "$profile" != release-candidate ] || entries="$evidence_dir/.scenario-results-run-pre.ndjson"
 	  [ -f "$entries" ] && [ ! -s "$entries" ] || {
 	    echo "bootstrap-abort cleanup requires an empty retained first-scenario result set" >&2
 	    return 1
 	  }
+	  if [ "$helm_status" = absent ]; then
+	    [ -s "$evidence_dir/artifact-and-install-preflight.log" ] || {
+	      echo "pre-Helm bootstrap-abort cleanup requires the retained first-scenario failure log" >&2
+	      return 1
+	    }
+	  fi
 	  namespace_json=$(k get namespace "$namespace" -o json)
 	  namespace_run=$(printf '%s' "$namespace_json" | "$JQ" -er '.metadata.labels["sfs-subdir-e2e-run"] // ""')
 	  [ "$namespace_run" = "$run_id" ] || {
 	    echo "bootstrap-abort namespace lacks the exact run label" >&2
 	    return 1
 	  }
-	  driver=$(h get values "$release" -n "$namespace" -a -o json | "$JQ" -er '.driver.name')
+	  if [ "$helm_status" = failed ]; then
+	    driver=$(h get values "$release" -n "$namespace" -a -o json | "$JQ" -er '.driver.name')
+	  else
+	    driver=$BOOTSTRAP_DRIVER_NAME
+	  fi
 	  workload_pods=$(k -n "$namespace" get pods -l "$run_label" -o json | "$JQ" -er '.items | length')
 	  pvcs=$(k -n "$namespace" get pvc -o json | "$JQ" -er '.items | length')
 	  pvs=$(k get pv -o json | "$JQ" -er --arg namespace "$namespace" '[.items[] | select(.spec.claimRef.namespace == $namespace)] | length')
@@ -2231,8 +2253,8 @@ bootstrap_abort_cleanup() {
 	  durable_records=$(k -n "$namespace" get configmaps -o json | "$JQ" -er '[.items[] | select(.data["record.json"]? != null)] | length')
 	  parent_a_attachments=$(s file attachment list region="$region" filesystem-id="$parent_a" -o json | "$JQ" -er 'length')
 	  parent_b_attachments=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json | "$JQ" -er 'length')
-	  parent_a_reported=$(s file filesystem get "$parent_a" region="$region" -o json | "$JQ" -er '.number_of_attachments')
-	  parent_b_reported=$(s file filesystem get "$parent_b" region="$region" -o json | "$JQ" -er '.number_of_attachments')
+	  parent_a_reported=$(s file filesystem get filesystem-id="$parent_a" region="$region" -o json | "$JQ" -er '.number_of_attachments')
+	  parent_b_reported=$(s file filesystem get filesystem-id="$parent_b" region="$region" -o json | "$JQ" -er '.number_of_attachments')
 	  [ "$initial_workload_pods" = 0 ] && [ "$initial_pvcs" = 0 ] &&
 	    [ "$workload_pods" = 0 ] && [ "$pvcs" = 0 ] && [ "$pvs" = 0 ] &&
 	    [ "$volume_attachments" = 0 ] && [ "$csi_nodes" = 0 ] && [ "$durable_records" = 0 ] &&
@@ -2241,7 +2263,9 @@ bootstrap_abort_cleanup() {
 	      echo "bootstrap-abort cleanup found CSI state, mounts, or provider attachments" >&2
 	      return 1
 	    }
-	  h uninstall "$release" -n "$namespace" --wait --timeout 10m
+	  if [ "$helm_status" = failed ]; then
+	    h uninstall "$release" -n "$namespace" --wait --timeout 10m
+	  fi
 	  k delete namespace "$namespace" --wait=true --timeout=10m
 	  release_count=$(h list -n "$namespace" --all -o json | "$JQ" -er --arg release "$release" '[.[] | select(.name == $release)] | length')
 	  [ "$release_count" = 0 ] && [ -z "$(k get namespace "$namespace" --ignore-not-found -o name)" ] || {
@@ -2251,8 +2275,8 @@ bootstrap_abort_cleanup() {
 	  bootstrap_tmp="$bootstrap_result.tmp"
 	  "$JQ" -cn \
 	    --arg run "$run_id" --arg profile "$profile" --arg region "$region" \
-	    --arg namespace "$namespace" --arg release "$release" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
-	    '{schemaVersion:"1",runId:$run,profile:$profile,region:$region,clusterCreatedByRun:true,namespace:$namespace,helmRelease:$release,helmStatus:"failed",parentA:$parent_a,parentB:$parent_b,scenarioEntries:0,initialWorkloadPods:0,initialPVCs:0,workloadPods:0,pvcs:0,pvs:0,volumeAttachments:0,driverCSINodeRegistrations:0,durableRecords:0,parentAAttachments:0,parentBAttachments:0,parentAReportedAttachments:0,parentBReportedAttachments:0,helmUninstalled:true,namespaceRemoved:true}' >"$bootstrap_tmp"
+	    --arg namespace "$namespace" --arg release "$release" --arg helm_status "$helm_status" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+	    '{schemaVersion:"1",runId:$run,profile:$profile,region:$region,clusterCreatedByRun:true,namespace:$namespace,helmRelease:$release,helmStatus:$helm_status,parentA:$parent_a,parentB:$parent_b,scenarioEntries:0,initialWorkloadPods:0,initialPVCs:0,workloadPods:0,pvcs:0,pvs:0,volumeAttachments:0,driverCSINodeRegistrations:0,durableRecords:0,parentAAttachments:0,parentBAttachments:0,parentAReportedAttachments:0,parentBReportedAttachments:0,helmUninstalled:true,namespaceRemoved:true}' >"$bootstrap_tmp"
 	  chmod 600 "$bootstrap_tmp"
 	  mv "$bootstrap_tmp" "$bootstrap_result"
 	  validate_bootstrap_abort_evidence "$bootstrap_result"

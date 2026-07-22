@@ -167,8 +167,17 @@ never production-qualified and are superseded: pre-cloud review found that the
 new checkpoint E2E host-command boundary could inherit an ambient kubeconfig,
 could panic on a nil stdin, and had opened the qualification interlock before
 the normative matrix was coherent. Those runner defects are covered by focused
-tests. The next candidate is `v0.1.0-rc.11`. It is not a production
-support claim until that exact candidate
+tests. The public `v0.1.0-rc.11` and `v0.1.0-rc.12` artifacts are also
+superseded and must not be promoted. Real RC11 recovery work exposed that a
+second abnormal takeover needed a fresh approval tuple and that the immutable
+driver image digest belonged in the node configuration generation; RC12 fixed
+both invariants and proved the repeated takeover plus cross-node RWX on real
+Kapsule. Its fresh qualification run then stopped before Helm because the
+profile-free Scaleway CLI needed an explicit Organization scope, while the
+cleanup path did not yet admit a conclusively absent pre-Helm release. Those
+runner-only gaps now fail before billable mutation or use the bounded
+bootstrap-abort proof described below. The next candidate is
+`v0.1.0-rc.13`. It is not a production support claim until that exact candidate
 passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -6658,6 +6667,11 @@ performs live regional File Storage, commercial-type, attach-limit, and
 artifact validation and verifies that the operator product, quota, and pricing
 review is explicit and no older than 24 hours. A previously rendered plan or
 approval does not authorize a later run.
+Before constructing a provider backend it also requires
+`SCW_DEFAULT_PROJECT_ID` to equal the planned Project and a non-empty
+`SCW_DEFAULT_ORGANIZATION_ID` for the provider CLI's read-only scope. These
+values and credentials remain process-only and are not part of retained
+evidence.
 
 The executor has two non-interchangeable evidence paths. The base profile may
 execute only the fixed smoke matrix defined in section 12.6 and emits explicitly
@@ -6747,7 +6761,8 @@ runner does not constitute release evidence: the exact candidate still needs a
 successful retained Kapsule run and a final complete inventory.
 
 If the first install scenario fails before producing any successful scenario
-entry and the exact Helm release is `failed`, cleanup may use the narrower
+entry and the exact Helm release is either `failed` or conclusively absent
+because the pre-Helm installation gate failed, cleanup may use the narrower
 bootstrap-abort path instead of claiming a safe uninstall, but only when the
 cluster itself was created by that exact run. Reused clusters always require
 the normal safe-uninstall or operator recovery path. The fallback must prove the
@@ -6757,12 +6772,16 @@ record exists; and both exact run-owned parents have zero provider attachments.
 The parent check must agree on both the filtered attachment list and each exact
 filesystem's reported attachment count. Workload/PVC absence is captured before
 normal cleanup removes anything, so the fallback cannot manufacture absence.
-Only then may it uninstall that exact failed release, delete that exact
-namespace, retain run-bound bootstrap-abort evidence, and satisfy the cleanup
-barrier through `bootstrapAbortComplete`. Any successful scenario entry,
-non-failed release, missing evidence file, ambiguous read, record, registration,
-volume object, or provider attachment keeps cleanup blocked and requires the
-normal safe-uninstall or operator recovery path.
+The conclusively absent pre-Helm case additionally requires the retained,
+non-empty first-scenario failure log.
+Only then may it uninstall that exact failed release when present, or preserve
+its conclusively absent state, delete that exact namespace, retain run-bound
+bootstrap-abort evidence including the observed `failed` or `absent` Helm
+status, and satisfy the cleanup barrier through `bootstrapAbortComplete`. Any
+successful scenario entry, deployed or ambiguous release, missing evidence
+file, ambiguous read, record, registration, volume object, or provider
+attachment keeps cleanup blocked and requires the normal safe-uninstall or
+operator recovery path.
 
 Cleanup must:
 

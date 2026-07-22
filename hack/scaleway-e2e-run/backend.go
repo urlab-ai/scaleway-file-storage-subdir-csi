@@ -78,6 +78,9 @@ func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scaleway
 // fills an omitted attachment-list zone from that client default, which would
 // turn the required regional cleanup inventory into a one-zone view.
 func newRegionalScalewayClientFromEnvironment(plan e2eplan.Plan) (*scw.Client, error) {
+	if strings.TrimSpace(os.Getenv("SCW_DEFAULT_ORGANIZATION_ID")) == "" {
+		return nil, fmt.Errorf("SCW_DEFAULT_ORGANIZATION_ID is required for provider CLI preflight")
+	}
 	environmentClient, err := scw.NewClient(scw.WithEnv())
 	if err != nil {
 		return nil, fmt.Errorf("load Scaleway authority from environment")
@@ -85,6 +88,13 @@ func newRegionalScalewayClientFromEnvironment(plan e2eplan.Plan) (*scw.Client, e
 	project, present := environmentClient.GetDefaultProjectID()
 	if !present || project != plan.ProjectID {
 		return nil, fmt.Errorf("SCW_DEFAULT_PROJECT_ID must equal the exact planned Project")
+	}
+	if organization, present := environmentClient.GetDefaultOrganizationID(); !present || organization == "" {
+		// The Go APIs below are Project-scoped, but the deliberately narrow scw
+		// CLI reads in the scenario harness still require this non-secret scope
+		// value when the runner has no persistent Scaleway profile. Refuse before
+		// creating billable resources instead of discovering it after bootstrap.
+		return nil, fmt.Errorf("SCW_DEFAULT_ORGANIZATION_ID is required for provider CLI preflight")
 	}
 	accessKey, accessPresent := environmentClient.GetAccessKey()
 	secretKey, secretPresent := environmentClient.GetSecretKey()

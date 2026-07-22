@@ -151,7 +151,10 @@ then
   exit 1
 fi
 
-if ! s k8s cluster get "$cluster_id" -o json |
+# Use explicit API identifiers instead of the CLI's positional selector. The
+# latter may fall back to an organization-wide name lookup when the runner has
+# no persistent Scaleway profile, even though the exact cluster ID is known.
+if ! s k8s cluster get cluster-id="$cluster_id" region="$region" -o json |
   "$JQ" -e --arg cluster "$cluster_id" --arg project "$project_id" --arg region "$region" --arg tag "$REQUIRED_CLUSTER_TAG" '
     .id == $cluster
     and .project_id == $project

@@ -185,6 +185,34 @@ func TestScenarioDurableChecksumsUseCanonicalSHA256Format(t *testing.T) {
 	}
 }
 
+func TestScenarioProviderCLIUsesExplicitResourceIDFlags(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	for _, unsafe := range []string{
+		`file filesystem get "$parent_`,
+		`instance server get "$`,
+	} {
+		if strings.Contains(contents, unsafe) {
+			t.Fatalf("scenario provider CLI retains ambiguous positional lookup %q", unsafe)
+		}
+	}
+	for _, required := range []string{
+		`file filesystem get filesystem-id="$parent_`,
+		`instance server get server-id="$`,
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("scenario provider CLI lacks explicit resource lookup %q", required)
+		}
+	}
+}
+
 func TestScenarioRunnerIdentitySurvivesScenarioAssignments(t *testing.T) {
 	jq, err := exec.LookPath("jq")
 	if err != nil {
@@ -774,7 +802,7 @@ case "$*" in
     if [ "$(sed -n '1p' "$ATTACHMENT_STATE")" = present ]; then printf '%s\n' '[{}]'; else printf '%s\n' '[]'; fi
     ;;
   "file attachment list region=fr-par filesystem-id=88888888-8888-4888-8888-888888888888 -o json") printf '%s\n' '[]' ;;
-  "file filesystem get 77777777-7777-4777-8777-777777777777 region=fr-par -o json"|"file filesystem get 88888888-8888-4888-8888-888888888888 region=fr-par -o json") printf '%s\n' '{"number_of_attachments":0}' ;;
+  "file filesystem get filesystem-id=77777777-7777-4777-8777-777777777777 region=fr-par -o json"|"file filesystem get filesystem-id=88888888-8888-4888-8888-888888888888 region=fr-par -o json") printf '%s\n' '{"number_of_attachments":0}' ;;
   *) exit 95 ;;
 esac
 `)
@@ -854,6 +882,94 @@ esac
 	}
 }
 
+func TestCleanupScriptUsesBoundedBootstrapAbortBeforeHelmExists(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in cleanup script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	temporary := t.TempDir()
+	namespaceState := filepath.Join(temporary, "namespace-state")
+	if err := os.WriteFile(namespaceState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helm := writeExecutable(t, temporary, "helm", `#!/bin/sh
+case "$1" in
+  list) printf '%s\n' '[]' ;;
+  *) exit 91 ;;
+esac
+`)
+	kubectl := writeExecutable(t, temporary, "kubectl", `#!/bin/sh
+case "$*" in
+  "get namespace driver-system -o json")
+    [ "$(sed -n '1p' "$NAMESPACE_STATE")" = present ] || exit 1
+    printf '%s\n' '{"metadata":{"labels":{"sfs-subdir-e2e-run":"11111111-1111-4111-8111-111111111111"}}}'
+    ;;
+  *"get namespace driver-system --ignore-not-found -o json"*|*"get namespace driver-system --ignore-not-found -o name"*)
+    if [ "$(sed -n '1p' "$NAMESPACE_STATE")" = present ]; then
+      case "$*" in
+        *"-o name"*) printf '%s\n' namespace/driver-system ;;
+        *) printf '%s\n' '{"metadata":{"labels":{"sfs-subdir-e2e-run":"11111111-1111-4111-8111-111111111111"}}}' ;;
+      esac
+    fi
+    ;;
+  *"get pods -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o json"*|*"get pvc -o json"*|*"get pv -o json"*|*"get volumeattachments -o json"*|*"get csinodes -o json"*|*"get configmaps -o json"*)
+    printf '%s\n' '{"items":[]}'
+    ;;
+  *"delete namespace driver-system"*) printf '%s\n' absent >"$NAMESPACE_STATE" ;;
+  *) exit 92 ;;
+esac
+`)
+	scw := writeExecutable(t, temporary, "scw", `#!/bin/sh
+case "$*" in
+  "file attachment list region=fr-par filesystem-id=77777777-7777-4777-8777-777777777777 -o json"|"file attachment list region=fr-par filesystem-id=88888888-8888-4888-8888-888888888888 -o json") printf '%s\n' '[]' ;;
+  "file filesystem get filesystem-id=77777777-7777-4777-8777-777777777777 region=fr-par -o json"|"file filesystem get filesystem-id=88888888-8888-4888-8888-888888888888 region=fr-par -o json") printf '%s\n' '{"number_of_attachments":0}' ;;
+  *) exit 95 ;;
+esac
+`)
+	unused := writeExecutable(t, temporary, "unused", "#!/bin/sh\nexit 99\n")
+	evidence := filepath.Join(temporary, "evidence")
+	if err := os.MkdirAll(evidence, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidence, ".scenario-results-run-pre.ndjson"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidence, "artifact-and-install-preflight.log"), []byte("preflight failed before Helm\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preconditions := filepath.Join(temporary, "preconditions.json")
+	command := exec.Command(script, "cleanup", "--kubeconfig=/tmp/kubeconfig", "--namespace=driver-system", "--release=driver",
+		"--admin="+unused, "--validator="+unused, "--profile=release-candidate", "--region=fr-par", "--cluster-created-by-run=true",
+		"--run-id=11111111-1111-4111-8111-111111111111",
+		"--parent-a=77777777-7777-4777-8777-777777777777", "--parent-b=88888888-8888-4888-8888-888888888888",
+		"--evidence-dir="+evidence, "--preconditions="+preconditions)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "NAMESPACE_STATE="+namespaceState)
+	if output, err := command.CombinedOutput(); err != nil {
+		cleanupLog, _ := os.ReadFile(filepath.Join(evidence, "cleanup-kubernetes.log"))
+		t.Fatalf("pre-Helm bootstrap cleanup error = %v, output = %s, cleanup log = %s", err, output, cleanupLog)
+	}
+	encoded, err := os.ReadFile(preconditions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed e2ecleanup.Preconditions
+	if err := json.Unmarshal(encoded, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed.UninstallPrepareComplete || !observed.BootstrapAbortComplete || !observed.HelmUninstalled || !observed.ParentAttachmentsAbsent {
+		t.Fatalf("pre-Helm bootstrap cleanup preconditions = %#v", observed)
+	}
+	proof, err := os.ReadFile(filepath.Join(evidence, "bootstrap-abort-cleanup-11111111-1111-4111-8111-111111111111.json"))
+	if err != nil || !strings.Contains(string(proof), `"helmStatus":"absent"`) {
+		t.Fatalf("pre-Helm bootstrap evidence = %s, %v", proof, err)
+	}
+}
+
 func TestProviderReviewMustBeFreshAtLivePreflight(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	review := e2eplan.ProviderReview{ObservedAt: now.Add(-time.Hour).Format(time.RFC3339Nano)}
@@ -874,6 +990,7 @@ func TestRealE2EClientDropsEnvironmentDefaultZone(t *testing.T) {
 	projectID := "22222222-2222-4222-8222-222222222222"
 	t.Setenv("SCW_ACCESS_KEY", "SCW1234567890ABCDEFG")                 // gitleaks:allow -- syntactically valid SDK fixture.
 	t.Setenv("SCW_SECRET_KEY", "7363616c-6577-6573-6862-6f7579616161") // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("SCW_DEFAULT_ORGANIZATION_ID", "11111111-1111-4111-8111-111111111111")
 	t.Setenv("SCW_DEFAULT_PROJECT_ID", projectID)
 	t.Setenv("SCW_DEFAULT_REGION", "fr-par")
 	t.Setenv("SCW_DEFAULT_ZONE", "fr-par-2")
@@ -887,6 +1004,19 @@ func TestRealE2EClientDropsEnvironmentDefaultZone(t *testing.T) {
 	}
 	if region, present := client.GetDefaultRegion(); !present || region.String() != "fr-par" {
 		t.Fatalf("regional E2E client region = %q, %t", region, present)
+	}
+}
+
+func TestRealE2EClientRequiresOrganizationScopeBeforeMutation(t *testing.T) {
+	t.Setenv("SCW_ACCESS_KEY", "SCW1234567890ABCDEFG")                 // gitleaks:allow -- syntactically valid SDK fixture.
+	t.Setenv("SCW_SECRET_KEY", "7363616c-6577-6573-6862-6f7579616161") // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("SCW_DEFAULT_ORGANIZATION_ID", "")
+	t.Setenv("SCW_DEFAULT_PROJECT_ID", "22222222-2222-4222-8222-222222222222")
+	t.Setenv("SCW_DEFAULT_REGION", "fr-par")
+	if _, err := newRegionalScalewayClientFromEnvironment(e2eplan.Plan{
+		ProjectID: "22222222-2222-4222-8222-222222222222", Region: "fr-par",
+	}); err == nil || !strings.Contains(err.Error(), "SCW_DEFAULT_ORGANIZATION_ID") {
+		t.Fatalf("missing organization scope error = %v", err)
 	}
 }
 
