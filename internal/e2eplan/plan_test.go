@@ -125,6 +125,16 @@ func TestBuildReleaseCandidatePlansOneRunOwnedDisposableInstance(t *testing.T) {
 	if plan.DisposableInstance == nil || plan.DisposableInstance.Count != 1 || plan.DisposableInstance.CommercialType != request.NodePool.CommercialType || !plan.DisposableInstance.CreatedByRun || !plan.DisposableInstance.DeleteOnCleanup {
 		t.Fatalf("disposable instance detail = %#v", plan.DisposableInstance)
 	}
+	for _, operation := range []string{
+		"attach and detach the two run-owned parents on the standalone run-owned disposable Instance",
+		"delete and recreate the dedicated run-owned driver namespace for checkpoint recovery",
+		"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",
+		"decommission, detach, and remove the second run-owned parent from the driver configuration",
+	} {
+		if !slices.Contains(plan.DestructiveOperations, operation) {
+			t.Fatalf("release-candidate destructive operations omit %q: %#v", operation, plan.DestructiveOperations)
+		}
+	}
 }
 
 func TestRequestValidationRejectsUnsafeOrIncompletePlans(t *testing.T) {

@@ -6,6 +6,7 @@ package e2erunner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -24,7 +25,6 @@ const SchemaVersionV1 = "1"
 var RequiredScenarios = []string{
 	"artifact-and-install-preflight",
 	"virtiofs-mount-api",
-	"rwx-cross-node",
 	"single-node-writer-conflict",
 	"one-hundred-pvc-scale",
 	"controller-hard-failure",
@@ -51,24 +51,12 @@ var SmokeScenarios = []string{
 	"provider-attachment-inventory",
 }
 
-// nonQualifyingScenarios are retained smoke probes whose current implementation
-// does not yet prove the full production invariant named by the specification.
-// Keeping this closed list fail-closes both live execution and evidence
-// validation: a zero exit status and a log digest can never masquerade as a
-// release qualification.
-var nonQualifyingScenarios = [...]string{
-	"artifact-and-install-preflight",
-	"single-node-writer-conflict",
-	"one-hundred-pvc-scale",
-	"controller-hard-failure",
-	"node-drain-and-replacement",
-	"provider-attach-detach",
-	"checkpoint-and-restore",
-	"missing-lease-recovery",
-	"n-minus-one-upgrade",
-	"safe-uninstall",
-	"official-csi-coexistence",
-}
+// nonQualifyingScenarios is the fail-closed development interlock for an
+// incomplete release matrix. It is intentionally empty only because every
+// production scenario currently named by the specification has structured
+// semantic proof validation. A future incomplete scenario must be added here
+// before its implementation lands.
+var nonQualifyingScenarios = [...]string{}
 
 // RequireReleaseQualificationReady refuses a billable run while any checked-in
 // scenario remains only a smoke probe. Removing a name requires implementing
@@ -109,6 +97,10 @@ type ScenarioResult struct {
 	Succeeded    bool   `json:"succeeded"`
 	EvidenceFile string `json:"evidenceFile"`
 	EvidenceSHA  string `json:"evidenceSha256"`
+	// Proof retains the validated, scenario-specific semantic evidence in the
+	// final qualification document. A file digest alone proves bytes, not that
+	// those bytes establish the production invariant named by the scenario.
+	Proof json.RawMessage `json:"proof,omitempty"`
 }
 
 // Evidence is emitted only after cleanup has been re-observed. Profile and
@@ -260,6 +252,9 @@ func (request Request) Validate() error {
 	}
 	if (request.PreviousChart == "") != (request.PreviousValues == "") {
 		return fmt.Errorf("previous chart and values must both be set or both be absent")
+	}
+	if request.Plan.Profile == e2eplan.ProfileReleaseCandidate && request.PreviousChart == "" {
+		return fmt.Errorf("release-candidate qualification requires the previous public chart and values for N-1 upgrade evidence")
 	}
 	for name, value := range map[string]string{"previous chart": request.PreviousChart, "previous values": request.PreviousValues} {
 		if value != "" && (value == string(filepath.Separator) || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsAny(value, "\x00\r\n")) {
@@ -477,6 +472,9 @@ func ValidateCleanupAudit(evidence Evidence, cleanup e2ecleanup.Inventory) error
 // success. It intentionally accepts basenames only.
 func ValidateScenarioResults(scenarios []ScenarioResult) error {
 	if err := validateScenarioSet(scenarios, RequiredScenarios); err != nil {
+		return err
+	}
+	if err := ValidateAvailableScenarioProofs(scenarios); err != nil {
 		return err
 	}
 	return RequireReleaseQualificationReady()

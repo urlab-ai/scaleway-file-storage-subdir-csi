@@ -37,15 +37,16 @@ const (
 )
 
 type scalewayBackend struct {
-	request       e2erunner.Request
-	plan          e2eplan.Plan
-	kubernetes    *k8sapi.API
-	file          *fileapi.API
-	instance      *instanceapi.API
-	vpc           *vpcapi.API
-	inventoryPath string
-	kubeconfig    string
-	scenarioTool  string
+	request        e2erunner.Request
+	plan           e2eplan.Plan
+	kubernetes     *k8sapi.API
+	file           *fileapi.API
+	instance       *instanceapi.API
+	vpc            *vpcapi.API
+	inventoryPath  string
+	kubeconfig     string
+	scenarioTool   string
+	maxFileSystems uint32
 }
 
 func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scalewayBackend, error) {
@@ -202,6 +203,7 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 	if err := validateAttachmentCapacity(serverType.Capabilities.MaxFileSystems, plan.Parents.Count); err != nil {
 		return err
 	}
+	backend.maxFileSystems = serverType.Capabilities.MaxFileSystems
 	filesystems, err := backend.file.ListFileSystems(&fileapi.ListFileSystemsRequest{Region: region, ProjectID: &plan.ProjectID}, scw.WithAllPages(), scw.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("validate File Storage read access: %w", err)
@@ -391,10 +393,16 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 
 func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, inventory e2ecleanup.Inventory) ([]e2erunner.ScenarioResult, error) {
 	evidenceDirectory := filepath.Dir(plan.CleanupInventoryPath)
+	validator, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate scenario evidence validator: %w", err)
+	}
 	arguments := []string{"--kubeconfig=" + backend.kubeconfig, "--chart=" + request.ChartPackage,
 		"--values=" + request.ReleaseValues, "--namespace=" + request.DriverNamespace, "--release=" + request.HelmRelease,
 		"--admin=" + request.AdminBinary, "--workload-image=" + request.WorkloadImage,
 		"--profile=" + plan.Profile,
+		"--validator=" + validator,
+		fmt.Sprintf("--max-filesystems=%d", backend.maxFileSystems),
 		"--project-id=" + plan.ProjectID, "--region=" + plan.Region, "--run-id=" + plan.RunID,
 		"--cluster-id=" + resourceID(inventory, e2ecleanup.ResourceKindCluster, 0),
 		"--parent-a=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 0), "--parent-b=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
@@ -421,7 +429,19 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 	if err != nil {
 		return nil, err
 	}
+	destructive, err := backend.runDestructiveControllerAndNodeScenarios(ctx, request, plan, inventory, evidenceDirectory)
+	if err != nil {
+		return nil, err
+	}
 	provider, err := backend.runProviderScenarios(ctx, request, plan, inventory, evidenceDirectory)
+	if err != nil {
+		return nil, err
+	}
+	mid, err := backend.runScenarioPhase(ctx, evidenceDirectory, "run-mid", arguments)
+	if err != nil {
+		return nil, err
+	}
+	recovery, err := backend.runCheckpointRecoveryScenarios(ctx, request, plan, inventory, evidenceDirectory)
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +449,10 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 	if err != nil {
 		return nil, err
 	}
-	results := append(pre, provider...)
+	results := append(pre, destructive...)
+	results = append(results, provider...)
+	results = append(results, mid...)
+	results = append(results, recovery...)
 	results = append(results, post...)
 	if err := e2erunner.ValidateScenarioResults(results); err != nil {
 		return nil, err
@@ -458,11 +481,27 @@ func (backend *scalewayBackend) runScenarioPhase(ctx context.Context, evidenceDi
 	if err := e2erunner.ValidateScenarioSubset(results); err != nil {
 		return nil, err
 	}
-	for _, result := range results {
-		digest, err := fileSHA256(filepath.Join(evidenceDirectory, result.EvidenceFile))
+	for index := range results {
+		result := &results[index]
+		evidencePath := filepath.Join(evidenceDirectory, result.EvidenceFile)
+		info, err := os.Lstat(evidencePath)
+		if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 16<<20 {
+			return nil, fmt.Errorf("scenario evidence %q must be an exact regular file of 1 to 16 MiB: %w", result.EvidenceFile, err)
+		}
+		digest, err := fileSHA256(evidencePath)
 		if err != nil || digest != result.EvidenceSHA {
 			return nil, fmt.Errorf("scenario evidence %q digest mismatch: %w", result.EvidenceFile, err)
 		}
+		if filepath.Ext(result.EvidenceFile) == ".json" {
+			proof, err := os.ReadFile(evidencePath)
+			if err != nil {
+				return nil, fmt.Errorf("read scenario proof %q: %w", result.EvidenceFile, err)
+			}
+			result.Proof = bytes.TrimSpace(proof)
+		}
+	}
+	if err := e2erunner.ValidateAvailableScenarioProofs(results); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -804,15 +843,17 @@ func (backend *scalewayBackend) runScenarioCommand(ctx context.Context, argument
 }
 
 // environmentWithoutScalewayCredentials prevents general-purpose child tools
-// from inheriting provider authority they do not need. The scenario shell has a
-// narrower explicit boundary because it creates the controller Secret and runs
-// the few provider CLI observations required by the real E2E contract.
+// from inheriting provider authority they do not need. It also removes any
+// ambient kubeconfig so callers can append exactly one run-owned KUBECONFIG.
+// The scenario shell has a narrower explicit boundary because it creates the
+// controller Secret and runs the few provider CLI observations required by the
+// real E2E contract.
 func environmentWithoutScalewayCredentials() []string {
 	environment := os.Environ()
 	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if name == "SCW_ACCESS_KEY" || name == "SCW_SECRET_KEY" {
+		if name == "SCW_ACCESS_KEY" || name == "SCW_SECRET_KEY" || name == "KUBECONFIG" {
 			continue
 		}
 		filtered = append(filtered, entry)

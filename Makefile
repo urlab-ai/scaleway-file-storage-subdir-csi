@@ -89,7 +89,8 @@ vet:
 	$(GO) vet ./...
 
 fmt-check:
-	@test -z "$$($(GO)fmt -l .)" || { $(GO)fmt -l .; exit 1; }
+	@set -eu; unformatted="$$($(GO)fmt -l .)"; \
+		test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }
 
 lint:
 	$(GOLANGCI_LINT) run

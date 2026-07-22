@@ -1,7 +1,7 @@
 # Operations Guide
 
 This repository contains frozen public identities. The `v0.1.0-rc.1` through
-`v0.1.0-rc.9` candidates are superseded and must not be promoted. The third
+`v0.1.0-rc.10` candidates are superseded and must not be promoted. The third
 candidate exposed the Kapsule/container-runtime quarantine mount behavior. The
 fourth candidate was rejected before provider mutation because its release
 checksum manifest omitted the chart and values; candidate construction now
@@ -22,8 +22,10 @@ collector allowed scenario code to overwrite the generic scenario-name
 variable. The operation logs and their ordered hashes were retained, but the
 resulting scenario names and evidence filenames were not admissible evidence.
 The collector now uses reserved variables with behavioral regression coverage.
-The next candidate will be `v0.1.0-rc.10`, but it is not yet a qualified
-production release. The
+The public rc.10 artifacts were never production-qualified. Pre-cloud review
+of the deeper runner found and fixed ambient-kubeconfig inheritance, a nil-stdin
+panic, and a prematurely opened qualification interlock. The next candidate
+will be `v0.1.0-rc.11`, but it is not yet a qualified production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint
@@ -167,9 +169,12 @@ structured safe uninstall, and exact cleanup.
 Its output is named `kapsule-smoke-evidence-<run-id>.json`, contains
 `releaseQualified=false`, and cannot be used by release qualification. A
 `release-candidate` request remains rejected before credentials, live reads, or
-resource creation while its production scenario blocker list is non-empty.
-This is a safety interlock, not a test skip. `--cleanup-only` remains supported
-for a retained previously approved run.
+resource creation while any scenario lacks the structured evidence required by
+the bounded production matrix. This is a safety interlock, not a test skip. The
+checked-in matrix currently clears that interlock and includes a 20-minute
+checksum correctness soak over ten cross-node PVCs with one controller and one
+node-plugin replacement; it still requires the immediate cloud approval below.
+`--cleanup-only` remains supported for a retained previously approved run.
 
 Dry-run is the default and never loads credentials. The live form creates only
 the request's tagged resources, creates and journals a run-owned Private

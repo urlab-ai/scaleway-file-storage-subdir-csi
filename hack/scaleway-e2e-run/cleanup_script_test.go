@@ -379,13 +379,14 @@ esac
 func TestChildToolEnvironmentOmitsScalewayCredentials(t *testing.T) {
 	t.Setenv("SCW_ACCESS_KEY", "SCWTESTACCESSFIXTURE") // gitleaks:allow -- non-secret test fixture.
 	t.Setenv("SCW_SECRET_KEY", "test-secret-fixture")  // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("KUBECONFIG", "/tmp/ambient-wrong-cluster")
 	t.Setenv("SFS_SUBDIR_E2E_ENVIRONMENT_FIXTURE", "retained-fixture")
 
 	retained := false
 	for _, entry := range environmentWithoutScalewayCredentials() {
 		name, value, _ := strings.Cut(entry, "=")
-		if name == "SCW_ACCESS_KEY" || name == "SCW_SECRET_KEY" {
-			t.Fatalf("credential environment entry survived filtering: %s", name)
+		if name == "SCW_ACCESS_KEY" || name == "SCW_SECRET_KEY" || name == "KUBECONFIG" {
+			t.Fatalf("sensitive or ambient environment entry survived filtering: %s", name)
 		}
 		if name == "SFS_SUBDIR_E2E_ENVIRONMENT_FIXTURE" && value == "retained-fixture" {
 			retained = true
@@ -393,6 +394,28 @@ func TestChildToolEnvironmentOmitsScalewayCredentials(t *testing.T) {
 	}
 	if !retained {
 		t.Fatal("environment filtering removed an unrelated entry")
+	}
+}
+
+func TestRunHostCommandUsesExactKubeconfigWithoutProviderCredentials(t *testing.T) {
+	t.Setenv("SCW_ACCESS_KEY", "SCWTESTACCESSFIXTURE") // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("SCW_SECRET_KEY", "test-secret-fixture")  // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("KUBECONFIG", "/tmp/ambient-wrong-cluster")
+	exactKubeconfig := filepath.Join(t.TempDir(), "exact-kubeconfig")
+	tool := writeExecutable(t, t.TempDir(), "environment-probe", `#!/bin/sh
+set -eu
+[ "${KUBECONFIG-}" = "$1" ]
+[ -z "${SCW_ACCESS_KEY+x}" ]
+[ -z "${SCW_SECRET_KEY+x}" ]
+printf verified
+`)
+	backend := &scalewayBackend{kubeconfig: exactKubeconfig}
+	output, err := backend.runHostCommand(context.Background(), nil, tool, exactKubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "verified" {
+		t.Fatalf("runHostCommand() output = %q", output)
 	}
 }
 
@@ -463,6 +486,7 @@ case "$*" in
     ;;
   *"delete namespace"*) printf '%s\n' absent >"$NAMESPACE_STATE" ;;
   *"delete pod,pvc"*) ;;
+  *"delete storageclass -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111"*) ;;
   *) exit 92 ;;
 esac
 `)
@@ -490,7 +514,7 @@ case "$1" in
   uninstall)
     case "$*" in
       *"--mode=dry-run"*) printf '%s\n' '{"ready":true,"completed":false,"blockers":[]}' ;;
-      *"--mode=execute"*) printf '%s\n' '{"ready":true,"completed":true,"blockers":[],"audit":{}}' ;;
+      *"--mode=execute"*) printf '%s\n' '{"ready":true,"completed":true,"blockers":[],"plan":{"parentFilesystemIDs":["77777777-7777-4777-8777-777777777777","88888888-8888-4888-8888-888888888888"]},"audit":{}}' ;;
       *) exit 94 ;;
     esac
     ;;
@@ -630,6 +654,7 @@ case "$*" in
   *"get configmaps -o json"*) printf '%s\n' '{"items":[]}' ;;
   *"delete namespace"*) printf '%s\n' absent >"$NAMESPACE_STATE" ;;
   *"delete pod,pvc"*) printf '%s\n' absent >"$PVC_STATE" ;;
+  *"delete storageclass -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111"*) ;;
   *) exit 92 ;;
 esac
 `)

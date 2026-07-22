@@ -206,7 +206,13 @@ func Build(request Request) (Plan, error) {
 	if request.Profile == ProfileReleaseCandidate {
 		operations = append(operations,
 			"resize one run-owned parent filesystem",
-			"replace one run-owned node during compatibility revalidation",
+			"attach and detach the two run-owned parents on the standalone run-owned disposable Instance",
+			"drain and uncordon one node from the exact run-owned Kapsule node pool",
+			"hard-stop the exact run-owned Kapsule node hosting the controller for abnormal-takeover fencing",
+			"replace that exact stopped run-owned Kapsule node during compatibility revalidation",
+			"delete and recreate the dedicated run-owned driver namespace for checkpoint recovery",
+			"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",
+			"decommission, detach, and remove the second run-owned parent from the driver configuration",
 			"stop or delete only disposable run-owned Instances for recovery fencing",
 			"inject controller interruption around the run-owned bootstrap claim",
 		)

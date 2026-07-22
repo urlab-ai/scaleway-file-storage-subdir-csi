@@ -147,7 +147,7 @@ The public artifact coordinates are:
 Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
 with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
 `vendor_version`, chart `version`, and chart `appVersion` omit the leading `v`.
-The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.9` are superseded and
+The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.10` are superseded and
 must not be promoted. The seventh candidate reached real Kapsule provisioning,
 installed the chart, and created its first logical volume, then proved that
 Scaleway File Storage `virtiofs` rejects directory
@@ -162,8 +162,12 @@ POSIX-shell result collector allowed scenario code to overwrite the generic
 scenario-name variable. The real operation logs and their ordered hashes were
 retained, but the resulting scenario names and evidence filenames were not
 admissible evidence. The collector now uses reserved runner variables and has a
-focused behavioral regression test. The next candidate is `v0.1.0-rc.10`. It is
-not a production
+focused behavioral regression test. The public `v0.1.0-rc.10` artifacts were
+never production-qualified and are superseded: pre-cloud review found that the
+new checkpoint E2E host-command boundary could inherit an ambient kubeconfig,
+could panic on a nil stdin, and had opened the qualification interlock before
+the normative matrix was coherent. Those runner defects are covered by focused
+tests. The next candidate is `v0.1.0-rc.11`. It is not a production
 support claim until that exact candidate
 passes every Linux, kind, CSI, Helm, and real Kapsule qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
@@ -6451,178 +6455,114 @@ a distinct smoke-evidence filename, and be rejected by every release
 qualification decoder. Passing it authorizes only the next engineering step;
 it does not satisfy the production matrix below.
 
-Required e2e scenario:
+The `release-candidate` profile is a bounded production qualification, not an
+attempt to reproduce every deterministic crash permutation in a billable
+cloud. It must run once against the exact frozen commit, chart, values,
+`csi-admin`, driver image digest, and rendered sidecar digests. Its closed real
+Kapsule matrix must:
 
-1. create or reuse a Kapsule cluster in `fr-par`;
-2. verify the target Scaleway File Storage product status and print it in the
-   test report;
-3. verify current File Storage quota, region availability, and attach limits in
-   the test report;
-4. verify the cluster-level File Storage CSI tag is present and the selected
-   node pool's exact commercial Instance type is in the release-tested
-   allowlist and exposes a live `MaxFileSystems` value at least equal to the two
-   planned parents;
-5. run with Project-scoped `FileStorageReadOnly` and `InstancesFullAccess`, then
-   verify expected permission-denied behavior with an intentionally
-   under-privileged key;
-6. create one parent File Storage file system;
-7. apply the documented privileged Pod Security labels to the dedicated
-   namespace, then install the driver with the rendered production controller
-   and node security contexts and fixed disjoint host paths;
-8. verify the controller leadership Lease exists, only its holder can mutate,
-   and a different Pod UID cannot take over an uncleared expired holder without
-   the exact immutable operator approval Secret;
-9. verify node compatibility preflight passes and reports at least two Ready
-   compatible controller candidates without a single-host pin;
-10. verify every schedulable Linux workload node has a Ready node-plugin pod and
-    CSINode registration;
-11. mount a parent from the controller with `virtiofs`, run `statfs`, create a
-    directory, archive/delete it through the primary no-replace rename or the
-    exact qualified compatibility path from section 6.15, verify the immutable
-    root claim was installed atomically, then restart or reschedule the
-    controller;
-12. create 100 PVCs;
-13. verify all PVCs bind;
-14. on one eligible node, read its live
-    `ServerType.Capabilities.MaxFileSystems` value and concurrently mount at
-    least that value plus five distinct logical PVCs backed by the single first
-    parent;
-15. verify independent write/read and sibling-path isolation for every logical
-    PVC in that same-node multiplex test;
-16. verify paginated regional `ListAttachments` and `Server.Filesystems` show
-    exactly one attachment for that parent on the node, and verify
-    `NodeGetInfo` omits `MaxVolumesPerNode`;
-17. run writer pods for at least 10 sampled PVCs;
-18. run reader pods for the sampled PVCs;
-19. mount the same PVC from two pods on two nodes and verify RWX behavior;
-20. mount one PVC read-only and verify writes are rejected;
-21. verify the node plugin pods do not receive Scaleway credentials;
-22. delete one PVC with `archive` policy and verify the archived directory;
-23. delete one PVC with `retain` policy and verify the retained directory and
-    driver-owned ownership record remain;
-24. delete one PVC with `delete` policy and verify only the intended directory
-    is removed while sibling directories remain;
-25. verify missing and mismatched driver-owned ownership records fail closed;
-26. verify a valid deleted handle with conclusively absent state returns
-    idempotent success without filesystem mutation, while an unavailable lookup
-    returns a retryable error and creates no tombstone;
-27. create a second parent File Storage file system;
-28. update Helm values to include the second parent;
-29. create more PVCs and verify distribution;
-30. verify placement skips a parent below actual free-space reserve;
-31. resize one parent File Storage file system through Scaleway;
-32. wait for metadata refresh;
-33. verify the driver observes the new size for new placements;
-34. record the real provider transition through `updating` to `available`,
-    verify no new placement or controller filesystem mutation uses that parent
-    while it is transient, and verify normal operation resumes after the fresh
-    authoritative `available` observation;
-35. drain a node and verify volumes still mount after rescheduling;
-36. perform a normal `Recreate` controller rollout, verify the old Pod writes a
-    graceful-release marker, the new Pod UID consumes it without manual
-    approval, and existing volumes still mount;
-37. restart the node plugin and verify existing volumes still mount;
-38. add or replace an eligible node and verify node compatibility,
-    commercial-type allowlist, live attach limit, and configuration-generation
-    revalidation;
-39. verify actual free-space metrics and alert examples are exposed;
-    verify attachment-inventory freshness, unknown-attachment, and
-    published-node-fence metrics are also exposed without unbounded labels;
-40. on a Kapsule cluster with the official Scaleway File Storage CSI installed
-    but idle, verify an extra manual or official attachment consumes a physical
-    slot, makes this driver fail closed before partial attachment, and that
-    removing the extra attachment restores readiness;
-41. verify the official StorageClass and this driver's StorageClass objects can
-    coexist without default-class, CSIDriver, RBAC, or sidecar conflicts, while
-    documenting that active same-node volume use is unsupported in v1;
-42. after the first public release exists, upgrade the Helm chart from the
-    previous released version to the candidate version while existing PVCs are
-    mounted; deliberately stagger the node rollout, verify create/publish remain
-    blocked while node configuration generations differ, then verify existing
-    handles, allocation records, ownership records, archive, retain, delete,
-    and new PVC creation work after convergence;
-43. run manual GC in dry-run mode, then execute GC through the active leader for
-    one archived or retained
-    test volume and verify capacity accounting is released without touching
-    sibling directories;
-44. interrupt GC after rename and after `gcRemoveStartedAt`, then verify safe
-    state-driven recovery;
-45. compact one old `Deleted` allocation and its matching ownership record in
-    place, then verify later `DeleteVolume` retries remain idempotent, name reuse
-    remains rejected, and checkpoint inventory includes both tombstones;
-46. inject interruption during an ownership-record replacement and verify the
-    previous or new complete generation remains valid;
-47. delete all test Pods and PVCs, wait for PV/VolumeAttachment removal and
-    normal unpublish/unstage, run `csi-admin uninstall prepare`, verify the node
-    DaemonSet stops before controller detach and every exact parent mount and
-    attachment is gone while retained data and durable metadata remain, and
-    only then run `helm uninstall`;
-48. clean up all resources created by the test run.
+1. create or reuse one dedicated Kapsule cluster in `fr-par`, create one fresh
+   run-owned two-node pool and two fresh run-owned 100 GB parents, and record
+   product status, quota, region, commercial Instance type, live
+   `MaxFileSystems`, planned cost, and exact cleanup command;
+2. validate the exact candidate artifacts, positive Project-scoped
+   `FileStorageReadOnly` plus `InstancesFullAccess` access, the cluster File
+   Storage tag, privileged namespace, production security contexts, immutable
+   images, singleton controller Lease, compatible controller candidates, Ready
+   node plugins, CSINode registrations, fixed disjoint host paths, and absence
+   of Scaleway credentials from node containers;
+3. prove a real controller `virtiofs` mount, `statfs`, immutable parent claim,
+   archive rename compatibility, restart recovery, and one real
+   archive/delete lifecycle that leaves an adjacent sibling sentinel unchanged;
+4. create exactly 100 PVCs on the first parent, require all 100 to bind, mount
+   at least live `MaxFileSystems + 5` logical PVCs concurrently on one node,
+   prove one physical attachment for that parent and node, prove independent
+   markers, and verify `NodeGetInfo` omits `MaxVolumesPerNode`;
+5. run a bounded soak for at least 20 minutes over at least 10 sampled PVCs.
+   Writers and cross-node readers must run concurrently, publish atomically
+   replaced checksum-bearing records, reject every corrupt or partial record,
+   retain positive read/write operation counts, and remain correct across one
+   controller restart and one node-plugin restart;
+6. prove cross-node RWX, read-only rejection, `SINGLE_NODE_WRITER` conflict and
+   handoff, and `archive`, `retain`, and `delete` behavior without changing a
+   sibling volume;
+7. add the fresh second parent through Helm, interrupt the controller after the
+   provider accepted its first attachment but before the immutable owner claim,
+   and prove the same Pod/runtime identity resumes the exact durable bootstrap
+   attempt and completes the claim without a temporary claim left behind;
+8. attach both parents to the exact standalone run-owned disposable Instance
+   outside the Kubernetes node inventory, prove the controller fails closed
+   before partial provisioning, detach those exact attachments, prove both
+   provider surfaces report absence, and verify provisioning resumes;
+9. grow one run-owned parent by one 100 GB product step, wait for a fresh
+   authoritative `available` observation, restart the controller to force a
+   fresh provider inventory, and prove a new allocation can use the observed
+   grown capacity. Transient, ambiguous, timeout, and unavailable provider
+   reads are covered deterministically below rather than induced unsafely in
+   the cloud;
+10. drain and uncordon a workload node, restart a node plugin, then hard-stop
+    the exact controller node while workloads on another node continue I/O.
+    Prove the successor remains non-serving until exact provider fencing and
+    one immutable approval, record recovery time and operator steps, replace
+    the stopped run-owned node, and revalidate commercial type, live attach
+    limit, node configuration generation, registration, mount, and data;
+11. upgrade from the most recent public compatible chart candidate or release
+    to the candidate under test while existing PVCs are mounted. Stagger the
+    node rollout, require create/publish to fail closed while generations
+    differ, and verify existing handles, records, all three deletion policies,
+    new provisioning, and production rollout strategy after convergence;
+12. decommission the second parent only after removing every reference, prove
+    no mount or attachment remains, preserve non-reserving permanent
+    tombstones, remove only that parent from values, and restart without
+    reattaching the historical parent;
+13. create a quiesced checkpoint, remove and recreate the driver namespace in
+    the same cluster while preserving the test PV and parents, replace every
+    pre-recovery worker Instance, restore the immutable checkpoint Secret,
+    require the missing-Lease controller to remain non-serving until exact
+    all-Instance fencing and one-time approval, then verify existing data, new
+    provisioning, archive/delete, and tombstone inventory;
+14. verify the managed Scaleway File Storage CSI remains installed but idle and
+    that its CSIDriver, StorageClass, RBAC, sidecars, and node DaemonSet coexist
+    without default-class or object collisions;
+15. remove every test workload and PVC through normal Kubernetes workflows,
+    complete bounded manual GC for exact run-owned terminal allocations, run
+    and validate `csi-admin uninstall prepare`, stop node plugins before the
+    controller, prove all exact mounts and attachments absent, uninstall the
+    exact Helm release, remove the retained kubeconfig, and delete every
+    run-owned cloud resource by exact retained ID.
 
-The v1 release-candidate profile must additionally record these destructive
-recovery scenarios against the exact chart and every rendered image digest:
+The soak is a correctness and recovery test, not a throughput benchmark. Its
+20-minute minimum is measured after every sampled writer and reader is Ready.
+Qualification evidence records duration, sampled PVC identities, aggregate
+successful writes and reads, checksum failures, and the controller and
+node-plugin Pod UIDs before and after their in-soak restarts. Zero successful
+operations, any checksum failure, an early workload exit, or a restart without
+a distinct Pod UID fails qualification.
 
-- run the attach, mount, statfs, claim, publish, unpublish, and cleanup path on
-  every commercial Instance type advertised in the release support matrix and
-  record its live `MaxFileSystems`; a type without retained evidence is not in
-  the v1 allowlist;
-- attach a test parent to a tagged Instance outside the Kubernetes node
-  inventory and verify paginated cross-zone `ListAttachments` keeps the
-  controller non-serving until the attachment is removed;
-- on a fresh secondary test parent, terminate the controller after the real
-  attach succeeds but before owner creation, then verify the durable bootstrap
-  attempt and root temporary claim authorize only that attachment and complete
-  on the same runtime identity. Inject interruption around temporary-file fsync,
-  no-replace rename, and root-directory fsync. Prove that rollback is refused
-  while the recorded Instance is live, then stop or delete that disposable
-  Instance before the exact offline rollback;
-- race two isolated test installations from the same disposable controller
-  Instance and prove neither bootstrap attempt can detach or treat the other's
-  attachment as owned;
-- on a disposable real `virtiofs` parent, exercise symlink replacement,
-  traversal, and nested-mount deletion rejection and prove a sibling sentinel
-  outside the logical volume is unchanged; these tests are mandatory release
-  evidence in addition to fake-mounter unit tests;
-- retain provider attachment-state observations proving
-  `ControllerPublishVolume` returned only after `available`; ambiguous and
-  network-failure transitions remain deterministically covered by fake-SDK
-  fault injection because a cloud test must not simulate them unsafely;
-- hard-stop or delete the disposable node hosting the controller while test
-  workloads mounted on other nodes continue reading and writing. Verify a
-  successor controller cannot mutate through the old Lease or unknown
-  attachment state, complete the documented provider fence and one-time
-  approval, then verify the successor reconciles, existing volumes remain
-  usable, and a new PVC can be provisioned. Record the measured recovery time
-  and exact operator steps in the release evidence;
-- on a disposable tagged test node, create a published-node record, remove its
-  CSINode/Node identity while the Instance is still running, exercise unpublish,
-  and verify the fence remains; then stop and detach or delete that Instance and
-  verify deletion resumes only after provider fencing is conclusive;
-- delete a disposable Instance and record the real regional attachment cleanup
-  behavior. The controller must remain non-serving until fresh inventory reports
-  absence. If Scaleway cannot safely leave an orphan for testing, deterministic
-  fake-provider integration tests must inject the orphan state and prove the
-  documented support escalation path without performing an unsafe cloud action;
-- after draining and removing every reference to the second test parent, stop
-  the driver, run the offline unmount/detach procedure, prove no mount or
-  attachment remains, retain a schema-valid non-reserving `Deleted` allocation
-  tombstone and its compact ownership proof, remove the parent from values, and
-  restart successfully without reattaching or remounting that historical
-  parent;
-- create the documented quiesced checkpoint, remove and recreate the driver
-  namespace in the same cluster while preserving cluster-scoped test PVs and
-  parents, restore the fixed immutable checkpoint Secret, and verify the absent
-  or empty Lease keeps the controller non-serving. Recreate or scale down every
-  pre-recovery worker pool, prove fresh inventories contain no old or unknown
-  attachment, consume the checkpoint-bound one-time recovery approval, then
-  verify existing mount, new provisioning, archive/delete, and tombstone
-  behavior. Separately prove that fencing only the historical checkpoint holder,
-  an in-progress export, and a stale checkpoint with newer fake ownership state
-  all remain non-serving;
-- attempt the same restored metadata with a different synthetic cluster UID in
-  the integration harness and verify no parent mutation is authorized. V1 must
-  not perform a real cross-cluster takeover test because that operation is
-  explicitly unsupported.
+The following exhaustive permutations remain mandatory release gates, but run
+deterministically on the same frozen source through fake Kubernetes/Scaleway
+boundaries and privileged Linux mount/filesystem tests rather than as
+timing-sensitive cloud experiments:
+
+- cancellation, timeout, pagination, forbidden, stale, unavailable, ambiguous,
+  `attaching`, `detaching`, `updating`, and unknown provider responses;
+- interruption before and after every temporary-file fsync, no-replace rename,
+  parent-directory fsync, allocation transition, ownership replacement,
+  quarantine rename, GC remove marker, compaction, and checkpoint export;
+- two isolated installations racing for one parent, mismatched installation or
+  cluster identity, missing/mismatched ownership state, foreign or orphan
+  attachments, and published-node fencing while an Instance remains live;
+- descriptor/path replacement, symlink swap, traversal, bind aliases, stacked
+  or nested mounts, reused mount IDs, and sibling-sentinel preservation;
+- deleted-handle idempotency, unavailable-state retry, permanent tombstones,
+  name-reuse rejection, offline rollback refusal while the recorded Instance
+  is live, synthetic different-cluster restore, and all GC retry windows.
+
+These deterministic tests do not weaken any runtime safety invariant. They are
+the authoritative proof for controllable crash windows; the real Kapsule run is
+the authoritative proof for Scaleway API, Kapsule scheduling, `virtiofs`,
+physical attachment, and end-to-end operator behavior. Neither layer may be
+skipped or substituted by the other.
 
 ### 12.7 E2E Cleanup Contract
 
@@ -6700,14 +6640,19 @@ approval does not authorize a later run.
 The executor has two non-interchangeable evidence paths. The base profile may
 execute only the fixed smoke matrix defined in section 12.6 and emits explicitly
 non-qualifying evidence after complete cleanup. The release-candidate profile
-maintains an explicit closed list of smoke-only production scenarios. While
-that list is non-empty, release-candidate `--execute` fails before credentials,
-live reads, or provider mutation, and no scenario log, base evidence, or zero
-exit status can be encoded as release qualification. A production scenario
-leaves that list only after its structured evidence proves the full normative
-invariant. Before a previous public release exists, N/N-1 is explicitly not
-qualifying; it is never reported as a successful upgrade merely because no
-previous chart was supplied.
+maintains an explicit closed development-interlock list for production
+scenarios whose implementation does not yet prove the bounded matrix above.
+The checked-in list is empty only after every current scenario has structured
+semantic proof validation. While that list is non-empty,
+release-candidate `--execute` fails before credentials, live reads, or provider
+mutation, and no scenario log, base evidence, or zero exit status can be
+encoded as release qualification. A scenario leaves that list only after its
+structured evidence proves its complete normative invariant. N/N-1 requires a
+distinct compatible public predecessor and is never reported as successful
+when no previous chart was supplied. For qualification of the first stable
+release, the most recent public release candidate may be that predecessor when
+its exact chart, values, driver digest, and compatibility identity are retained
+and explicitly labelled as a candidate rather than a prior production release.
 
 Before the first provider mutation the executor fsyncs a provisioning-phase
 inventory. Provisioning is sequential. Immediately before each provider

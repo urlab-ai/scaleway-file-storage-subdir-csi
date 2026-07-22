@@ -29,7 +29,7 @@ The public source, module, CSI, and artifact identities are frozen as:
 - `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
 - `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`.
 
-The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.8` are superseded and
+The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.10` are superseded and
 must not be promoted. The seventh candidate reached real Kapsule provisioning,
 installed the chart, and created its first logical volume, then proved that
 Scaleway File Storage `virtiofs` rejects directory
@@ -38,8 +38,11 @@ the smoke harness. The eighth candidate then proved that the narrowly scoped
 descriptor-relative compatibility path safely resumes a prepared `Deleting`
 allocation and completes the real archive, but review before the ten-PVC
 scenario found a second copy of the same incorrect count expression. Both
-count sites and the regression test are now corrected. The next candidate will
-be `v0.1.0-rc.9`; publication remains blocked until that exact candidate has
+count sites and the regression test are now corrected. The public rc.10
+artifacts were not production-qualified; review of the deeper E2E runner found
+and fixed its ambient-kubeconfig, nil-stdin, and premature-qualification-gate
+defects before a billable release-candidate run. The next candidate will be
+`v0.1.0-rc.11`; publication remains blocked until that exact candidate has
 concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
@@ -195,6 +198,11 @@ cross-node RWX, isolation and archive, controller replacement, provider
 attachment inventory bounded to the two parents and two nodes, safe uninstall,
 and exact cleanup. Its evidence contains
 `releaseQualified=false` and is rejected by release promotion. The
-`release-candidate` profile still refuses `--execute` before any live call while
-its deeper scenario list contains smoke-only probes. `--cleanup-only` remains
+`release-candidate` profile executes only after every scenario in the bounded
+production matrix has structured proof validation; any remaining blocker makes
+it refuse before credentials or provider mutation. That implementation
+interlock is currently clear; this authorizes a controlled qualification run,
+not release promotion. The run includes the exact 100-PVC multiplex check and
+a 20-minute checksum correctness soak across controller and node-plugin
+restarts. `--cleanup-only` remains
 available for an already approved retained run.

@@ -87,16 +87,17 @@ func TestExecuteIsDryRunByDefaultAndRequiresExactConfirmation(t *testing.T) {
 	}
 }
 
-func TestExecuteRefusesSmokeOnlyScenarioMatrixBeforeLiveCalls(t *testing.T) {
+func TestExecuteAppliesQualificationGateBeforeLiveCalls(t *testing.T) {
 	request := testRequest()
 	request.Plan.Profile = e2eplan.ProfileReleaseCandidate
 	request.Plan.Parents.SizeBytes = 100_000_000_000
+	request.PreviousChart = "/tmp/previous-chart.tgz"
+	request.PreviousValues = "/tmp/previous-values.yaml"
 	backend := &fakeBackend{inventory: testInventory(request)}
-	times := []time.Time{time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 1, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 5, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 6, 0, 0, time.UTC)}
-	index := 0
-	clock := func() time.Time { value := times[index]; index++; return value }
-	evidence, err := Execute(context.Background(), request, true, request.Plan.RunID, backend, clock)
-	if err == nil || evidence.Succeeded || backend.preflight != 0 || backend.provision != 0 || backend.scenarios != 0 || backend.cleanup != 0 {
+	gateErr := errors.New("qualification gate blocked")
+	clock := func() time.Time { return time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) }
+	evidence, err := executeWithQualificationGate(context.Background(), request, true, request.Plan.RunID, backend, clock, func() error { return gateErr })
+	if !errors.Is(err, gateErr) || evidence.Succeeded || backend.preflight != 0 || backend.provision != 0 || backend.scenarios != 0 || backend.cleanup != 0 {
 		t.Fatalf("execute = %#v, %v, backend=%#v", evidence, err, backend)
 	}
 }
@@ -127,10 +128,23 @@ func TestExecuteRunsBaseSmokeWithoutClaimingReleaseQualification(t *testing.T) {
 	}
 }
 
-func TestReleaseQualificationReadinessNamesSmokeOnlyScenarios(t *testing.T) {
-	err := RequireReleaseQualificationReady()
-	if err == nil || !strings.Contains(err.Error(), "checkpoint-and-restore") || !strings.Contains(err.Error(), "safe-uninstall") {
+func TestReleaseQualificationReadinessAcceptsCompleteStructuredMatrix(t *testing.T) {
+	if err := RequireReleaseQualificationReady(); err != nil {
 		t.Fatalf("RequireReleaseQualificationReady() error = %v", err)
+	}
+}
+
+func TestReleaseCandidateRequestRequiresPreviousPublicArtifacts(t *testing.T) {
+	request := testRequest()
+	request.Plan.Profile = e2eplan.ProfileReleaseCandidate
+	request.Plan.Parents.SizeBytes = 100_000_000_000
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "previous public chart") {
+		t.Fatalf("Validate(without N-1 artifacts) error = %v", err)
+	}
+	request.PreviousChart = "/tmp/previous-chart.tgz"
+	request.PreviousValues = "/tmp/previous-values.yaml"
+	if err := request.Validate(); err != nil {
+		t.Fatalf("Validate(with N-1 artifacts) error = %v", err)
 	}
 }
 

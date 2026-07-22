@@ -19,12 +19,12 @@ func runValidateUninstallResult(arguments []string) error {
 	flags.StringVar(&path, "file", "", "completed uninstall result file")
 	flags.StringVar(&requestID, "request-id", "", "exact run-scoped uninstall request ID")
 	flags.StringVar(&parentA, "parent-a", "", "first exact parent ID")
-	flags.StringVar(&parentB, "parent-b", "", "second exact parent ID")
+	flags.StringVar(&parentB, "parent-b", "", "optional second exact parent ID")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || path == "" || requestID == "" || parentA == "" || parentB == "" {
-		return fmt.Errorf("uninstall result file, request ID, and two parent IDs are required")
+	if flags.NArg() != 0 || path == "" || requestID == "" || parentA == "" {
+		return fmt.Errorf("uninstall result file, request ID, and at least one parent ID are required")
 	}
 	if path == string(filepath.Separator) || !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsAny(path, "\x00\r\n") {
 		return fmt.Errorf("uninstall result path must be a clean absolute non-root path")
@@ -32,14 +32,17 @@ func runValidateUninstallResult(arguments []string) error {
 	if err := volume.ValidateOperationID(requestID); err != nil {
 		return fmt.Errorf("uninstall request ID: %w", err)
 	}
-	expectedParents := []string{parentA, parentB}
+	expectedParents := []string{parentA}
+	if parentB != "" {
+		expectedParents = append(expectedParents, parentB)
+	}
 	for _, parentID := range expectedParents {
-		if err := volume.ValidateInstallationID(parentID); err != nil {
+		if err := volume.ValidateParentFilesystemID(parentID); err != nil {
 			return fmt.Errorf("uninstall parent ID: %w", err)
 		}
 	}
 	slices.Sort(expectedParents)
-	if expectedParents[0] == expectedParents[1] {
+	if len(expectedParents) == 2 && expectedParents[0] == expectedParents[1] {
 		return fmt.Errorf("uninstall parent IDs must be distinct")
 	}
 	info, err := os.Lstat(path)
