@@ -108,6 +108,40 @@ func TestApprovalConsumptionBindsSecretRequestModeAndConsumer(t *testing.T) {
 	if _, err := ApplyApprovalConsumption(annotations, consumption); err == nil {
 		t.Fatal("ApplyApprovalConsumption(reuse) error = nil")
 	}
+
+	nextApproval := approval
+	nextApproval.SecretUID = "99999999-9999-4999-8999-999999999999"
+	nextApproval.RequestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	nextConsumption, err := NewApprovalConsumption(nextApproval, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", time.Date(2026, 7, 13, 15, 32, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("NewApprovalConsumption(next) error = %v", err)
+	}
+	replaced, err := ApplyApprovalConsumption(annotations, nextConsumption)
+	if err != nil {
+		t.Fatalf("ApplyApprovalConsumption(next) error = %v", err)
+	}
+	decoded, present, err = ParseApprovalConsumption(replaced)
+	if err != nil || !present || decoded != nextConsumption || replaced["unrelated"] != "preserved" {
+		t.Fatalf("ParseApprovalConsumption(replaced) = %#v, %v, %v", decoded, present, err)
+	}
+
+	for name, mutate := range map[string]func(*ApprovalConsumption){
+		"secret UID replay": func(value *ApprovalConsumption) { value.SecretUID = nextConsumption.SecretUID },
+		"request ID replay": func(value *ApprovalConsumption) { value.RequestID = nextConsumption.RequestID },
+		"older audit":       func(value *ApprovalConsumption) { value.ConsumedAt = consumption.ConsumedAt },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := consumption
+			candidate.SecretUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+			candidate.RequestID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+			candidate.ConsumingPodUID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+			candidate.ConsumedAt = "2026-07-13T15:33:00Z"
+			mutate(&candidate)
+			if _, err := ApplyApprovalConsumption(replaced, candidate); err == nil {
+				t.Fatal("ApplyApprovalConsumption() error = nil")
+			}
+		})
+	}
 }
 
 func TestParseApprovalConsumptionRejectsPartialOrUnknownAudit(t *testing.T) {

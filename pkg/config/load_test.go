@@ -19,8 +19,9 @@ import (
 func validRuntimeFileFixture(t *testing.T) runtimeFile {
 	t.Helper()
 	runtime := validRuntime(t)
+	driverDigest := "sha256:" + strings.Repeat("1", 64)
 	generation, err := NodeConfigGeneration(
-		runtime.DriverName, runtime.Provider.Region, runtime.Node.ParentMountRoot,
+		runtime.DriverName, driverDigest, runtime.Provider.Region, runtime.Node.ParentMountRoot,
 		runtime.Node.KubeletPath, runtime.Compatibility.QualifiedCommercialTypes, runtime.Pools,
 	)
 	if err != nil {
@@ -31,7 +32,7 @@ func validRuntimeFileFixture(t *testing.T) runtimeFile {
 		LogLevel: "info", ControllerNamespace: "driver-system", HelmReleaseName: "driver",
 		ChartVersion: "1.0.0",
 		RenderedImages: []RenderedImage{
-			{Name: "driver", Digest: "sha256:" + strings.Repeat("1", 64)},
+			{Name: "driver", Digest: driverDigest},
 			{Name: "external-attacher", Digest: "sha256:" + strings.Repeat("2", 64)},
 			{Name: "external-provisioner", Digest: "sha256:" + strings.Repeat("3", 64)},
 			{Name: "liveness-probe", Digest: "sha256:" + strings.Repeat("4", 64)},
@@ -183,6 +184,9 @@ func TestDecodeRuntimeFileRejectsClosedSchemaAndSemanticTampering(t *testing.T) 
 		"empty chart version":      func(file *runtimeFile) { file.ChartVersion = "" },
 		"missing rendered image":   func(file *runtimeFile) { file.RenderedImages = file.RenderedImages[:4] },
 		"mutable production image": func(file *runtimeFile) { file.RenderedImages[0].Digest = "" },
+		"driver image generation binding": func(file *runtimeFile) {
+			file.RenderedImages[0].Digest = "sha256:" + strings.Repeat("9", 64)
+		},
 		"reordered rendered image": func(file *runtimeFile) {
 			file.RenderedImages[0], file.RenderedImages[1] = file.RenderedImages[1], file.RenderedImages[0]
 		},

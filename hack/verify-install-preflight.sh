@@ -5,10 +5,13 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+REAL_JQ=$(command -v jq)
 
 cat >"$TMP_DIR/kubectl" <<'EOF'
 #!/bin/sh
 set -eu
+[ -z "${SCW_ACCESS_KEY+x}" ]
+[ -z "${SCW_SECRET_KEY+x}" ]
 scenario=${PREFLIGHT_SCENARIO:-success}
 if [ "$1" = get ] && [ "$2" = namespace ]; then
   if [ "$scenario" = missing-psa ]; then
@@ -47,6 +50,8 @@ EOF
 cat >"$TMP_DIR/scw" <<'EOF'
 #!/bin/sh
 set -eu
+[ "${SCW_ACCESS_KEY-}" = SCWTESTACCESSFIXTURE ]
+[ "${SCW_SECRET_KEY-}" = test-secret-fixture ]
 if [ "${PREFLIGHT_SCENARIO:-success}" = missing-cluster-tag ]; then
   tags='[]'
 else
@@ -54,11 +59,20 @@ else
 fi
 printf '{"id":"11111111-1111-4111-8111-111111111111","project_id":"22222222-2222-4222-8222-222222222222","region":"fr-par","type":"kapsule","tags":%s}\n' "$tags"
 EOF
-chmod +x "$TMP_DIR/kubectl" "$TMP_DIR/scw"
+
+cat >"$TMP_DIR/jq" <<'EOF'
+#!/bin/sh
+set -eu
+[ -z "${SCW_ACCESS_KEY+x}" ]
+[ -z "${SCW_SECRET_KEY+x}" ]
+exec "$PREFLIGHT_REAL_JQ" "$@"
+EOF
+chmod +x "$TMP_DIR/kubectl" "$TMP_DIR/scw" "$TMP_DIR/jq"
 
 run_preflight() {
   PREFLIGHT_SCENARIO=$1 \
-    KUBECTL="$TMP_DIR/kubectl" SCW="$TMP_DIR/scw" \
+    SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE SCW_SECRET_KEY=test-secret-fixture \
+    PREFLIGHT_REAL_JQ="$REAL_JQ" KUBECTL="$TMP_DIR/kubectl" SCW="$TMP_DIR/scw" JQ="$TMP_DIR/jq" \
     "$ROOT_DIR/hack/install-preflight.sh" \
       --namespace=driver-system \
       --credentials-secret=provider-secret \
@@ -70,7 +84,8 @@ run_preflight() {
 
 run_custom_preflight() {
   PREFLIGHT_SCENARIO=$1 \
-    KUBECTL="$TMP_DIR/kubectl" SCW="$TMP_DIR/scw" \
+    SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE SCW_SECRET_KEY=test-secret-fixture \
+    PREFLIGHT_REAL_JQ="$REAL_JQ" KUBECTL="$TMP_DIR/kubectl" SCW="$TMP_DIR/scw" JQ="$TMP_DIR/jq" \
     "$ROOT_DIR/hack/install-preflight.sh" \
       --namespace=driver-system \
       --credentials-secret=provider-secret \

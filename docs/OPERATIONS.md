@@ -286,6 +286,10 @@ abnormal takeover; Lease expiry alone does not authorize it.
 ## Abnormal takeover
 
 1. Record the condition time and exact Lease/previous-holder evidence.
+   If the Lease already contains a complete `approvalConsumption*` tuple,
+   retain that previous audit tuple in the incident evidence; the next
+   successful, independently fenced approval replaces only this bounded latest
+   tuple.
 2. Stop/delete the previous process or Instance and explicitly unmount/detach
    configured parents where required.
 3. Prove every parent absent from both regional and Instance inventories.
@@ -294,7 +298,8 @@ abnormal takeover; Lease expiry alone does not authorize it.
    one hour.
 5. The successor repeats the provider fence and atomically consumes approval
    with its new holder before mutation.
-6. Retain audit and delete the consumed approval Secret.
+6. Retain the resulting latest Lease audit tuple and delete the consumed
+   approval Secret. Never reuse either a prior Secret UID or request ID.
 
 ## Checkpoint and recovery
 

@@ -12,10 +12,13 @@ import (
 )
 
 // NodeConfigGeneration returns the fixed lowercase SHA-256 generation shared
-// by Helm, controller preflight, and node-plugin Pod annotations. Provider
-// display names and placement lifecycle are excluded because they do not alter
-// node mount authorization.
-func NodeConfigGeneration(driverName, region, nodeParentMountRoot, kubeletPath string, commercialTypes []string, pools []pool.Config) (string, error) {
+// by Helm, controller preflight, and node-plugin Pod annotations. The immutable
+// driver image digest is part of the generation because a new node binary may
+// have a different durable-schema reader contract even when its values are
+// unchanged. Development renders use the deliberate empty digest sentinel.
+// Provider display names and placement lifecycle are excluded because they do
+// not alter node mount authorization.
+func NodeConfigGeneration(driverName, driverImageDigest, region, nodeParentMountRoot, kubeletPath string, commercialTypes []string, pools []pool.Config) (string, error) {
 	if err := volume.ValidateDriverName(driverName); err != nil {
 		return "", err
 	}
@@ -48,6 +51,7 @@ func NodeConfigGeneration(driverName, region, nodeParentMountRoot, kubeletPath s
 	}
 	projection := map[string]any{
 		"accessModes":              []string{string(volume.AccessModeSingleNodeWriter), string(volume.AccessModeMultiNodeMultiWriter)},
+		"driverImageDigest":        driverImageDigest,
 		"driverName":               driverName,
 		"kubeletPath":              kubeletPath,
 		"nodeParentMountRoot":      nodeParentMountRoot,

@@ -60,7 +60,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- end -}}
 {{- end -}}
 {{- $commercialTypes := .Values.compatibility.qualifiedCommercialTypes | sortAlpha -}}
-{{- dict "driverName" .Values.driver.name "region" .Values.scaleway.region "parents" $parents "nodeParentMountRoot" .Values.node.parentMountRoot "kubeletPath" .Values.node.kubeletPath "accessModes" (list "SINGLE_NODE_WRITER" "MULTI_NODE_MULTI_WRITER") "ownershipSchema" "1" "qualifiedCommercialTypes" $commercialTypes | toJson | sha256sum -}}
+{{- dict "driverImageDigest" .Values.image.digest "driverName" .Values.driver.name "region" .Values.scaleway.region "parents" $parents "nodeParentMountRoot" .Values.node.parentMountRoot "kubeletPath" .Values.node.kubeletPath "accessModes" (list "SINGLE_NODE_WRITER" "MULTI_NODE_MULTI_WRITER") "ownershipSchema" "1" "qualifiedCommercialTypes" $commercialTypes | toJson | sha256sum -}}
 {{- end -}}
 
 {{/* Cross-field validation that JSON Schema cannot express. */}}

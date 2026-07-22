@@ -2640,9 +2640,11 @@ controller serves provisioning or publish operations.
 Readiness alone does not prove that a rolling DaemonSet has the same parent
 allowlist and schema contract as the controller. The chart must compute a
 `nodeConfigGeneration` as SHA-256 over canonical node-relevant configuration:
-driver name, region, complete parent ID and base-path mapping, exact sorted
-commercial-type allowlist, node mount roots, supported access modes, and
-ownership schema reader/writer generation. It
+driver name, immutable driver image digest, region, complete parent ID and
+base-path mapping, exact sorted commercial-type allowlist, node mount roots,
+supported access modes, and ownership schema reader/writer generation.
+Development rendering uses its explicit empty-digest sentinel, while every
+production release uses the required immutable digest. It
 writes the bounded hash to a fixed Pod
 annotation on both controller and node-plugin Pods. Before serving create or
 publish, the controller must require one Ready node-plugin Pod with the exact
@@ -5055,7 +5057,8 @@ Required behavior:
   previous process or Instance is stopped, then approve that exact previous
   holder identity through the immutable operator approval Secret;
 - the approval is provider-verified, consumed, and audited in the Lease before
-  the successor mutates.
+  the successor mutates; a later abnormal failure remains recoverable through
+  a distinct newly fenced approval rather than exhausting the Lease forever.
 
 The cancellation rule includes cold-start mutations. Immediately after a
 leadership session starts, the controller derives one startup context from the
@@ -5185,14 +5188,16 @@ checkpoint, approval, cluster identity, attachment inventory, and runtime keeps
 the controller non-serving.
 
 After all checks, the successor consumes approval and acquires leadership in one
-Lease compare-and-swap. The Lease records approval Secret UID, request ID, mode,
-consuming Pod UID, and consumption timestamp before any mutation. The same
-Secret UID/request ID cannot authorize another transition, and the operations
-guide requires deleting the approval Secret after successful consumption. A new
-approval requires deleting and recreating the immutable Secret, which gives it a
-new Kubernetes UID.
+Lease compare-and-swap. The Lease records the latest approval Secret UID,
+request ID, mode, consuming Pod UID, and consumption timestamp before any
+mutation. The currently recorded Secret UID or request ID cannot authorize the
+next transition. Kubernetes cannot recreate a deleted Secret UID, and the
+operations guide requires a globally fresh UUID request ID, deleting the
+approval Secret after successful consumption, and retaining prior audit
+evidence. A new approval requires deleting and recreating the immutable Secret,
+which gives it a new Kubernetes UID.
 
-The permanent closed Lease annotation names for that tuple are:
+The closed Lease annotation names for that bounded latest-consumption tuple are:
 
 ```text
 approvalConsumptionSecretUID
@@ -5202,10 +5207,17 @@ approvalConsumptionPodUID
 approvalConsumedAt
 ```
 
-They are all-or-none. Partial, malformed, unknown `approvalConsumption*`
-annotations, or any attempt to replace an existing tuple, keep the controller
-non-serving. Normal renewal and graceful-release updates preserve this audit
-tuple unchanged.
+They are all-or-none. Partial, malformed, or unknown `approvalConsumption*`
+annotations keep the controller non-serving. Normal renewal and
+graceful-release updates preserve this audit tuple unchanged. A later approved
+recovery may replace it only in the same holder-acquisition compare-and-swap,
+after the complete new approval and provider/offline fence have succeeded. The
+new tuple must have a distinct Secret UID, a distinct request ID, and a strictly
+newer consumption timestamp. Reuse of either currently recorded identity, an
+older/equal tuple, or a standalone clear/patch remains forbidden. This bounded latest-audit design
+supports repeated independently fenced failures without unbounded Lease
+annotations; operators retain earlier tuples in the incident evidence before
+authorizing the next recovery.
 
 `missing-lease-recovery` uses the same object and one-time consumption rule. The
 provisional Lease records when recovery was first observed; the approval must be
@@ -6295,8 +6307,9 @@ Required checks:
 - render with controller and node security contexts;
 - render with `external-provisioner --extra-create-metadata=true`;
 - render the same non-empty `nodeConfigGeneration` annotation on the controller
-  and node Pods and prove that every node-relevant value changes it
-  deterministically while controller-only values do not;
+  and node Pods and prove that every node-relevant value, including the
+  immutable driver image digest, changes it deterministically while
+  controller-only values do not;
 - render passes the configured 12-minute `--timeout` to external-provisioner
   and external-attacher and rejects a timeout that cannot cover attachment;
 - render passes explicit `--worker-threads=5` to external-provisioner and
@@ -6510,7 +6523,10 @@ Kapsule matrix must:
     to the candidate under test while existing PVCs are mounted. Stagger the
     node rollout, require create/publish to fail closed while generations
     differ, and verify existing handles, records, all three deletion policies,
-    new provisioning, and production rollout strategy after convergence;
+    new provisioning, and production rollout strategy after convergence. The
+    predecessor and candidate use only the first parent during this proof; the
+    immutable driver image digest supplies the version-specific node generation
+    and the second parent remains fresh for item 7;
 12. decommission the second parent only after removing every reference, prove
     no mount or attachment remains, preserve non-reserving permanent
     tombstones, remove only that parent from values, and restart without
@@ -6538,6 +6554,12 @@ successful writes and reads, checksum failures, and the controller and
 node-plugin Pod UIDs before and after their in-soak restarts. Zero successful
 operations, any checksum failure, an early workload exit, or a restart without
 a distinct Pod UID fails qualification.
+
+During the new-controller/old-node interval in item 11, the exact controller
+startup refusal naming both configuration generations together with a
+non-Bound new PVC and a non-Ready new publish Pod is authoritative fail-closed
+evidence. The test must not depend on CSI sidecar Event timing while the driver
+socket is deliberately unavailable.
 
 The following exhaustive permutations remain mandatory release gates, but run
 deterministically on the same frozen source through fake Kubernetes/Scaleway
@@ -6838,7 +6860,10 @@ evidence directory or another persistent runner path. The scenario runner must
 remove the credentials from the inherited child-process environment, expose
 them only to exact provider CLI calls, and stream the controller-only Kubernetes
 Secret without putting plaintext or its rendered manifest in a file or process
-argument. Success and failure logs must not contain credential values.
+argument. The nested install preflight must repeat that boundary: `kubectl` and
+`jq` receive no Scaleway credentials, while only its exact read-only `scw`
+cluster-identity call receives them. Success and failure logs must not contain
+credential values.
 
 A v1 release candidate must record a successful real Kapsule E2E result for the
 exact Git commit, chart package, driver image digest, and every CSI sidecar image

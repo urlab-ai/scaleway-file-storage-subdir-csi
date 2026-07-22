@@ -94,3 +94,27 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 		t.Fatal("100-PVC scenario does not hand the still-fresh second parent to the bootstrap crash scenario")
 	}
 }
+
+func TestNMinusOneUpgradeLeavesSecondParentFreshForBootstrapCrash(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "prepare_n_minus_one_upgrade() {")
+	end := strings.Index(contents, "\nscenario_artifact_and_install() {")
+	if start < 0 || end <= start {
+		t.Fatal("N-1 upgrade function boundary is missing")
+	}
+	body := contents[start:end]
+	if strings.Contains(body, "$parent_b") {
+		t.Fatal("N-1 upgrade consumes the second parent reserved for bootstrap recovery")
+	}
+	if !strings.Contains(body, `upgrade_parents="[{\"id\":\"$parent_a\"`) {
+		t.Fatal("N-1 upgrade does not retain the first-parent-only topology")
+	}
+}

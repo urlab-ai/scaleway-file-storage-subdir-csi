@@ -116,7 +116,16 @@ require_text '--timeout=12m' 'controller sidecar timeout is missing'
 require_text '--worker-threads=5' 'controller sidecar worker bound is missing'
 require_text 'mountPropagation: Bidirectional' 'node mount propagation is missing'
 require_text 'fsGroupPolicy: None' 'CSIDriver fsGroupPolicy is not None'
-require_text '"nodeConfigGeneration": "b3004500b09bedd836285b2d91c22bfb12fdc76f13bb15e4876dab92b0337440"' 'Helm and Go node generation fixtures disagree'
+require_text '"nodeConfigGeneration": "5fb2269e0c5f31a63d22699096b876007ae467480c0c61e9a26d12e06f1fc190"' 'Helm and Go node generation fixtures disagree'
+ALTERNATE_DRIVER_RENDER="$TMP_DIR/alternate-driver-image.yaml"
+"$HELM" template verify "$CHART" --namespace scaleway-sfs-subdir-csi \
+  --set-string image.digest="sha256:9999999999999999999999999999999999999999999999999999999999999999" >"$ALTERNATE_DRIVER_RENDER"
+default_generation=$(sed -n 's/.*"nodeConfigGeneration": "\([0-9a-f]*\)".*/\1/p' "$RENDERED" | sed -n '1p')
+alternate_generation=$(sed -n 's/.*"nodeConfigGeneration": "\([0-9a-f]*\)".*/\1/p' "$ALTERNATE_DRIVER_RENDER" | sed -n '1p')
+if [ -z "$default_generation" ] || [ -z "$alternate_generation" ] || [ "$default_generation" = "$alternate_generation" ]; then
+  echo "Helm verification failed: immutable driver image digest does not change node configuration generation" >&2
+  exit 1
+fi
 if [ "$(grep -Fc 'mountPath: /run/scaleway-sfs-subdir-csi-mount-quarantine' "$RENDERED")" -ne 2 ] || \
    [ "$(grep -Ec '^[[:space:]]*- name: mount-quarantine$' "$RENDERED")" -ne 2 ]; then
   echo "Helm verification failed: each privileged driver needs one dedicated private mount-quarantine emptyDir" >&2
@@ -154,7 +163,7 @@ if ! "$JQ" -e '
   and .compatibility.qualifiedCommercialTypes == ["TEST-TYPE-1"]
   and .pools.standard.maxLogicalOvercommitRatio == "1.0"
   and .storageClasses[0].poolName == "standard"
-  and .nodeConfigGeneration == "b3004500b09bedd836285b2d91c22bfb12fdc76f13bb15e4876dab92b0337440"
+  and .nodeConfigGeneration == "5fb2269e0c5f31a63d22699096b876007ae467480c0c61e9a26d12e06f1fc190"
 ' "$RUNTIME_CONFIG" >/dev/null; then
   echo "Helm verification failed: runtime JSON projection is incomplete or disagrees with validated values" >&2
   exit 1

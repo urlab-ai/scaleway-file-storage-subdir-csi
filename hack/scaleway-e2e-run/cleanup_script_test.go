@@ -77,6 +77,114 @@ func TestScenarioRunnerDoesNotSuppressShellErrexit(t *testing.T) {
 	}
 }
 
+func TestWaitNodeGenerationCountsUsesTheOriginalPodListForBothCounts(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in scenario script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "wait_node_generation_counts() {")
+	if start < 0 {
+		t.Fatal("node-generation wait function is missing")
+	}
+	end := strings.Index(contents[start:], "\n}\n\nnode_plugin_for_node_generation()")
+	if end < 0 {
+		t.Fatal("node-generation wait function boundary is missing")
+	}
+	waitFunction := contents[start : start+end+2]
+
+	const podList = `{"items":[
+  {"metadata":{"annotations":{"scaleway-sfs-subdir-csi.io/node-config-generation":"previous"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+  {"metadata":{"annotations":{"scaleway-sfs-subdir-csi.io/node-config-generation":"candidate"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+]}`
+	harness := `set -eu
+JQ=$1
+namespace=driver-system
+release=driver
+k() { printf '%s\n' "$POD_LIST"; }
+` + waitFunction + `
+wait_node_generation_counts previous candidate 1 1
+`
+	command := exec.Command("sh", "-c", harness, "generation-count-test", jq)
+	command.Env = append(os.Environ(), "POD_LIST="+podList)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("node-generation counts did not preserve the original Pod list: %v, output = %s", err, output)
+	}
+}
+
+func TestControllerGenerationBlockRequiresDirectFailClosedEvidence(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in scenario script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "controller_generation_block_observed() {")
+	if start < 0 {
+		t.Fatal("controller generation-block observation function is missing")
+	}
+	end := strings.Index(contents[start:], "\n}\n\nwait_controller_generation_block()")
+	if end < 0 {
+		t.Fatal("controller generation-block observation function boundary is missing")
+	}
+	observationFunction := contents[start : start+end+2]
+
+	const controllerStatus = `{"items":[{"metadata":{"name":"driver-controller"},"status":{"containerStatuses":[{"name":"driver","ready":false,"restartCount":2}]}}]}`
+	harness := `set -eu
+JQ=$1
+` + observationFunction + `
+status=$2
+logs='bootstrap configured parents: eligible node generation "previous" differs from expected "candidate"'
+controller_generation_block_observed "$status" "$logs" Pending false previous candidate
+! controller_generation_block_observed "$status" "$logs" Bound false previous candidate
+! controller_generation_block_observed "$status" "$logs" Pending true previous candidate
+! controller_generation_block_observed "$status" 'generation "other" differs from expected "candidate"' Pending false previous candidate
+`
+	command := exec.Command("sh", "-c", harness, "generation-block-test", jq, controllerStatus)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("controller generation-block proof did not enforce direct evidence: %v, output = %s", err, output)
+	}
+}
+
+func TestScenarioDurableChecksumsUseCanonicalSHA256Format(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	const canonicalCheck = `(.contentChecksum | test("^sha256:[0-9a-f]{64}$"))`
+	if strings.Count(contents, canonicalCheck) < 2 {
+		t.Fatal("live parent-claim checks must require the canonical sha256:<64 hex> checksum")
+	}
+	for _, obsoleteCheck := range []string{
+		`(.contentChecksum | test("^[0-9a-f]{64}$"))`,
+		`(.contentChecksum | length) == 64`,
+	} {
+		if strings.Contains(contents, obsoleteCheck) {
+			t.Fatalf("live scenario retains obsolete checksum validation %q", obsoleteCheck)
+		}
+	}
+}
+
 func TestScenarioRunnerIdentitySurvivesScenarioAssignments(t *testing.T) {
 	jq, err := exec.LookPath("jq")
 	if err != nil {

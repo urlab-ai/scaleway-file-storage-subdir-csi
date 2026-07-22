@@ -179,8 +179,12 @@ func (runtime *LeaseRuntime) Acquire(ctx context.Context, durableStateExists boo
 // AcquireApproved is the only approval-based leadership path. Any provisional
 // session for this process must be stopped and drained before calling it so its
 // renewal CAS cannot race the promotion. Provider/offline verification occurs
-// before one CAS that installs the candidate holder and permanent consumption
-// audit together.
+// before one CAS that installs the candidate holder and latest consumption
+// audit together. A prior complete consumption tuple does not make the Lease
+// unrecoverable: a distinct newer approval may replace it after the full fence,
+// while replay of either currently recorded identity is rejected before any
+// provider call. Kubernetes Secret UIDs cannot be recreated, and the operator
+// procedure requires every later approval to use a fresh request ID.
 func (runtime *LeaseRuntime) AcquireApproved(ctx context.Context, approval OperatorApproval, conditionObservedAt time.Time, checkpointRequestID, checkpointManifestSHA256 string, fence ApprovalFenceVerifier) (AcquisitionResult, error) {
 	if fence == nil {
 		return AcquisitionResult{}, fmt.Errorf("approval fence verifier is nil")
@@ -208,8 +212,8 @@ func (runtime *LeaseRuntime) AcquireApproved(ctx context.Context, approval Opera
 	}
 	if existing, present, err := ParseApprovalConsumption(current.Annotations); err != nil {
 		return AcquisitionResult{}, err
-	} else if present {
-		return AcquisitionResult{}, fmt.Errorf("lease already consumed approval %s/%s", existing.SecretUID, existing.RequestID)
+	} else if present && (existing.SecretUID == approval.SecretUID || existing.RequestID == approval.RequestID) {
+		return AcquisitionResult{}, fmt.Errorf("approval Secret UID or request ID is already consumed")
 	}
 	if _, releasePresent, err := ParseGracefulRelease(current.Annotations); err != nil {
 		return AcquisitionResult{}, err

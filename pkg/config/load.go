@@ -241,7 +241,7 @@ func DecodeRuntimeFile(data []byte, component Component, lookup LookupEnv) (Load
 		return Loaded{}, err
 	}
 	wantGeneration, err := NodeConfigGeneration(
-		runtime.DriverName, runtime.Provider.Region, runtime.Node.ParentMountRoot,
+		runtime.DriverName, file.RenderedImages[0].Digest, runtime.Provider.Region, runtime.Node.ParentMountRoot,
 		runtime.Node.KubeletPath, runtime.Compatibility.QualifiedCommercialTypes, runtime.Pools,
 	)
 	if err != nil {

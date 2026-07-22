@@ -10,6 +10,21 @@ SCW=${SCW:-scw}
 JQ=${JQ:-jq}
 REQUIRED_CLUSTER_TAG=scw-filestorage-csi
 
+# This operator-side preflight is allowed to authenticate one exact Scaleway
+# cluster read. Keep that authority out of kubectl and jq: retain an
+# unexported copy, remove the inherited credentials, and scope them back only
+# to the single scw process below.
+provider_access_key=${SCW_ACCESS_KEY-}
+provider_secret_key=${SCW_SECRET_KEY-}
+unset SCW_ACCESS_KEY SCW_SECRET_KEY
+readonly provider_access_key provider_secret_key
+
+s() {
+  : "${provider_access_key:?SCW_ACCESS_KEY is required for the cluster identity preflight}"
+  : "${provider_secret_key:?SCW_SECRET_KEY is required for the cluster identity preflight}"
+  SCW_ACCESS_KEY=$provider_access_key SCW_SECRET_KEY=$provider_secret_key "$SCW" "$@"
+}
+
 usage() {
   cat >&2 <<'EOF'
 Usage: install-preflight.sh \
@@ -136,7 +151,7 @@ then
   exit 1
 fi
 
-if ! "$SCW" k8s cluster get "$cluster_id" -o json |
+if ! s k8s cluster get "$cluster_id" -o json |
   "$JQ" -e --arg cluster "$cluster_id" --arg project "$project_id" --arg region "$region" --arg tag "$REQUIRED_CLUSTER_TAG" '
     .id == $cluster
     and .project_id == $project

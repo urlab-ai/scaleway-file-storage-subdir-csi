@@ -186,7 +186,7 @@ func operatorRuntimeJSON(t *testing.T) (string, string) {
 		Filesystems: []pool.ParentConfig{{ID: operatorParentID, Name: "parent-a", State: pool.ParentDraining}},
 	}}
 	generation, err := config.NodeConfigGeneration(
-		operatorDriverName, "fr-par", "/var/lib/scaleway-sfs-subdir-csi/parents", "/var/lib/kubelet",
+		operatorDriverName, "", "fr-par", "/var/lib/scaleway-sfs-subdir-csi/parents", "/var/lib/kubelet",
 		[]string{"TEST-TYPE-1"}, pools,
 	)
 	if err != nil {

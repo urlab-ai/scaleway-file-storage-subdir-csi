@@ -1025,6 +1025,72 @@ func TestLeaseRuntimeApprovedAbnormalTakeoverConsumesApprovalInAcquisitionCAS(t 
 	}
 }
 
+func TestLeaseRuntimeSupportsRepeatedIndependentlyFencedTakeovers(t *testing.T) {
+	firstNow := time.Date(2026, 7, 13, 15, 30, 0, 0, time.UTC)
+	initial := validHolderEvidence(t)
+	firstCandidate := initial
+	firstCandidate.PodUID = "99999999-9999-4999-8999-999999999999"
+	store := newFakeLeaseRuntimeStore()
+	store.snapshot = leaseWithHolder(t, initial)
+	firstRuntime, err := NewLeaseRuntime(store, firstCandidate, DefaultLeaseTiming(), clock.NewManual(firstNow), func(error) {})
+	if err != nil {
+		t.Fatalf("NewLeaseRuntime(first) error = %v", err)
+	}
+	firstApproval := validAbnormalApproval(t)
+	firstFence := &fakeApprovalFenceVerifier{}
+	if _, err := firstRuntime.AcquireApproved(
+		context.Background(), firstApproval, time.Date(2026, 7, 13, 14, 59, 0, 0, time.UTC), "", "", firstFence,
+	); err != nil {
+		t.Fatalf("AcquireApproved(first) error = %v", err)
+	}
+
+	secondCandidate := firstCandidate
+	secondCandidate.PodUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	secondNow := time.Date(2026, 7, 13, 15, 45, 0, 0, time.UTC)
+	secondRuntime, err := NewLeaseRuntime(store, secondCandidate, DefaultLeaseTiming(), clock.NewManual(secondNow), func(error) {})
+	if err != nil {
+		t.Fatalf("NewLeaseRuntime(second) error = %v", err)
+	}
+	secondApproval := validAbnormalApproval(t)
+	secondApproval.SecretUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	secondApproval.RequestID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	secondApproval.PreviousHolderPodUID = firstCandidate.PodUID
+	secondApproval.PreviousHolderNodeName = firstCandidate.NodeName
+	secondApproval.PreviousHolderCSINodeID = firstCandidate.CSINodeID
+	secondApproval.PreviousHolderInstanceID = firstCandidate.InstanceID
+	secondApproval.PreviousHolderZone = firstCandidate.Zone
+	secondApproval.ApprovedAt = "2026-07-13T15:40:00Z"
+	secondApproval.ExpiresAt = "2026-07-13T16:40:00Z"
+
+	replayedIdentity := secondApproval
+	replayedIdentity.SecretUID = firstApproval.SecretUID
+	replayedIdentity.RequestID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	secondFence := &fakeApprovalFenceVerifier{}
+	if _, err := secondRuntime.AcquireApproved(
+		context.Background(), replayedIdentity, time.Date(2026, 7, 13, 15, 39, 0, 0, time.UTC), "", "", secondFence,
+	); err == nil {
+		t.Fatal("AcquireApproved(replayed Secret UID) error = nil")
+	}
+	if secondFence.abnormalCalls != 0 {
+		t.Fatalf("replayed approval performed %d provider fence calls", secondFence.abnormalCalls)
+	}
+
+	result, err := secondRuntime.AcquireApproved(
+		context.Background(), secondApproval, time.Date(2026, 7, 13, 15, 39, 0, 0, time.UTC), "", "", secondFence,
+	)
+	if err != nil {
+		t.Fatalf("AcquireApproved(second) error = %v", err)
+	}
+	consumption, present, err := ParseApprovalConsumption(result.Session.Snapshot().Annotations)
+	if err != nil || !present {
+		t.Fatalf("ParseApprovalConsumption(second) = %#v, %v, %v", consumption, present, err)
+	}
+	if consumption.SecretUID != secondApproval.SecretUID || consumption.RequestID != secondApproval.RequestID ||
+		consumption.ConsumingPodUID != secondCandidate.PodUID || secondFence.abnormalCalls != 1 {
+		t.Fatalf("second consumption/fence = %#v/%#v", consumption, secondFence)
+	}
+}
+
 func TestLeaseRuntimeResolvesCommittedAmbiguousApprovalConsumption(t *testing.T) {
 	now := time.Date(2026, 7, 13, 15, 30, 0, 0, time.UTC)
 	previous := validHolderEvidence(t)

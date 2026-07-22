@@ -340,10 +340,10 @@ wait_node_generation_counts() {
     upgrade_counts=$(printf '%s' "$upgrade_node_pods" | "$JQ" -r \
       --arg previous "$upgrade_previous_generation" --arg candidate "$upgrade_candidate_generation" '
         [
-          [.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
-            select(.metadata.annotations["scaleway-sfs-subdir-csi.io/node-config-generation"] == $previous)] | length,
-          [.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
-            select(.metadata.annotations["scaleway-sfs-subdir-csi.io/node-config-generation"] == $candidate)] | length
+          ([.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
+            select(.metadata.annotations["scaleway-sfs-subdir-csi.io/node-config-generation"] == $previous)] | length),
+          ([.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
+            select(.metadata.annotations["scaleway-sfs-subdir-csi.io/node-config-generation"] == $candidate)] | length)
         ] | @tsv')
     [ "$(printf '%s' "$upgrade_counts" | cut -f1)" = "$upgrade_want_previous" ] &&
       [ "$(printf '%s' "$upgrade_counts" | cut -f2)" = "$upgrade_want_candidate" ] && return 0
@@ -380,6 +380,69 @@ wait_upgrade_warning() {
   done
 }
 
+controller_generation_block_observed() {
+  upgrade_block_controller_status=$1
+  upgrade_block_controller_logs=$2
+  upgrade_block_pvc_phase=$3
+  upgrade_block_publish_ready=$4
+  upgrade_block_previous_generation=$5
+  upgrade_block_candidate_generation=$6
+  upgrade_block_expected_message="generation \"$upgrade_block_previous_generation\" differs from expected \"$upgrade_block_candidate_generation\""
+
+  [ "$upgrade_block_pvc_phase" != Bound ] &&
+    [ "$upgrade_block_publish_ready" = false ] &&
+    printf '%s' "$upgrade_block_controller_status" | "$JQ" -e '
+      (.items | length) == 1 and
+      any(.items[0].status.containerStatuses[]?; .name == "driver" and .ready == false)
+    ' >/dev/null &&
+    printf '%s\n' "$upgrade_block_controller_logs" | grep -F "$upgrade_block_expected_message" >/dev/null
+}
+
+wait_controller_generation_block() {
+  upgrade_block_previous_generation=$1
+  upgrade_block_candidate_generation=$2
+  upgrade_block_claim=$3
+  upgrade_block_publish_pod=$4
+  upgrade_block_evidence="$evidence_dir/upgrade-controller-generation-block.log"
+  upgrade_block_deadline=$(( $(date +%s) + 300 ))
+  while :; do
+    upgrade_block_controller_status=$(k -n "$namespace" get pods \
+      -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o json)
+    upgrade_block_controller_pod=$(printf '%s' "$upgrade_block_controller_status" | "$JQ" -r \
+      '.items | if length == 1 then .[0].metadata.name else "" end')
+    upgrade_block_controller_logs=
+    if [ -n "$upgrade_block_controller_pod" ]; then
+      upgrade_block_controller_logs=$(
+        k -n "$namespace" logs "pod/$upgrade_block_controller_pod" -c driver --tail=200 2>&1 || true
+        k -n "$namespace" logs "pod/$upgrade_block_controller_pod" -c driver --previous --tail=200 2>&1 || true
+      )
+    fi
+    upgrade_block_pvc_phase=$(k -n "$namespace" get "pvc/$upgrade_block_claim" -o jsonpath='{.status.phase}')
+    upgrade_block_publish_ready=$(k -n "$namespace" get "pod/$upgrade_block_publish_pod" -o json | "$JQ" -r \
+      'any(.status.conditions[]?; .type == "Ready" and .status == "True")')
+    if controller_generation_block_observed \
+      "$upgrade_block_controller_status" "$upgrade_block_controller_logs" \
+      "$upgrade_block_pvc_phase" "$upgrade_block_publish_ready" \
+      "$upgrade_block_previous_generation" "$upgrade_block_candidate_generation"; then
+      {
+        printf 'previousGeneration=%s\n' "$upgrade_block_previous_generation"
+        printf 'candidateGeneration=%s\n' "$upgrade_block_candidate_generation"
+        printf 'pvcPhase=%s\n' "$upgrade_block_pvc_phase"
+        printf 'publishPodReady=%s\n' "$upgrade_block_publish_ready"
+        printf 'controllerStatus='
+        printf '%s' "$upgrade_block_controller_status" | "$JQ" -c \
+          '{items: [.items[] | {metadata: {name: .metadata.name, uid: .metadata.uid}, status: {containerStatuses: .status.containerStatuses}}]}'
+        printf 'driverLogs:\n%s\n' "$upgrade_block_controller_logs"
+      } >"$upgrade_block_evidence.tmp"
+      chmod 600 "$upgrade_block_evidence.tmp"
+      mv "$upgrade_block_evidence.tmp" "$upgrade_block_evidence"
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$upgrade_block_deadline" ] || return 1
+    sleep 3
+  done
+}
+
 controller_path_absent() {
   upgrade_controller_pod=$1
   upgrade_path=$2
@@ -389,7 +452,10 @@ controller_path_absent() {
 
 prepare_n_minus_one_upgrade() {
   upgrade_prepared="$evidence_dir/.n-minus-one-upgrade-prepared.json"
-  upgrade_draining="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"},{\"id\":\"$parent_b\",\"name\":\"e2e-parent-b\",\"state\":\"draining\"}]"
+  # The immutable driver digest makes the N-1 and candidate node generations
+  # distinct. Keep parent B completely fresh for the later bootstrap-crash
+  # proof instead of using a storage-topology change as a version surrogate.
+  upgrade_parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"}]"
   upgrade_node=$(one_name daemonset node)
   upgrade_controller=$(one_name deployment controller)
   upgrade_previous_generation=$(k -n "$namespace" get "$upgrade_node" -o jsonpath='{.spec.template.metadata.annotations.scaleway-sfs-subdir-csi\.io/node-config-generation}')
@@ -434,7 +500,7 @@ prepare_n_minus_one_upgrade() {
   upgrade_rendered="$evidence_dir/upgrade-candidate-node.yaml"
   h template "$release" "$chart" --namespace "$namespace" --values "$values" \
     --set-string "scaleway.projectId=$project_id" --set-string "scaleway.region=$region" \
-    --set-string "pools.standard.onDelete=delete" --set-json "pools.standard.filesystems=$upgrade_draining" \
+    --set-string "pools.standard.onDelete=delete" --set-json "pools.standard.filesystems=$upgrade_parents" \
     --show-only templates/configmap.yaml --show-only templates/node.yaml |
     "$ROOT_DIR/hack/e2e-helm-ondelete-postrenderer.sh" >"$upgrade_rendered.tmp"
   chmod 600 "$upgrade_rendered.tmp"
@@ -444,10 +510,9 @@ prepare_n_minus_one_upgrade() {
   [ "$upgrade_candidate_generation" != "$upgrade_previous_generation" ]
 
   upgrade_previous_rendered="$evidence_dir/upgrade-previous-node.yaml"
-  upgrade_previous_parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"}]"
   h template "$release" "$previous_chart" --namespace "$namespace" --values "$previous_values" \
     --set-string "scaleway.projectId=$project_id" --set-string "scaleway.region=$region" \
-    --set-string "pools.standard.onDelete=delete" --set-json "pools.standard.filesystems=$upgrade_previous_parents" \
+    --set-string "pools.standard.onDelete=delete" --set-json "pools.standard.filesystems=$upgrade_parents" \
     --show-only templates/configmap.yaml --show-only templates/node.yaml |
     "$ROOT_DIR/hack/e2e-helm-ondelete-postrenderer.sh" >"$upgrade_previous_rendered.tmp"
   chmod 600 "$upgrade_previous_rendered.tmp"
@@ -459,13 +524,11 @@ prepare_n_minus_one_upgrade() {
   upgrade_base_hash="bp-$(printf '%s' /kubernetes-volumes | sha256sum | awk '{print substr($1,1,32)}')"
   upgrade_candidate_file="$evidence_dir/upgrade-candidate.json"
   "$JQ" -n -c --arg driver "$(driver_name)" --arg installation "$upgrade_installation_hash" \
-    --arg cluster "$upgrade_cluster_uid" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+    --arg cluster "$upgrade_cluster_uid" --arg parent_a "$parent_a" \
     --arg base "$upgrade_base_hash" --arg generation "$upgrade_candidate_generation" '
       {driverName:$driver,installationIDHash:$installation,activeClusterUID:$cluster,
        leadershipLeaseName:"scaleway-sfs-subdir-csi-controller",
-       parents:[
-         {parentFilesystemID:$parent_a,poolName:"standard",basePathHash:$base},
-         {parentFilesystemID:$parent_b,poolName:"standard",basePathHash:$base}],
+       parents:[{parentFilesystemID:$parent_a,poolName:"standard",basePathHash:$base}],
        readableAllocationSchemas:["1"],readableOwnershipSchemas:["1"],
        writtenAllocationSchema:"1",writtenOwnershipSchema:"1",candidateNodeConfigGeneration:$generation}
     ' >"$upgrade_candidate_file.tmp"
@@ -524,7 +587,7 @@ prepare_n_minus_one_upgrade() {
   # node Pods still run N-1. This covers the opposite mixed-version direction.
   h upgrade "$release" "$chart" --namespace "$namespace" --values "$values" \
     --set-string "scaleway.projectId=$project_id" --set-string "scaleway.region=$region" \
-    --set-string "pools.standard.onDelete=delete" --set-json "pools.standard.filesystems=$upgrade_draining" \
+    --set-string "pools.standard.onDelete=delete" --set-json "pools.standard.filesystems=$upgrade_parents" \
     --set-json 'controller.affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"topology.kubernetes.io/zone","operator":"In","values":["fr-par-1","fr-par-2"]}]}]}}}' \
     --post-renderer "$ROOT_DIR/hack/e2e-helm-ondelete-postrenderer.sh" --timeout 30m
   [ "$(k -n "$namespace" get "$upgrade_node" -o jsonpath='{.spec.updateStrategy.type}')" = OnDelete ]
@@ -546,8 +609,8 @@ prepare_n_minus_one_upgrade() {
   upgrade_publish_pod="e2e-upgrade-publish-$short_run"
   apply_pod "$upgrade_publish_pod" "$upgrade_archive_claim" "$upgrade_node_b" 'test "$(cat /data/upgrade-marker)" = "upgrade-archive-'"$short_run"'"; sleep 3600'
   k -n "$namespace" label "pod/$upgrade_publish_pod" sfs-subdir-e2e-scenario=n-minus-one-upgrade --overwrite
-  wait_upgrade_warning PersistentVolumeClaim "$upgrade_pending_claim" ProvisioningFailed
-  wait_upgrade_warning Pod "$upgrade_publish_pod" FailedAttachVolume
+  wait_controller_generation_block "$upgrade_previous_generation" "$upgrade_candidate_generation" \
+    "$upgrade_pending_claim" "$upgrade_publish_pod"
   [ "$(k -n "$namespace" get "pvc/$upgrade_pending_claim" -o jsonpath='{.status.phase}')" != Bound ]
   [ "$(k -n "$namespace" get "pod/$upgrade_publish_pod" -o json | "$JQ" -r 'any(.status.conditions[]?; .type == "Ready" and .status == "True")')" = false ]
 
@@ -569,7 +632,7 @@ prepare_n_minus_one_upgrade() {
   k -n "$namespace" wait "pod/$upgrade_publish_pod" --for=condition=Ready --timeout=10m
   [ "$(k -n "$namespace" exec "$upgrade_publish_pod" -- cat /data/upgrade-marker)" = "upgrade-archive-$short_run" ]
 
-  helm_candidate "$upgrade_draining"
+  helm_candidate "$upgrade_parents"
   [ "$(k -n "$namespace" get "$upgrade_node" -o jsonpath='{.spec.updateStrategy.type}')" = RollingUpdate ]
   upgrade_new_controller_uid=$(k -n "$namespace" get pods -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o json | "$JQ" -er '.items | if length == 1 then .[0].metadata.uid else error("candidate controller is not singular") end')
   [ "$upgrade_new_controller_uid" != "$upgrade_old_controller_uid" ]
@@ -654,7 +717,10 @@ scenario_artifact_and_install() {
     # run-owned parent is introduced only after that proof.
     parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"}]"
   fi
-  "$ROOT_DIR/hack/install-preflight.sh" \
+  # The child repeats the same fail-closed boundary: it immediately unexports
+  # these values and scopes them only to its exact read-only scw invocation.
+  SCW_ACCESS_KEY=$provider_access_key SCW_SECRET_KEY=$provider_secret_key \
+    "$ROOT_DIR/hack/install-preflight.sh" \
     --namespace="$namespace" \
     --credentials-secret=scaleway-sfs-subdir-csi-credentials \
     --identity-secret=scaleway-sfs-subdir-csi-identity \
@@ -793,7 +859,7 @@ scenario_virtiofs() {
   printf '%s' "$parent_claim" | "$JQ" -e --arg run "$run_id" --arg parent "$parent_a" '
     .schemaVersion == "1" and .revision == 1 and .installationID == $run and
     .parentFilesystemID == $parent and .leadershipLeaseName == "scaleway-sfs-subdir-csi-controller" and
-    (.contentChecksum | test("^[0-9a-f]{64}$"))
+    (.contentChecksum | test("^sha256:[0-9a-f]{64}$"))
   ' >/dev/null
 
   k -n "$namespace" rollout restart "$controller"
@@ -1142,7 +1208,8 @@ bootstrap_crash_add_parent() {
   printf '%s' "$bootstrap_claim" | "$JQ" -e --arg run "$run_id" --arg cluster "$bootstrap_cluster_uid" --arg parent "$parent_b" --arg attempt "$bootstrap_attempt" '
     .installationID == $run and .activeClusterUID == $cluster and .parentFilesystemID == $parent and
     .bootstrapAttemptID == $attempt and .schemaVersion == "1" and .revision == 1 and
-    .leadershipLeaseName == "scaleway-sfs-subdir-csi-controller" and (.contentChecksum | length) == 64
+    .leadershipLeaseName == "scaleway-sfs-subdir-csi-controller" and
+    (.contentChecksum | test("^sha256:[0-9a-f]{64}$"))
   ' >/dev/null
   k -n "$namespace" exec "$bootstrap_pod" -c driver -- sh -c 'test ! -e "$1"' sh "$bootstrap_parent_root$bootstrap_temp_path"
   k -n "$namespace" exec "$bootstrap_pod" -c driver -- findmnt -n -t virtiofs -T "$bootstrap_parent_root" >/dev/null

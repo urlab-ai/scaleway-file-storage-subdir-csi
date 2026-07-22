@@ -190,8 +190,11 @@ func (approval OperatorApproval) previousHolder() HolderEvidence {
 	}
 }
 
-// ApprovalConsumption is the permanent Lease audit evidence written in the
-// same compare-and-swap that installs the successor holder.
+// ApprovalConsumption is the latest Lease audit evidence written in the same
+// compare-and-swap that installs an approved successor holder. A later,
+// independently fenced recovery may replace this bounded tuple. The currently
+// recorded identities cannot be replayed; Kubernetes does not recreate a
+// deleted Secret UID, and the operator contract requires a fresh request ID.
 type ApprovalConsumption struct {
 	SecretUID       string
 	RequestID       string
@@ -232,7 +235,7 @@ func (consumption ApprovalConsumption) Validate() error {
 	return validateCoordinationTimestamp("approval consumption", consumption.ConsumedAt)
 }
 
-// Annotations returns the complete permanent Lease audit projection.
+// Annotations returns the complete latest Lease audit projection.
 func (consumption ApprovalConsumption) Annotations() (map[string]string, error) {
 	if err := consumption.Validate(); err != nil {
 		return nil, err
@@ -278,16 +281,34 @@ func ParseApprovalConsumption(annotations map[string]string) (ApprovalConsumptio
 	return consumption, true, nil
 }
 
-// ApplyApprovalConsumption preserves unrelated Lease annotations and refuses
-// to overwrite any prior consumption, including a different approval.
+// ApplyApprovalConsumption preserves unrelated Lease annotations and installs
+// the latest consumption. Replacing an older complete tuple requires a newer
+// timestamp and distinct Secret and request identities. This keeps the Lease
+// bounded while rejecting replay of the currently recorded approval.
 func ApplyApprovalConsumption(annotations map[string]string, consumption ApprovalConsumption) (map[string]string, error) {
 	if annotations == nil {
 		return nil, fmt.Errorf("lease annotations must be an explicit map")
 	}
+	if err := consumption.Validate(); err != nil {
+		return nil, err
+	}
 	if existing, present, err := ParseApprovalConsumption(annotations); err != nil {
 		return nil, err
 	} else if present {
-		return nil, fmt.Errorf("approval %s/%s is already consumed", existing.SecretUID, existing.RequestID)
+		if existing.SecretUID == consumption.SecretUID || existing.RequestID == consumption.RequestID {
+			return nil, fmt.Errorf("approval Secret UID or request ID is already consumed")
+		}
+		existingTime, err := parseCoordinationTimestamp("existing approval consumption", existing.ConsumedAt)
+		if err != nil {
+			return nil, err
+		}
+		nextTime, err := parseCoordinationTimestamp("next approval consumption", consumption.ConsumedAt)
+		if err != nil {
+			return nil, err
+		}
+		if !nextTime.After(existingTime) {
+			return nil, fmt.Errorf("next approval consumption must be newer than the existing audit tuple")
+		}
 	}
 	encoded, err := consumption.Annotations()
 	if err != nil {
