@@ -90,6 +90,15 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 	if strings.Contains(body, `kill -KILL 1`) || strings.Contains(body, `kill -STOP 1`) {
 		t.Fatal("bootstrap crash still signals namespace PID 1 from inside its own PID namespace")
 	}
+	if strings.Contains(body, `"$process/exe"`) ||
+		!strings.Contains(body, `"$process/cmdline"`) ||
+		!strings.Contains(body, `[ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ]`) {
+		t.Fatal("bootstrap fault injector does not use the Kapsule-readable exact immutable ENTRYPOINT identity")
+	}
+	if strings.Count(body, `grep -Fq "$pod_uid" "$process/cgroup"`) != 3 ||
+		strings.Count(body, `[ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ]`) != 3 {
+		t.Fatal("bootstrap fault injector does not revalidate cgroup and ENTRYPOINT identity before both signals")
+	}
 	if !strings.Contains(body, `automountServiceAccountToken: false`) ||
 		!strings.Contains(body, `drop: ["ALL"]`) || !strings.Contains(body, `add: ["KILL"]`) {
 		t.Fatal("bootstrap fault injector does not retain its credential-free least-privilege boundary")

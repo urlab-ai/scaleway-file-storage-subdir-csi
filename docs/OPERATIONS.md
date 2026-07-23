@@ -34,11 +34,15 @@ exposed a stale lifecycle-snapshot race while normal creation advanced to
 now has focused regression coverage. RC16 then proved the functional 100-PVC
 and 20-minute soak path without corruption, but its same-namespace PID 1 signal
 injection could not prove a controller restart. It failed closed and cleaned
-every run-owned cloud resource. The corrected harness uses a temporary,
-credential-free host-PID Pod with only `CAP_KILL`. RC17 is the next full
-qualification candidate and continues to use RC14 as its exact public
-predecessor. None is a qualified production release until the exact RC17
-artifacts pass every gate. The
+every run-owned cloud resource. The corrected harness next used a temporary,
+credential-free host-PID Pod with only `CAP_KILL`, but RC17 proved that Kapsule
+denies `/proc/<pid>/exe` to that least-privilege Pod; cleanup-only then removed
+every run-owned cloud resource. The injector now combines the exact Pod cgroup
+with the immutable driver ENTRYPOINT from readable `argv[0]` and revalidates
+both immediately before each signal, without adding `CAP_SYS_PTRACE`. RC18 is
+the next full qualification candidate and continues to use RC14 as its exact
+public predecessor. None is a qualified production release until the exact
+RC18 artifacts pass every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint

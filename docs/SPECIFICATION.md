@@ -202,14 +202,24 @@ bootstrap interruption proof nevertheless failed closed: Linux does not deliver
 unhandled `SIGSTOP` or `SIGKILL` sent to namespace PID 1 by another member of
 that same PID namespace, so the harness could not prove that it had stopped or
 killed the controller. The run admitted no 100-PVC scenario result and removed
-every run-owned cloud resource. The harness now uses a temporary
-credential-free `hostPID` fault-injector Pod on the exact controller node,
-identifies exactly one controller process through both Pod UID cgroup identity
-and executable identity, and grants only `CAP_KILL` to stop and kill it from
-the ancestor PID namespace. `v0.1.0-rc.17` is the next full qualification
-candidate and continues to use RC14 as its exact public predecessor. No
-candidate is a production support claim until RC17 passes every Linux, kind,
-CSI, Helm, real Kapsule, and final-cleanup qualification gate.
+every run-owned cloud resource. RC17 then passed artifact/install, real
+`virtiofs`, single-node-writer conflict, and the functional 100-PVC/20-minute
+soak checks, including 5,922 writes, 5,906 reads, and zero checksum failures.
+Its ancestor-namespace injector still failed closed before sending a signal
+because Kapsule permits the least-privilege `hostPID` Pod to read the controller
+cgroup and command line but denies `/proc/<pid>/exe` without `CAP_SYS_PTRACE`.
+Exact diagnostics observed five processes in the controller Pod cgroup, zero
+readable executable links, and exactly one immutable driver ENTRYPOINT in the
+readable command lines. The retained cleanup-only workflow subsequently removed
+every run-owned cloud resource. The harness now identifies exactly one
+controller process through both Pod UID cgroup identity and the complete
+immutable `/usr/local/bin/scaleway-sfs-subdir-csi` `argv[0]`, and revalidates
+both identities immediately before each signal. It remains credential-free and
+grants only `CAP_KILL`; it does not add `CAP_SYS_PTRACE`.
+`v0.1.0-rc.18` is the next full qualification candidate and continues to use
+RC14 as its exact public predecessor. No candidate is a production support
+claim until RC18 passes every Linux, kind, CSI, Helm, real Kapsule, and
+final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
 commercial type for the first controlled run because it is the lowest-priced
@@ -6567,8 +6577,9 @@ Kapsule matrix must:
    identity resumes the exact durable bootstrap attempt and completes the claim
    without a temporary claim left behind. The fault injector is a temporary,
    credential-free `hostPID` Pod on that exact node; it must identify exactly
-   one process by Pod UID cgroup plus executable identity, add only `CAP_KILL`,
-   and be removed immediately after the restart proof;
+   one process by Pod UID cgroup plus the complete immutable driver ENTRYPOINT
+   in `argv[0]`, revalidate both identities immediately before each signal, add
+   only `CAP_KILL`, and be removed immediately after the restart proof;
 8. attach both parents to the exact standalone run-owned disposable Instance
    outside the Kubernetes node inventory, prove the controller fails closed
    before partial provisioning, detach those exact attachments, prove both

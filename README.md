@@ -53,10 +53,14 @@ is corrected with focused regression coverage. RC16 subsequently proved the
 bootstrap crash harness tried to signal namespace PID 1 from inside the same
 PID namespace and therefore could not prove that the controller restarted.
 That run failed closed and cleaned every run-owned cloud resource. The harness
-now uses a bounded, credential-free host-PID fault injector with only
-`CAP_KILL`. RC17 is the next full qualification candidate and continues to use
-RC14 as its exact public predecessor. Publication remains blocked until the
-exact RC17 artifacts have
+then used a bounded, credential-free host-PID fault injector with only
+`CAP_KILL`, but RC17 proved that Kapsule denies its `/proc/<pid>/exe` identity
+read without `CAP_SYS_PTRACE`; cleanup-only then removed every run-owned cloud
+resource. The injector now retains the same narrow capability and instead
+combines the exact Pod cgroup with the immutable driver ENTRYPOINT available in
+`argv[0]`, revalidating both immediately before each signal. RC18 is the next
+full qualification candidate and continues to use RC14 as its exact public
+predecessor. Publication remains blocked until the exact RC18 artifacts have
 concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File

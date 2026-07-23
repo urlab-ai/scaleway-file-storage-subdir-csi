@@ -1169,8 +1169,13 @@ EOF
       if ! grep -Fq "$pod_uid" "$process/cgroup" && ! grep -Fq "$cgroup_uid" "$process/cgroup"; then
         continue
       fi
-      executable=$(readlink "$process/exe" 2>/dev/null || true)
-      [ "${executable##*/}" = scaleway-sfs-subdir-csi ] || continue
+      # Kapsule exposes the host process table to this least-privilege Pod but
+      # denies /proc/<pid>/exe without CAP_SYS_PTRACE. The immutable image
+      # ENTRYPOINT remains available as argv[0]. Match its complete path, not a
+      # truncated comm value or a user-controlled substring.
+      [ -r "$process/cmdline" ] || continue
+      entrypoint=$(tr "\000" "\n" <"$process/cmdline" 2>/dev/null | sed -n "1p")
+      [ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ] || continue
       pid=${process#/proc/}
       matches="$matches $pid"
     done
@@ -1194,6 +1199,17 @@ EOF
       [ "$bootstrap_transition" = attaching ] || [ "$bootstrap_transition" = available ]
       k --request-timeout=15s -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
         pid=$1
+        pod_uid=$2
+        cgroup_uid=$3
+        process=/proc/$pid
+        [ -r "$process/cgroup" ]
+        grep -Fq "$pod_uid" "$process/cgroup" || grep -Fq "$cgroup_uid" "$process/cgroup"
+        [ -r "$process/cmdline" ]
+        entrypoint=$(tr "\000" "\n" <"$process/cmdline" 2>/dev/null | sed -n "1p")
+        [ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ] || {
+          echo "controller host process identity changed before stop" >&2
+          exit 1
+        }
         kill -STOP "$pid"
         attempts=0
         while [ "$attempts" -lt 100 ]; do
@@ -1206,7 +1222,7 @@ EOF
         done
         echo "controller host process did not enter a stopped state" >&2
         exit 1
-      ' sh "$bootstrap_host_pid"
+      ' sh "$bootstrap_host_pid" "$bootstrap_pod_uid" "$bootstrap_cgroup_uid"
       bootstrap_process_stopped=true
       break
     fi
@@ -1244,10 +1260,21 @@ EOF
 
   k --request-timeout=15s -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
     pid=$1
+    pod_uid=$2
+    cgroup_uid=$3
+    process=/proc/$pid
+    [ -r "$process/cgroup" ]
+    grep -Fq "$pod_uid" "$process/cgroup" || grep -Fq "$cgroup_uid" "$process/cgroup"
+    [ -r "$process/cmdline" ]
+    entrypoint=$(tr "\000" "\n" <"$process/cmdline" 2>/dev/null | sed -n "1p")
+    [ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ] || {
+      echo "controller host process identity changed before kill" >&2
+      exit 1
+    }
     state=$(sed -n "s/^State:[[:space:]]*\\([^[:space:]]\\).*/\\1/p" "/proc/$pid/status")
     { [ "$state" = T ] || [ "$state" = t ]; }
     kill -KILL "$pid"
-  ' sh "$bootstrap_host_pid"
+  ' sh "$bootstrap_host_pid" "$bootstrap_pod_uid" "$bootstrap_cgroup_uid"
   bootstrap_process_stopped=false
 
   bootstrap_deadline=$(( $(date +%s) + 900 ))
