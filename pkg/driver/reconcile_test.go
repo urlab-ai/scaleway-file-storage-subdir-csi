@@ -141,6 +141,62 @@ func TestLifecycleCrashReconcilerDispatchesAlreadyPairedDetailedStates(t *testin
 	}
 }
 
+func TestLifecycleCrashReconcilerAcceptsCreationCompletedAfterSnapshot(t *testing.T) {
+	harness := newCreateHarness(t)
+	harness.filesystem.fail = fmt.Errorf("injected create interruption")
+	request := validCreateRequest()
+	if _, err := harness.controller.Create(context.Background(), request); err == nil {
+		t.Fatal("Create(interrupted) error = nil")
+	}
+	logicalID, err := volume.LogicalVolumeID(driverTestName, request.Name)
+	if err != nil {
+		t.Fatalf("LogicalVolumeID() error = %v", err)
+	}
+	stale, err := harness.store.Get(context.Background(), logicalID)
+	if err != nil {
+		t.Fatalf("store.Get(stale snapshot) error = %v", err)
+	}
+	if stale.Record.LifecycleState() != volume.StateCreatingDirectory {
+		t.Fatalf("stale snapshot state = %q", stale.Record.LifecycleState())
+	}
+	if err := harness.controller.ReconcileExistingCreation(context.Background(), logicalID); err != nil {
+		t.Fatalf("complete concurrent creation: %v", err)
+	}
+	ready, err := harness.store.Get(context.Background(), logicalID)
+	if err != nil {
+		t.Fatalf("store.Get(Ready) error = %v", err)
+	}
+	if ready.Record.LifecycleState() != volume.StateReady || ready.ResourceVersion == stale.ResourceVersion {
+		t.Fatalf("concurrent completion = state %q resourceVersion %q/%q", ready.Record.LifecycleState(), stale.ResourceVersion, ready.ResourceVersion)
+	}
+	filesystemCalls := harness.filesystem.calls
+
+	reconciler, err := NewLifecycleCrashReconciler(
+		&fakeStartupAllocationLister{stored: []k8s.StoredAllocation{stale}},
+		harness.controller,
+		&fakeExistingFenceReconciler{},
+		&fakeExistingDeletionReconciler{},
+		&fakeExistingGCReconciler{},
+	)
+	if err != nil {
+		t.Fatalf("NewLifecycleCrashReconciler() error = %v", err)
+	}
+	summary, err := reconciler.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile(stale creation snapshot) error = %v", err)
+	}
+	if summary.TotalAllocations != 1 || summary.CreationResumes != 1 {
+		t.Fatalf("Reconcile(stale creation snapshot) summary = %#v", summary)
+	}
+	after, err := harness.store.Get(context.Background(), logicalID)
+	if err != nil {
+		t.Fatalf("store.Get(after stale reconciliation) error = %v", err)
+	}
+	if after.ResourceVersion != ready.ResourceVersion || harness.filesystem.calls != filesystemCalls {
+		t.Fatalf("stale reconciliation mutated Ready allocation: resourceVersion %q/%q filesystem calls %d/%d", after.ResourceVersion, ready.ResourceVersion, harness.filesystem.calls, filesystemCalls)
+	}
+}
+
 func TestLifecycleCrashReconcilerSkipsTenThousandCompactTombstonesWithoutFollowupReads(t *testing.T) {
 	const tombstones = 10_000
 	stored := make([]k8s.StoredAllocation, 0, tombstones)

@@ -296,8 +296,23 @@ func TestReconcileExistingCreationResumesWithoutOriginalRequestOrPlacement(t *te
 	if stored.Record.LifecycleState() != volume.StateReady || harness.placer.calls != 1 || harness.filesystem.calls != 2 {
 		t.Fatalf("reconciled state/placement/filesystem = %q/%d/%d", stored.Record.LifecycleState(), harness.placer.calls, harness.filesystem.calls)
 	}
-	if err := harness.controller.ReconcileExistingCreation(context.Background(), logicalID); err == nil {
-		t.Fatal("ReconcileExistingCreation(Ready) error = nil")
+	filesystemCalls := harness.filesystem.calls
+	resolvedPools := slices.Clone(harness.placer.resolved)
+	if err := harness.controller.ReconcileExistingCreation(context.Background(), logicalID); err != nil {
+		t.Fatalf("ReconcileExistingCreation(Ready) error = %v", err)
+	}
+	if harness.filesystem.calls != filesystemCalls {
+		t.Fatalf("ReconcileExistingCreation(Ready) filesystem calls = %d, want %d", harness.filesystem.calls, filesystemCalls)
+	}
+	if !slices.Equal(harness.placer.resolved, resolvedPools) {
+		t.Fatalf("ReconcileExistingCreation(Ready) resolved pools = %v, want %v", harness.placer.resolved, resolvedPools)
+	}
+	after, err := harness.store.Get(context.Background(), logicalID)
+	if err != nil {
+		t.Fatalf("store.Get(after Ready reconciliation) error = %v", err)
+	}
+	if after.ResourceVersion != stored.ResourceVersion {
+		t.Fatalf("ReconcileExistingCreation(Ready) resourceVersion = %q, want %q", after.ResourceVersion, stored.ResourceVersion)
 	}
 }
 

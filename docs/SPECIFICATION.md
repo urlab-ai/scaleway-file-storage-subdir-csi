@@ -800,6 +800,16 @@ generation for another logical volume, proves the older allocation already
 crossed its reservation barrier. No filesystem creation or allocation-state
 advance is allowed before this check.
 
+A periodic lifecycle pass dispatches from one bounded allocation snapshot, but
+each exact repair later reacquires normal mutation admission and the
+logical-volume lock. If a creation repair selected from that snapshot rereads
+the same identity-valid allocation as `Ready`, the normal `CreateVolume` path
+completed while the repair was waiting. That stale creation dispatch is an
+idempotent no-op: it must not degrade controller readiness, reopen placement,
+or touch the filesystem. Any other state outside `Reserved`,
+`CreatingDirectory`, and this exact completed `Ready` case remains a
+fail-closed reconciliation error.
+
 The first complete pass is part of cold startup. Later passes require active
 leadership. Their authorization/inventory publication enters the global
 mutation gate, and each lifecycle repair independently follows the normal gate

@@ -432,10 +432,15 @@ func (controller *CreateController) resume(ctx context.Context, request CreateRe
 	return controller.resumeStoredCreation(ctx, stored)
 }
 
-// ReconcileExistingCreation resumes only an already-persisted Reserved or
-// CreatingDirectory crash window. It never performs placement and therefore
-// cannot move a volume to a different parent when the original CSI request is
-// unavailable during startup.
+// ReconcileExistingCreation resumes an already-persisted Reserved or
+// CreatingDirectory crash window. A periodic reconciliation snapshot can race
+// with the normal CreateVolume path while this method waits for mutation
+// admission and the logical-volume lock. In that exact case a freshly reread,
+// identity-valid Ready record proves creation already completed, so the stale
+// recovery dispatch is an idempotent no-op. Every other unexpected state still
+// fails closed. The method never performs placement and therefore cannot move
+// a volume to a different parent when the original CSI request is unavailable
+// during startup.
 func (controller *CreateController) ReconcileExistingCreation(ctx context.Context, logicalVolumeID string) error {
 	if err := volume.ValidateLogicalVolumeID(logicalVolumeID); err != nil {
 		return err
@@ -460,6 +465,9 @@ func (controller *CreateController) ReconcileExistingCreation(ctx context.Contex
 	}
 	if record.DriverName != controller.driverName || record.InstallationID != controller.installationID || record.ActiveClusterUID != controller.clusterUID || record.LogicalVolumeID != logicalVolumeID {
 		return fmt.Errorf("startup creation record belongs to another driver installation, cluster, or logical ID")
+	}
+	if record.State == volume.StateReady {
+		return nil
 	}
 	if record.State != volume.StateReserved && record.State != volume.StateCreatingDirectory {
 		return fmt.Errorf("startup creation reconciliation requires Reserved or CreatingDirectory, got %q", record.State)
