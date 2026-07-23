@@ -1047,7 +1047,9 @@ bootstrap_crash_add_parent() {
       k -n "$namespace" delete "pod/$bootstrap_fault_pod" --ignore-not-found --wait=true --timeout=2m >/dev/null 2>&1 || true
     fi
     if [ -n "$bootstrap_upgrade_pid" ] && kill -0 "$bootstrap_upgrade_pid" 2>/dev/null; then
-      kill "$bootstrap_upgrade_pid" 2>/dev/null || true
+      # helm_candidate has its own bounded timeout. Wait for that complete
+      # transaction instead of killing only the background shell while its
+      # Helm child continues to mutate the release during cleanup.
       wait "$bootstrap_upgrade_pid" 2>/dev/null || true
     fi
   }
@@ -1123,10 +1125,14 @@ bootstrap_crash_add_parent() {
   ')
 
   # PID 1 in a PID namespace ignores unhandled SIGSTOP and SIGKILL sent from
-  # another process in that same namespace. Use a short-lived, credential-free
-  # hostPID Pod on the exact controller node so the signals originate from the
-  # ancestor PID namespace where Linux guarantees their delivery. CAP_KILL is
-  # the only added capability; no host path or service-account token is needed.
+  # another process in that same namespace. Kapsule also denies cross-container
+  # signals from a hostPID container with only CAP_KILL. Use a short-lived
+  # privileged, credential-free hostPID Pod on the exact disposable test node
+  # so the signals originate from the ancestor PID namespace without the
+  # managed runtime confinement that rejected the narrower profile. Exact
+  # cgroup and immutable ENTRYPOINT checks below fence every signal. The Pod has
+  # no service-account token, provider credential, or hostPath and is removed
+  # immediately after the restart proof.
   bootstrap_fault_pod="e2e-bootstrap-fault-$short_run"
   k -n "$namespace" apply -f - <<EOF
 apiVersion: v1
@@ -1141,21 +1147,16 @@ spec:
   hostPID: true
   nodeName: $bootstrap_node_name
   restartPolicy: Never
-  securityContext:
-    seccompProfile: {type: RuntimeDefault}
   containers:
     - name: fault-injector
       image: $workload_image
       command: ["/bin/sh", "-c"]
       args: ["trap 'exit 0' TERM INT; sleep 3600 & wait"]
       securityContext:
-        allowPrivilegeEscalation: false
+        privileged: true
         readOnlyRootFilesystem: true
         runAsNonRoot: false
         runAsUser: 0
-        capabilities:
-          drop: ["ALL"]
-          add: ["KILL"]
 EOF
   k -n "$namespace" wait "pod/$bootstrap_fault_pod" --for=condition=Ready --timeout=5m
 

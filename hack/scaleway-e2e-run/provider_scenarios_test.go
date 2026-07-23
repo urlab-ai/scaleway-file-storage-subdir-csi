@@ -68,7 +68,7 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 		`number_of_attachments == 0`,
 		`sfs-subdir-bootstrap-parent-filesystem-id`,
 		`hostPID: true`,
-		`capabilities:`,
+		`privileged: true`,
 		`controller host process is absent or ambiguous`,
 		`kill -STOP "$pid"`,
 		`controller host process did not enter a stopped state`,
@@ -100,8 +100,15 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 		t.Fatal("bootstrap fault injector does not revalidate cgroup and ENTRYPOINT identity before both signals")
 	}
 	if !strings.Contains(body, `automountServiceAccountToken: false`) ||
-		!strings.Contains(body, `drop: ["ALL"]`) || !strings.Contains(body, `add: ["KILL"]`) {
-		t.Fatal("bootstrap fault injector does not retain its credential-free least-privilege boundary")
+		!strings.Contains(body, `privileged: true`) ||
+		strings.Contains(body, `hostPath:`) ||
+		strings.Contains(body, `SCW_ACCESS_KEY`) ||
+		strings.Contains(body, `SCW_SECRET_KEY`) {
+		t.Fatal("bootstrap fault injector does not retain its temporary credential-free boundary")
+	}
+	if strings.Contains(body, `kill "$bootstrap_upgrade_pid"`) ||
+		!strings.Contains(body, `wait "$bootstrap_upgrade_pid"`) {
+		t.Fatal("bootstrap cleanup can leave the bounded Helm transaction running")
 	}
 
 	scaleStart := end + 1

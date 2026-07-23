@@ -214,11 +214,30 @@ readable command lines. The retained cleanup-only workflow subsequently removed
 every run-owned cloud resource. The harness now identifies exactly one
 controller process through both Pod UID cgroup identity and the complete
 immutable `/usr/local/bin/scaleway-sfs-subdir-csi` `argv[0]`, and revalidates
-both identities immediately before each signal. It remains credential-free and
-grants only `CAP_KILL`; it does not add `CAP_SYS_PTRACE`.
-`v0.1.0-rc.18` is the next full qualification candidate and continues to use
+both identities immediately before each signal.
+
+RC18 then passed artifact/install, real `virtiofs`, single-node-writer conflict,
+and the functional 100-PVC/20-minute soak checks, including 5,655 writes, 5,634
+reads, and zero checksum failures. Its exact ancestor-namespace injector found
+the single fenced controller process, but Kapsule denied `SIGSTOP` with
+`EPERM`: the managed runtime confinement does not permit cross-container
+signals from the `hostPID` Pod with only `CAP_KILL`. No signal was delivered,
+the bootstrap scenario admitted no result, and the run failed closed. Its
+background Helm transaction completed after the first cleanup observation,
+which correctly left two terminal `Retained`/`Archived` allocations as
+uninstall blockers. The idempotent cleanup-only workflow then garbage-collected
+those exact allocations, completed safe uninstall, and removed every run-owned
+cloud resource. The harness now uses a short-lived privileged `hostPID` fault
+injector only in the disposable qualification cluster. The Pod remains
+credential-free, has no ServiceAccount token or hostPath, runs on the exact
+controller node, retains the three cgroup/ENTRYPOINT identity checks, and is
+removed immediately after the restart proof. Failure cleanup also waits for
+the bounded Helm transaction to finish before it evaluates release state, so a
+child process cannot outlive its background shell and race teardown.
+
+`v0.1.0-rc.19` is the next full qualification candidate and continues to use
 RC14 as its exact public predecessor. No candidate is a production support
-claim until RC18 passes every Linux, kind, CSI, Helm, real Kapsule, and
+claim until RC19 passes every Linux, kind, CSI, Helm, real Kapsule, and
 final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -6576,10 +6595,14 @@ Kapsule matrix must:
    and prove a restarted controller process with the same Pod UID and node
    identity resumes the exact durable bootstrap attempt and completes the claim
    without a temporary claim left behind. The fault injector is a temporary,
-   credential-free `hostPID` Pod on that exact node; it must identify exactly
-   one process by Pod UID cgroup plus the complete immutable driver ENTRYPOINT
-   in `argv[0]`, revalidate both identities immediately before each signal, add
-   only `CAP_KILL`, and be removed immediately after the restart proof;
+   privileged and credential-free `hostPID` Pod on that exact disposable test
+   node; it must identify exactly one process by Pod UID cgroup plus the
+   complete immutable driver ENTRYPOINT in `argv[0]`, revalidate both
+   identities immediately before each signal, have no ServiceAccount token,
+   provider credential, or hostPath, and be removed immediately after the
+   restart proof. On success, failure, or interruption, the harness must resume
+   any stopped process, remove the injector, and wait for the bounded Helm
+   transaction to exit before cleanup evaluates release state;
 8. attach both parents to the exact standalone run-owned disposable Instance
    outside the Kubernetes node inventory, prove the controller fails closed
    before partial provisioning, detach those exact attachments, prove both
