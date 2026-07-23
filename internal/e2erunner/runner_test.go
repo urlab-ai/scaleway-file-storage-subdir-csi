@@ -178,6 +178,10 @@ func TestSuccessfulInventoryRequiresExactProfileResources(t *testing.T) {
 		Kind: e2ecleanup.ResourceKindInstance, ID: "77777777-7777-4777-8777-777777777777",
 		Name: request.Plan.ResourcePrefix + "-recovery", ProjectID: request.Plan.ProjectID, Region: request.Plan.Region,
 		Tags: []string{"sfs-subdir-e2e-run=" + request.Plan.RunID}, CreatedByRun: true, State: e2ecleanup.ResourceStateAbsent,
+	}, e2ecleanup.Resource{
+		Kind: e2ecleanup.ResourceKindInstanceRootVolume, ID: "99999999-9999-4999-8999-999999999999",
+		Name: request.Plan.ResourcePrefix + "-recovery-root", ProjectID: request.Plan.ProjectID, Region: request.Plan.Region,
+		Tags: []string{"sfs-subdir-e2e-run=" + request.Plan.RunID}, CreatedByRun: true, State: e2ecleanup.ResourceStateAbsent,
 	})
 	for index := range complete.Resources {
 		complete.Resources[index].State = e2ecleanup.ResourceStateAbsent
@@ -262,7 +266,7 @@ func testInventory(request Request) e2ecleanup.Inventory {
 		resources[index].Tags = []string{"sfs-subdir-e2e-run=" + request.Plan.RunID}
 		resources[index].State = e2ecleanup.ResourceStatePresent
 	}
-	return e2ecleanup.Inventory{SchemaVersion: e2ecleanup.SchemaVersionV1, Phase: e2ecleanup.PhaseReady, Profile: request.Plan.Profile, RunID: request.Plan.RunID,
+	return e2ecleanup.Inventory{SchemaVersion: e2ecleanup.SchemaVersionV2, Phase: e2ecleanup.PhaseReady, Profile: request.Plan.Profile, RunID: request.Plan.RunID,
 		ProjectID: request.Plan.ProjectID, Region: request.Plan.Region, ResourcePrefix: request.Plan.ResourcePrefix,
 		OwnershipTag: "sfs-subdir-e2e-run=" + request.Plan.RunID, ObservedAt: "2026-07-15T12:01:00Z", Resources: resources}
 }

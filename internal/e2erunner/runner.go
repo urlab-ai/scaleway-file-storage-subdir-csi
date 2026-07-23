@@ -412,10 +412,12 @@ func validateSuccessfulInventory(inventory e2ecleanup.Inventory, profile string)
 		}
 		return nil
 	}
-	wantResources := 5 + wantPrivateNetworks
-	wantKinds := 4 + wantPrivateNetworks
-	if profile != e2eplan.ProfileReleaseCandidate || len(inventory.Resources) != wantResources || counts[e2ecleanup.ResourceKindInstance] != 1 || len(counts) != wantKinds {
-		return fmt.Errorf("release-candidate inventory does not contain the exact ownership-dependent network, cluster, node pool, two parents, and disposable Instance")
+	wantResources := 6 + wantPrivateNetworks
+	wantKinds := 5 + wantPrivateNetworks
+	if profile != e2eplan.ProfileReleaseCandidate || inventory.SchemaVersion != e2ecleanup.SchemaVersionV2 ||
+		len(inventory.Resources) != wantResources || counts[e2ecleanup.ResourceKindInstance] != 1 ||
+		counts[e2ecleanup.ResourceKindInstanceRootVolume] != 1 || len(counts) != wantKinds {
+		return fmt.Errorf("release-candidate inventory does not contain the exact ownership-dependent network, cluster, node pool, two parents, disposable Instance, and root volume")
 	}
 	return nil
 }

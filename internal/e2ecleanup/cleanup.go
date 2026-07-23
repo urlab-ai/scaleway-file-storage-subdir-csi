@@ -15,8 +15,14 @@ import (
 )
 
 const (
-	// SchemaVersionV1 is the closed cleanup inventory and review-plan schema.
+	// SchemaVersionV1 is the original closed cleanup inventory and review-plan
+	// schema. It remains readable so cleanup of an interrupted older run does
+	// not lose its exact-ID authority.
 	SchemaVersionV1 = "1"
+	// SchemaVersionV2 adds the exact disposable-Instance root Block Storage
+	// volume to the durable run ledger. New runs must use this schema so an
+	// interruption after Instance deletion cannot orphan a billable volume.
+	SchemaVersionV2 = "2"
 
 	// ResourceKindCluster identifies one exact Kapsule cluster.
 	ResourceKindCluster = "kapsule-cluster"
@@ -32,6 +38,11 @@ const (
 	// ResourceKindInstance identifies the one standalone run-created Instance
 	// reused serially by the release-candidate recovery scenarios.
 	ResourceKindInstance = "disposable-instance"
+	// ResourceKindInstanceRootVolume identifies the root Block Storage volume
+	// created as a side effect of the disposable Instance Create request. It is
+	// journaled independently because deleting the Instance does not delete the
+	// volume through the provider SDK.
+	ResourceKindInstanceRootVolume = "disposable-instance-root-volume"
 
 	// ResourceStatePresent means a fresh exact-ID lookup found the resource.
 	ResourceStatePresent = "present"
@@ -241,7 +252,7 @@ func Build(inventory Inventory, now time.Time) (Plan, error) {
 }
 
 func (inventory Inventory) validateStatic() (time.Time, error) {
-	if inventory.SchemaVersion != SchemaVersionV1 {
+	if inventory.SchemaVersion != SchemaVersionV1 && inventory.SchemaVersion != SchemaVersionV2 {
 		return time.Time{}, fmt.Errorf("E2E cleanup schema %q is unsupported", inventory.SchemaVersion)
 	}
 	if inventory.Phase != PhaseProvisioning && inventory.Phase != PhaseReady && inventory.Phase != PhaseCleanup && inventory.Phase != PhaseComplete {
@@ -279,6 +290,9 @@ func (inventory Inventory) validateStatic() (time.Time, error) {
 	}
 	if inventory.Profile == e2eplan.ProfileReleaseCandidate {
 		wantResources++
+		if inventory.SchemaVersion == SchemaVersionV2 {
+			wantResources++
+		}
 	}
 	// A controlled failure may stop provisioning after any durable prefix of the
 	// planned resources. Cleanup and its final audit must remain able to carry
@@ -299,12 +313,17 @@ func (inventory Inventory) validateStatic() (time.Time, error) {
 	}
 	wantKinds := 3 + wantPrivateNetworks
 	wantInstances := 0
+	wantInstanceRootVolumes := 0
 	if inventory.Profile == e2eplan.ProfileReleaseCandidate {
 		wantKinds++
 		wantInstances = 1
+		if inventory.SchemaVersion == SchemaVersionV2 {
+			wantKinds++
+			wantInstanceRootVolumes = 1
+		}
 	}
-	completeKinds := counts[ResourceKindPrivateNetwork] == wantPrivateNetworks && counts[ResourceKindCluster] == 1 && counts[ResourceKindNodePool] == 1 && counts[ResourceKindParent] == 2 && counts[ResourceKindInstance] == wantInstances && len(counts) == wantKinds
-	withinPartialBounds := counts[ResourceKindPrivateNetwork] <= wantPrivateNetworks && counts[ResourceKindCluster] <= 1 && counts[ResourceKindNodePool] <= 1 && counts[ResourceKindParent] <= 2 && counts[ResourceKindInstance] <= wantInstances && len(counts) <= wantKinds
+	completeKinds := counts[ResourceKindPrivateNetwork] == wantPrivateNetworks && counts[ResourceKindCluster] == 1 && counts[ResourceKindNodePool] == 1 && counts[ResourceKindParent] == 2 && counts[ResourceKindInstance] == wantInstances && counts[ResourceKindInstanceRootVolume] == wantInstanceRootVolumes && len(counts) == wantKinds
+	withinPartialBounds := counts[ResourceKindPrivateNetwork] <= wantPrivateNetworks && counts[ResourceKindCluster] <= 1 && counts[ResourceKindNodePool] <= 1 && counts[ResourceKindParent] <= 2 && counts[ResourceKindInstance] <= wantInstances && counts[ResourceKindInstanceRootVolume] <= wantInstanceRootVolumes && len(counts) <= wantKinds
 	if (partialLedgerAllowed && !withinPartialBounds) || (!partialLedgerAllowed && !completeKinds) {
 		return time.Time{}, fmt.Errorf("cleanup inventory resource classes do not match profile %q", inventory.Profile)
 	}
@@ -377,7 +396,7 @@ func inventoryClusterCreatedByRun(inventory Inventory) bool {
 
 func (resource Resource) validate(inventory Inventory, seenIDs map[string]struct{}) error {
 	switch resource.Kind {
-	case ResourceKindPrivateNetwork, ResourceKindCluster, ResourceKindNodePool, ResourceKindParent, ResourceKindInstance:
+	case ResourceKindPrivateNetwork, ResourceKindCluster, ResourceKindNodePool, ResourceKindParent, ResourceKindInstance, ResourceKindInstanceRootVolume:
 	default:
 		return fmt.Errorf("resource kind %q is unsupported", resource.Kind)
 	}
@@ -472,16 +491,18 @@ func deletionRank(kind string) int {
 	switch kind {
 	case ResourceKindInstance:
 		return 1
-	case ResourceKindNodePool:
+	case ResourceKindInstanceRootVolume:
 		return 2
-	case ResourceKindParent:
+	case ResourceKindNodePool:
 		return 3
-	case ResourceKindCluster:
+	case ResourceKindParent:
 		return 4
-	case ResourceKindPrivateNetwork:
+	case ResourceKindCluster:
 		return 5
-	default:
+	case ResourceKindPrivateNetwork:
 		return 6
+	default:
+		return 7
 	}
 }
 

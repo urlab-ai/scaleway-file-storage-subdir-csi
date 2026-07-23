@@ -249,14 +249,27 @@ because the harness-created Pod omitted the Helm release label required by the
 harness's own fail-closed singular-Pod selector. This runner-only labeling
 defect admitted no drain evidence and did not exercise the CSI failure path.
 Automatic cleanup removed all 107 run-owned allocation records through normal
-deletion plus exact GC, completed safe uninstall, and removed the six run-owned
-cloud resources; independent exact-ID and prefix inventories confirmed
-absence. The drain workload Deployment and Pod template now carry the exact
+deletion plus exact GC, completed safe uninstall, and removed the six resources
+then represented in the closed cleanup ledger; independent exact-ID and prefix
+inventories confirmed those six absences. A later Project-wide Block Storage
+inventory found that deleting each run-owned disposable Instance had left its
+10 GB root SBS volume available and billable. The root volume had not been
+journaled, named, tagged, or audited by the runner, so the prior six-resource
+cleanup proof was incomplete even though the CSI and File Storage resources
+were absent. The drain workload Deployment and Pod template now carry the exact
 release identity, with focused regression coverage.
 
-`v0.1.0-rc.20` is the next full qualification candidate and continues to use
+RC20 passed local, Linux, kind, CSI, Helm, and GitHub CI gates, and its public
+AMD64 image and chart bytes were verified by anonymous pull. It did not begin a
+real Kapsule run: the pre-run Project inventory exposed the disposable
+Instance root-volume cleanup gap above. RC20 is therefore superseded and must
+not be promoted. Cleanup inventory schema v2 records the exact root volume,
+normalizes its run name and tag before readiness, and deletes it after the
+Instance with crash-resumable exact-ID evidence.
+
+`v0.1.0-rc.21` is the next full qualification candidate and continues to use
 RC14 as its exact public predecessor. No candidate is a production support
-claim until RC20 passes every Linux, kind, CSI, Helm, real Kapsule, and
+claim until RC21 passes every Linux, kind, CSI, Helm, real Kapsule, and
 final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -6721,6 +6734,16 @@ Every created Scaleway resource must include:
 - the target project ID;
 - the target region.
 
+The provider creates the disposable Instance root SBS volume as an implicit
+child of `CreateServer`, whose request cannot set root-volume tags. This is the
+only transient exception to creation-time naming and tagging. While the
+Instance Create intent remains durably unresolved, the executor must read the
+sole boot volume at index `0` from the exact tagged Instance, require an
+`in_use` SBS volume referenced only by that Instance, assign the deterministic
+`<resource-prefix>-recovery-root` name and ownership tag, and fsync the Instance
+and root-volume exact IDs together before clearing the intent or declaring the
+run ready. An untagged volume name alone is never ownership evidence.
+
 Before any real-cloud mutation, the runner must derive and retain a closed v1
 preflight plan. The request names the base or release-candidate profile, exact
 Project and `fr-par` region, UUID run ID, DNS resource prefix containing that
@@ -6761,7 +6784,9 @@ from 100 GB through 49.9 TB so one 100 GB growth step remains below the 50 TB
 per-filesystem maximum; it additionally plans exactly one standalone run-owned
 disposable Instance of the same explicitly selected commercial type, reused
 serially across its recovery scenarios so it cannot disappear from cost or
-cleanup accounting.
+cleanup accounting. It also plans that Instance's one provider-created root
+Block Storage volume as a distinct billable resource with its own exact-ID
+cleanup entry.
 Creating a cluster also plans exactly one run-owned Private Network in the same
 Project and region. The executor creates and journals that network before the
 cluster, passes its exact ID as the cluster's immutable `private_network_id`,
@@ -6824,13 +6849,27 @@ requires that retained fsynced inventory and never recreates an authorizing
 seed when it is missing. A missing ledger after possible provider mutation is
 corruption and requires operator recovery, not inferred absence.
 
+Cleanup inventory schema v2 is mandatory for every new run. It adds the
+disposable Instance root volume without invalidating schema-v1 cleanup of an
+already interrupted older candidate's recorded resources. Schema v1 cannot
+authorize deletion of an unrecorded historical root volume; that requires a
+separate operator-reviewed exact-ID recovery. Because one Instance request
+creates both the Instance and its root volume, schema v2 clears that single
+pending intent only in the durable generation that contains both exact
+resources. Recovery
+may normalize a not-yet-journaled root only through the still-present exact
+tagged Instance and its sole boot-volume relationship; after normalization,
+the deterministic name and tag permit exact discovery even if the Instance was
+subsequently removed. A root volume missing from a ready schema-v2
+release-candidate inventory is a cleanup and qualification failure.
+
 The retained cleanup inventory is a closed exact-ID creation ledger. A ready
 scenario run contains exactly one cluster, one newly created node pool, and two
 created parents; a run-created cluster also requires its one created Private
 Network, and the release-candidate profile additionally contains its one
-disposable Instance. A provisioning failure may leave any valid prefix of that
-planned set. Cleanup and complete phases retain exactly the resources that were
-created
+disposable Instance and its one root Block Storage volume. A provisioning
+failure may leave any valid prefix of that planned set. Cleanup and complete
+phases retain exactly the resources that were created
 or conclusively rediscovered for that run and never require invented IDs for
 resources that were never created. Deterministic discovery checks every planned
 name before cleanup can accept that partial ledger. After any provisioning
@@ -6856,10 +6895,12 @@ stale/unknown or any required Kubernetes cleanup, PV/VolumeAttachment removal,
 unpublish/unstage, published-fence clearing, safe-uninstall, node/controller
 stop, mount absence, attachment absence, or post-prepare Helm uninstall barrier
 is incomplete. When unblocked it identifies only exact run-owned IDs, ordered
-as disposable Instance, node pool, parents, a run-owned cluster, then that
-cluster's run-owned Private Network. It never selects a reused cluster or its
-pre-existing network. Conclusively absent resources are idempotent success
-evidence. That review command deliberately has no deletion backend.
+as disposable Instance, its root volume after an authoritative `available`
+observation with zero references, node pool, parents, a run-owned cluster,
+then that cluster's run-owned Private Network. It never selects a reused
+cluster or its pre-existing network. Conclusively absent resources are
+idempotent success evidence. That review command deliberately has no deletion
+backend.
 `hack/scaleway-e2e-run --cleanup-only` is the distinct credentialed executor;
 after a new immediate approval it repeats discovery, exact-ID reads and every
 Kubernetes/unmount/detach barrier before each ordered deletion. It requires the
@@ -7019,10 +7060,11 @@ resource IDs, states, preconditions, and observation time must all match; a
 complete cleanup from another run can never authorize publication.
 Successful production qualification requires the `release-candidate` profile
 and its complete historical inventory: one cluster entry, one run-owned node
-pool, two run-owned parents, and one run-owned disposable Instance. Every
-run-owned resource is conclusively `absent`; only an explicitly reused cluster
-may remain conclusively `present`. Partial ledgers remain valid cleanup evidence
-for failed provisioning, but can never be encoded as a successful release run.
+pool, two run-owned parents, one run-owned disposable Instance, and that
+Instance's one run-owned root Block Storage volume. Every run-owned resource is
+conclusively `absent`; only an explicitly reused cluster may remain
+conclusively `present`. Partial ledgers remain valid cleanup evidence for failed
+provisioning, but can never be encoded as a successful release run.
 
 ## 13. Documentation Requirements
 

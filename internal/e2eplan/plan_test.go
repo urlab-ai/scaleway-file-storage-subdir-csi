@@ -94,7 +94,7 @@ func TestBuildNeverMarksReusedClusterForDeletion(t *testing.T) {
 	if plan.Cluster.CreatedByRun || plan.Cluster.DeleteOnCleanup || plan.PlannedResources[0].DeleteOnCleanup {
 		t.Fatalf("reused cluster deletion authority = cluster %#v resources %#v", plan.Cluster, plan.PlannedResources)
 	}
-	if len(plan.PlannedResources) != 5 || plan.PlannedResources[0].Kind != "kapsule-cluster" {
+	if len(plan.PlannedResources) != 6 || plan.PlannedResources[0].Kind != "kapsule-cluster" {
 		t.Fatalf("reused cluster must not plan a Private Network: %#v", plan.PlannedResources)
 	}
 	if !plan.NodePool.CreatedByRun || !plan.NodePool.DeleteOnCleanup || !plan.PlannedResources[1].DeleteOnCleanup || !plan.PlannedResources[2].DeleteOnCleanup {
@@ -115,17 +115,22 @@ func TestBuildReleaseCandidatePlansOneRunOwnedDisposableInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if len(plan.PlannedResources) != 6 {
+	if len(plan.PlannedResources) != 7 {
 		t.Fatalf("planned resources = %#v", plan.PlannedResources)
 	}
 	instance := plan.PlannedResources[5]
 	if instance.Kind != "disposable-instance" || instance.Count != 1 || !instance.CreatedByRun || !instance.DeleteOnCleanup {
 		t.Fatalf("disposable instance plan = %#v", instance)
 	}
+	rootVolume := plan.PlannedResources[6]
+	if rootVolume.Kind != "disposable-instance-root-volume" || rootVolume.Count != 1 || !rootVolume.CreatedByRun || !rootVolume.DeleteOnCleanup {
+		t.Fatalf("disposable instance root-volume plan = %#v", rootVolume)
+	}
 	if plan.DisposableInstance == nil || plan.DisposableInstance.Count != 1 || plan.DisposableInstance.CommercialType != request.NodePool.CommercialType || !plan.DisposableInstance.CreatedByRun || !plan.DisposableInstance.DeleteOnCleanup {
 		t.Fatalf("disposable instance detail = %#v", plan.DisposableInstance)
 	}
 	for _, operation := range []string{
+		"delete the exact run-owned disposable Instance root volume after deleting its Instance",
 		"attach and detach the two run-owned parents on the standalone run-owned disposable Instance",
 		"delete and recreate the dedicated run-owned driver namespace for checkpoint recovery",
 		"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",

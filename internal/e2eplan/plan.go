@@ -205,6 +205,7 @@ func Build(request Request) (Plan, error) {
 	}
 	if request.Profile == ProfileReleaseCandidate {
 		operations = append(operations,
+			"delete the exact run-owned disposable Instance root volume after deleting its Instance",
 			"resize one run-owned parent filesystem",
 			"attach and detach the two run-owned parents on the standalone run-owned disposable Instance",
 			"drain and uncordon one node from the exact run-owned Kapsule node pool",
@@ -217,7 +218,7 @@ func Build(request Request) (Plan, error) {
 			"inject controller interruption around the run-owned bootstrap claim",
 		)
 	}
-	plannedResources := make([]ResourcePlan, 0, 6)
+	plannedResources := make([]ResourcePlan, 0, 7)
 	if clusterOwned {
 		plannedResources = append(plannedResources, ResourcePlan{
 			Kind: "private-network", Count: 1, CreatedByRun: true, DeleteOnCleanup: true,
@@ -231,10 +232,13 @@ func Build(request Request) (Plan, error) {
 	)
 	if request.Profile == ProfileReleaseCandidate {
 		// One standalone Instance is reused serially across the destructive
-		// recovery scenarios. Its cost is part of the explicit aggregate cost.
-		plannedResources = append(plannedResources, ResourcePlan{
-			Kind: "disposable-instance", Count: 1, CreatedByRun: true, DeleteOnCleanup: true,
-		})
+		// recovery scenarios. Its provider-created root Block Storage volume is
+		// a separate billable resource and therefore has its own exact cleanup
+		// ledger entry. Both costs are part of the explicit aggregate cost.
+		plannedResources = append(plannedResources,
+			ResourcePlan{Kind: "disposable-instance", Count: 1, CreatedByRun: true, DeleteOnCleanup: true},
+			ResourcePlan{Kind: "disposable-instance-root-volume", Count: 1, CreatedByRun: true, DeleteOnCleanup: true},
+		)
 	}
 	var disposableInstance *InstancePlan
 	if request.Profile == ProfileReleaseCandidate {

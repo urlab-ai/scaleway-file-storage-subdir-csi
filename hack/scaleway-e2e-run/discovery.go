@@ -23,7 +23,7 @@ import (
 // chart and test workloads do not exist yet.
 func (backend *scalewayBackend) seedInventory() e2ecleanup.Inventory {
 	return e2ecleanup.Inventory{
-		SchemaVersion:  e2ecleanup.SchemaVersionV1,
+		SchemaVersion:  e2ecleanup.SchemaVersionV2,
 		Phase:          e2ecleanup.PhaseProvisioning,
 		Profile:        backend.plan.Profile,
 		RunID:          backend.plan.RunID,
@@ -112,13 +112,24 @@ func (backend *scalewayBackend) reconcileRunResources(ctx context.Context, inven
 		}
 	}
 	if backend.plan.Profile == e2eplan.ProfileReleaseCandidate {
-		instance, err := backend.discoverInstance(ctx)
+		instance, server, err := backend.discoverInstance(ctx)
 		if err != nil {
 			return inventory, err
 		}
 		if instance != nil {
 			if err := mergeResource(&inventory, *instance); err != nil {
 				return inventory, err
+			}
+		}
+		if inventory.SchemaVersion == e2ecleanup.SchemaVersionV2 {
+			rootVolume, err := backend.discoverDisposableInstanceRootVolume(ctx, server)
+			if err != nil {
+				return inventory, err
+			}
+			if rootVolume != nil {
+				if err := mergeResource(&inventory, *rootVolume); err != nil {
+					return inventory, err
+				}
 			}
 		}
 	}
@@ -146,10 +157,24 @@ func resolveDiscoveredCreateIntent(inventory *e2ecleanup.Inventory) {
 	}
 	for _, resource := range inventory.Resources {
 		if resource.Kind == inventory.PendingCreate.Kind && resource.Name == inventory.PendingCreate.Name && resource.CreatedByRun && resource.State == e2ecleanup.ResourceStatePresent {
+			if inventory.SchemaVersion == e2ecleanup.SchemaVersionV2 &&
+				inventory.PendingCreate.Kind == e2ecleanup.ResourceKindInstance &&
+				!hasPresentRunResource(*inventory, e2ecleanup.ResourceKindInstanceRootVolume) {
+				return
+			}
 			inventory.PendingCreate = nil
 			return
 		}
 	}
+}
+
+func hasPresentRunResource(inventory e2ecleanup.Inventory, kind string) bool {
+	for _, resource := range inventory.Resources {
+		if resource.Kind == kind && resource.CreatedByRun && resource.State == e2ecleanup.ResourceStatePresent {
+			return true
+		}
+	}
+	return false
 }
 
 func (backend *scalewayBackend) discoverPrivateNetwork(ctx context.Context) (*e2ecleanup.Resource, error) {
@@ -271,31 +296,42 @@ func (backend *scalewayBackend) discoverParent(ctx context.Context, index int) (
 	return &resource, nil
 }
 
-func (backend *scalewayBackend) discoverInstance(ctx context.Context) (*e2ecleanup.Resource, error) {
+func (backend *scalewayBackend) discoverInstance(ctx context.Context) (*e2ecleanup.Resource, *instanceapi.Server, error) {
 	name := backend.plan.ResourcePrefix + "-recovery"
 	response, err := backend.instance.ListServers(&instanceapi.ListServersRequest{
 		Zone: scw.Zone(backend.request.Zone), Project: &backend.plan.ProjectID, Name: &name,
 	}, scw.WithAllPages(), scw.WithContext(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("discover run-owned disposable Instance: %w", err)
+		return nil, nil, fmt.Errorf("discover run-owned disposable Instance: %w", err)
 	}
 	var matches []*instanceapi.Server
 	for _, server := range response.Servers {
 		if server != nil && server.Name == name {
 			if server.Project != backend.plan.ProjectID || !slices.Contains(server.Tags, backend.plan.OwnershipTag) {
-				return nil, fmt.Errorf("instance name %q collides with a resource not owned by this run", name)
+				return nil, nil, fmt.Errorf("instance name %q collides with a resource not owned by this run", name)
 			}
 			matches = append(matches, server)
 		}
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("multiple run-owned Instances use exact name %q", name)
+		return nil, nil, fmt.Errorf("multiple run-owned Instances use exact name %q", name)
 	}
 	if len(matches) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	resource := backend.resource(e2ecleanup.ResourceKindInstance, matches[0].ID, matches[0].Name, true, matches[0].Tags)
-	return &resource, nil
+	observed, err := backend.instance.GetServer(&instanceapi.GetServerRequest{
+		Zone: scw.Zone(backend.request.Zone), ServerID: matches[0].ID,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read exact run-owned disposable Instance: %w", err)
+	}
+	if observed == nil || observed.Server == nil || observed.Server.ID != matches[0].ID ||
+		observed.Server.Name != name || observed.Server.Project != backend.plan.ProjectID ||
+		!slices.Contains(observed.Server.Tags, backend.plan.OwnershipTag) {
+		return nil, nil, fmt.Errorf("exact disposable Instance differs from discovery")
+	}
+	resource := backend.resource(e2ecleanup.ResourceKindInstance, observed.Server.ID, observed.Server.Name, true, observed.Server.Tags)
+	return &resource, observed.Server, nil
 }
 
 func mergeResource(inventory *e2ecleanup.Inventory, discovered e2ecleanup.Resource) error {

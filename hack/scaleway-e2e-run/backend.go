@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	blockapi "github.com/scaleway/scaleway-sdk-go/api/block/v1alpha1"
 	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
 	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
@@ -40,6 +41,7 @@ type scalewayBackend struct {
 	request        e2erunner.Request
 	plan           e2eplan.Plan
 	kubernetes     *k8sapi.API
+	block          *blockapi.API
 	file           *fileapi.API
 	instance       *instanceapi.API
 	vpc            *vpcapi.API
@@ -65,7 +67,8 @@ func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scaleway
 	}
 	return &scalewayBackend{
 		request: request, plan: plan,
-		kubernetes: k8sapi.NewAPI(client), file: fileapi.NewAPI(client), instance: instanceapi.NewAPI(client), vpc: vpcapi.NewAPI(client),
+		kubernetes: k8sapi.NewAPI(client), block: blockapi.NewAPI(client), file: fileapi.NewAPI(client),
+		instance: instanceapi.NewAPI(client), vpc: vpcapi.NewAPI(client),
 		inventoryPath: plan.CleanupInventoryPath,
 		kubeconfig:    filepath.Join(filepath.Dir(plan.CleanupInventoryPath), ".kubeconfig-"+plan.RunID),
 		scenarioTool:  scenarioTool,
@@ -384,7 +387,12 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 		if server == nil || server.Server == nil {
 			return inventory, fmt.Errorf("create disposable recovery Instance returned an empty response")
 		}
-		if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindInstance, server.Server.ID, server.Server.Name, true, server.Server.Tags)); err != nil {
+		rootVolume, err := backend.normalizeDisposableInstanceRootVolume(ctx, server.Server)
+		if err != nil {
+			return inventory, fmt.Errorf("journal disposable recovery Instance root volume: %w", err)
+		}
+		instanceResource := backend.resource(e2ecleanup.ResourceKindInstance, server.Server.ID, server.Server.Name, true, server.Server.Tags)
+		if err := backend.completeDisposableInstanceCreate(&inventory, instanceResource, rootVolume); err != nil {
 			return inventory, err
 		}
 	}
@@ -740,6 +748,36 @@ func (backend *scalewayBackend) deleteExact(ctx context.Context, resource e2ecle
 		if err := backend.instance.DeleteServer(&instanceapi.DeleteServerRequest{Zone: scw.Zone(backend.request.Zone), ServerID: resource.ID}, scw.WithContext(ctx)); err != nil && !providerNotFound(err) {
 			return err
 		}
+	case e2ecleanup.ResourceKindInstanceRootVolume:
+		observed, err := backend.block.GetVolume(&blockapi.GetVolumeRequest{
+			Zone: scw.Zone(backend.request.Zone), VolumeID: resource.ID,
+		}, scw.WithContext(ctx))
+		if err != nil && providerNotFound(err) {
+			return nil
+		}
+		if err != nil || observed == nil || observed.ProjectID != backend.plan.ProjectID ||
+			observed.Zone.String() != backend.request.Zone || observed.Name != resource.Name ||
+			!slices.Contains(observed.Tags, backend.plan.OwnershipTag) {
+			return fmt.Errorf("refuse deletion of mismatched disposable Instance root volume %s: %w", resource.ID, err)
+		}
+		available := blockapi.VolumeStatusAvailable
+		observed, err = backend.block.WaitForVolumeAndReferences(&blockapi.WaitForVolumeAndReferencesRequest{
+			Zone: scw.Zone(backend.request.Zone), VolumeID: resource.ID, VolumeTerminalStatus: &available,
+		}, scw.WithContext(ctx))
+		if err != nil {
+			return fmt.Errorf("wait for disposable Instance root volume detach: %w", err)
+		}
+		if observed == nil || observed.ProjectID != backend.plan.ProjectID ||
+			observed.Zone.String() != backend.request.Zone || observed.Name != resource.Name ||
+			!slices.Contains(observed.Tags, backend.plan.OwnershipTag) ||
+			observed.Status != blockapi.VolumeStatusAvailable || len(observed.References) != 0 {
+			return fmt.Errorf("refuse deletion of attached or mismatched disposable Instance root volume %s", resource.ID)
+		}
+		if err := backend.block.DeleteVolume(&blockapi.DeleteVolumeRequest{
+			Zone: scw.Zone(backend.request.Zone), VolumeID: resource.ID,
+		}, scw.WithContext(ctx)); err != nil && !providerNotFound(err) {
+			return err
+		}
 	case e2ecleanup.ResourceKindNodePool:
 		observed, err := backend.kubernetes.GetPool(&k8sapi.GetPoolRequest{Region: region, PoolID: resource.ID}, scw.WithContext(ctx))
 		if err != nil && providerNotFound(err) {
@@ -815,6 +853,8 @@ func (backend *scalewayBackend) exactPresent(ctx context.Context, kind, id strin
 	switch kind {
 	case e2ecleanup.ResourceKindInstance:
 		_, err = backend.instance.GetServer(&instanceapi.GetServerRequest{Zone: scw.Zone(backend.request.Zone), ServerID: id}, scw.WithContext(ctx))
+	case e2ecleanup.ResourceKindInstanceRootVolume:
+		_, err = backend.block.GetVolume(&blockapi.GetVolumeRequest{Zone: scw.Zone(backend.request.Zone), VolumeID: id}, scw.WithContext(ctx))
 	case e2ecleanup.ResourceKindNodePool:
 		_, err = backend.kubernetes.GetPool(&k8sapi.GetPoolRequest{Region: region, PoolID: id}, scw.WithContext(ctx))
 	case e2ecleanup.ResourceKindParent:
@@ -899,6 +939,37 @@ func (backend *scalewayBackend) completeProviderCreate(inventory *e2ecleanup.Inv
 	inventory.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := backend.writeInventory(*inventory); err != nil {
 		return fmt.Errorf("persist provider Create result for %s %s: %w", resource.Kind, resource.Name, err)
+	}
+	return nil
+}
+
+// completeDisposableInstanceCreate clears the single Instance Create intent
+// only in the same durable generation that records both provider-created
+// resources. DeleteServer does not delete its root Block Storage volume, so
+// recording only the Instance would make cleanup non-resumable after a crash.
+func (backend *scalewayBackend) completeDisposableInstanceCreate(
+	inventory *e2ecleanup.Inventory,
+	instanceResource e2ecleanup.Resource,
+	rootVolumeResource e2ecleanup.Resource,
+) error {
+	if inventory.SchemaVersion != e2ecleanup.SchemaVersionV2 {
+		return fmt.Errorf("disposable Instance root-volume journaling requires cleanup schema v2")
+	}
+	if inventory.PendingCreate == nil ||
+		inventory.PendingCreate.Kind != e2ecleanup.ResourceKindInstance ||
+		inventory.PendingCreate.Name != instanceResource.Name {
+		return fmt.Errorf("provider Create result for %s %s differs from retained intent", instanceResource.Kind, instanceResource.Name)
+	}
+	if instanceResource.Kind != e2ecleanup.ResourceKindInstance ||
+		rootVolumeResource.Kind != e2ecleanup.ResourceKindInstanceRootVolume ||
+		instanceResource.ID == rootVolumeResource.ID {
+		return fmt.Errorf("disposable Instance Create returned an invalid Instance/root-volume pair")
+	}
+	inventory.Resources = append(inventory.Resources, instanceResource, rootVolumeResource)
+	inventory.PendingCreate = nil
+	inventory.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := backend.writeInventory(*inventory); err != nil {
+		return fmt.Errorf("persist provider Create result for disposable Instance and root volume: %w", err)
 	}
 	return nil
 }

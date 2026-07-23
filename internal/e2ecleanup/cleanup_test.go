@@ -115,6 +115,36 @@ func TestBuildNeverDeletesReusedClusterButDeletesRunNodePool(t *testing.T) {
 
 func TestBuildReleaseCandidateRequiresAndDeletesDisposableInstanceFirst(t *testing.T) {
 	inventory := validInventory()
+	inventory.SchemaVersion = SchemaVersionV2
+	inventory.Profile = "release-candidate"
+	inventory.Resources = append(inventory.Resources, Resource{
+		Kind: ResourceKindInstance, ID: "77777777-7777-4777-8777-777777777777",
+		Name: inventory.ResourcePrefix + "-recovery", ProjectID: inventory.ProjectID,
+		Region: inventory.Region, Tags: []string{inventory.OwnershipTag}, CreatedByRun: true,
+		State: ResourceStatePresent,
+	}, Resource{
+		Kind: ResourceKindInstanceRootVolume, ID: "99999999-9999-4999-8999-999999999999",
+		Name: inventory.ResourcePrefix + "-recovery-root", ProjectID: inventory.ProjectID,
+		Region: inventory.Region, Tags: []string{inventory.OwnershipTag}, CreatedByRun: true,
+		State: ResourceStatePresent,
+	})
+	plan, err := Build(inventory, testNow)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(plan.DeleteActions) != 7 || plan.DeleteActions[0].Kind != ResourceKindInstance ||
+		plan.DeleteActions[1].Kind != ResourceKindInstanceRootVolume || plan.DeleteActions[6].Kind != ResourceKindPrivateNetwork {
+		t.Fatalf("delete actions = %#v", plan.DeleteActions)
+	}
+
+	inventory.Resources = inventory.Resources[:len(inventory.Resources)-1]
+	if _, err := Build(inventory, testNow); err == nil {
+		t.Fatal("Build(release candidate without disposable root volume) error = nil")
+	}
+}
+
+func TestBuildRetainsV1CleanupCompatibilityForOlderReleaseCandidates(t *testing.T) {
+	inventory := validInventory()
 	inventory.Profile = "release-candidate"
 	inventory.Resources = append(inventory.Resources, Resource{
 		Kind: ResourceKindInstance, ID: "77777777-7777-4777-8777-777777777777",
@@ -124,15 +154,10 @@ func TestBuildReleaseCandidateRequiresAndDeletesDisposableInstanceFirst(t *testi
 	})
 	plan, err := Build(inventory, testNow)
 	if err != nil {
-		t.Fatalf("Build() error = %v", err)
+		t.Fatalf("Build(v1 release-candidate cleanup) error = %v", err)
 	}
-	if len(plan.DeleteActions) != 6 || plan.DeleteActions[0].Kind != ResourceKindInstance || plan.DeleteActions[5].Kind != ResourceKindPrivateNetwork {
-		t.Fatalf("delete actions = %#v", plan.DeleteActions)
-	}
-
-	inventory.Resources = inventory.Resources[:len(inventory.Resources)-1]
-	if _, err := Build(inventory, testNow); err == nil {
-		t.Fatal("Build(release candidate without disposable instance) error = nil")
+	if len(plan.DeleteActions) != 6 || plan.DeleteActions[0].Kind != ResourceKindInstance {
+		t.Fatalf("v1 cleanup actions = %#v", plan.DeleteActions)
 	}
 }
 
@@ -273,7 +298,7 @@ func TestBuildAcceptsRunOwnedPrivateNetworkCreateIntentBeforeMutation(t *testing
 
 func TestBuildRejectsUnsafeOrIncompleteInventory(t *testing.T) {
 	tests := map[string]func(*Inventory){
-		"schema":        func(inventory *Inventory) { inventory.SchemaVersion = "2" },
+		"schema":        func(inventory *Inventory) { inventory.SchemaVersion = "3" },
 		"profile":       func(inventory *Inventory) { inventory.Profile = "future" },
 		"run ID":        func(inventory *Inventory) { inventory.RunID = "run" },
 		"project":       func(inventory *Inventory) { inventory.ProjectID = "project" },
