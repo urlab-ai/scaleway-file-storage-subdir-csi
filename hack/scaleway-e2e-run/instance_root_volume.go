@@ -20,13 +20,51 @@ func disposableInstanceRootVolume(server *instanceapi.Server) (*instanceapi.Volu
 		return nil, fmt.Errorf("disposable Instance %s has %d volumes; exactly one root volume is required", server.ID, len(server.Volumes))
 	}
 	root, found := server.Volumes["0"]
-	if !found || root == nil || root.ID == "" || !root.Boot {
-		return nil, fmt.Errorf("disposable Instance %s has no exact boot volume at index 0", server.ID)
+	if !found || root == nil || root.ID == "" {
+		return nil, fmt.Errorf("disposable Instance %s has no exact root volume at index 0", server.ID)
 	}
 	if root.VolumeType != instanceapi.VolumeServerVolumeTypeSbsVolume {
 		return nil, fmt.Errorf("disposable Instance %s root volume type %q is not Block Storage", server.ID, root.VolumeType)
 	}
+	// The Instance API currently reports boot=false for the implicit SBS
+	// volume created from an image even though that sole volume occupies boot
+	// index 0. The boolean is therefore not ownership evidence. The Block API
+	// in_use state and exclusive reference to this exact Instance are checked
+	// before the volume is named, tagged, or journaled.
 	return root, nil
+}
+
+// disposableInstanceWithVolumeTopology reconciles two authoritative provider
+// views used during crash recovery. GetServer proves the exact Instance
+// identity but can omit volumes; ListServers carries the indexed volume map.
+// When both views contain topology they must identify the same sole root.
+func disposableInstanceWithVolumeTopology(
+	exact *instanceapi.Server,
+	listed *instanceapi.Server,
+) (*instanceapi.Server, error) {
+	if exact == nil || listed == nil || exact.ID == "" || exact.ID != listed.ID {
+		return nil, fmt.Errorf("disposable Instance provider views differ")
+	}
+	if len(exact.Volumes) == 0 {
+		if _, err := disposableInstanceRootVolume(listed); err != nil {
+			return nil, err
+		}
+		return listed, nil
+	}
+	exactRoot, err := disposableInstanceRootVolume(exact)
+	if err != nil {
+		return nil, err
+	}
+	if len(listed.Volumes) != 0 {
+		listedRoot, err := disposableInstanceRootVolume(listed)
+		if err != nil {
+			return nil, err
+		}
+		if exactRoot.ID != listedRoot.ID {
+			return nil, fmt.Errorf("disposable Instance provider views identify different root volumes")
+		}
+	}
+	return exact, nil
 }
 
 // normalizeDisposableInstanceRootVolume gives the provider-created root volume

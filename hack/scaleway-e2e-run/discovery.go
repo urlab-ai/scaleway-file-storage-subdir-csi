@@ -330,8 +330,12 @@ func (backend *scalewayBackend) discoverInstance(ctx context.Context) (*e2eclean
 		!slices.Contains(observed.Server.Tags, backend.plan.OwnershipTag) {
 		return nil, nil, fmt.Errorf("exact disposable Instance differs from discovery")
 	}
+	server, err := disposableInstanceWithVolumeTopology(observed.Server, matches[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconcile disposable Instance volume topology: %w", err)
+	}
 	resource := backend.resource(e2ecleanup.ResourceKindInstance, observed.Server.ID, observed.Server.Name, true, observed.Server.Tags)
-	return &resource, observed.Server, nil
+	return &resource, server, nil
 }
 
 func mergeResource(inventory *e2ecleanup.Inventory, discovered e2ecleanup.Resource) error {

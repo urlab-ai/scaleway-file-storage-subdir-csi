@@ -267,9 +267,21 @@ not be promoted. Cleanup inventory schema v2 records the exact root volume,
 normalizes its run name and tag before readiness, and deletes it after the
 Instance with crash-resumable exact-ID evidence.
 
-`v0.1.0-rc.21` is the next full qualification candidate and continues to use
+RC21 created its run-owned Private Network, Kapsule cluster, two-node pool, two
+File Storage parents, disposable Instance, and implicit root SBS volume, then
+failed closed before any CSI scenario. The Instance API represented the sole
+SBS volume at index `0` with `boot=false`, while the executor incorrectly
+required that advisory field to be true. Its recovery path also assumed that
+`GetServer` always repeated the indexed volume map returned by `ListServers`,
+which the live API disproved. RC21 is superseded and must not be promoted. The
+executor now identifies the sole SBS volume at index `0`, proves its exact
+`in_use` Block API reference to the run-owned Instance, uses the independently
+identity-checked list view only when the exact Instance read omits topology,
+and fails closed if two populated provider views disagree.
+
+`v0.1.0-rc.22` is the next full qualification candidate and continues to use
 RC14 as its exact public predecessor. No candidate is a production support
-claim until RC21 passes every Linux, kind, CSI, Helm, real Kapsule, and
+claim until RC22 passes every Linux, kind, CSI, Helm, real Kapsule, and
 final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -6738,11 +6750,17 @@ The provider creates the disposable Instance root SBS volume as an implicit
 child of `CreateServer`, whose request cannot set root-volume tags. This is the
 only transient exception to creation-time naming and tagging. While the
 Instance Create intent remains durably unresolved, the executor must read the
-sole boot volume at index `0` from the exact tagged Instance, require an
+sole SBS volume at index `0` from the exact tagged Instance, require an
 `in_use` SBS volume referenced only by that Instance, assign the deterministic
 `<resource-prefix>-recovery-root` name and ownership tag, and fsync the Instance
 and root-volume exact IDs together before clearing the intent or declaring the
-run ready. An untagged volume name alone is never ownership evidence.
+run ready. The Instance API `boot` boolean is not ownership evidence because
+the provider can report `false` for this implicit image volume. `GetServer`
+remains the exact Instance identity read; when it omits volume topology, the
+executor may use the sole exact-name/project/tag match from `ListServers` only
+after proving both views have the same Instance ID. Populated views that name
+different root-volume IDs fail closed. An untagged volume name alone is never
+ownership evidence.
 
 Before any real-cloud mutation, the runner must derive and retain a closed v1
 preflight plan. The request names the base or release-candidate profile, exact
@@ -6858,7 +6876,8 @@ creates both the Instance and its root volume, schema v2 clears that single
 pending intent only in the durable generation that contains both exact
 resources. Recovery
 may normalize a not-yet-journaled root only through the still-present exact
-tagged Instance and its sole boot-volume relationship; after normalization,
+tagged Instance and its sole index-`0` SBS-volume relationship plus the exact
+Block API attachment; after normalization,
 the deterministic name and tag permit exact discovery even if the Instance was
 subsequently removed. A root volume missing from a ready schema-v2
 release-candidate inventory is a cleanup and qualification failure.

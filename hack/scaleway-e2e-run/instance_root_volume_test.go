@@ -13,10 +13,10 @@ import (
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
 )
 
-func TestDisposableInstanceRootVolumeRequiresOneSBSBootVolume(t *testing.T) {
+func TestDisposableInstanceRootVolumeRequiresOneSBSVolumeAtIndexZero(t *testing.T) {
 	valid := &instanceapi.Server{ID: "11111111-1111-4111-8111-111111111111", Volumes: map[string]*instanceapi.VolumeServer{
 		"0": {
-			ID: "22222222-2222-4222-8222-222222222222", Boot: true,
+			ID:         "22222222-2222-4222-8222-222222222222",
 			VolumeType: instanceapi.VolumeServerVolumeTypeSbsVolume,
 		},
 	}}
@@ -34,10 +34,10 @@ func TestDisposableInstanceRootVolumeRequiresOneSBSBootVolume(t *testing.T) {
 			ID:      valid.ID,
 			Volumes: map[string]*instanceapi.VolumeServer{},
 		},
-		"nonboot root": {
+		"missing index zero": {
 			ID: valid.ID,
 			Volumes: map[string]*instanceapi.VolumeServer{
-				"0": {ID: root.ID, VolumeType: instanceapi.VolumeServerVolumeTypeSbsVolume},
+				"1": {ID: root.ID, VolumeType: instanceapi.VolumeServerVolumeTypeSbsVolume},
 			},
 		},
 		"nonblock root": {
@@ -60,6 +60,42 @@ func TestDisposableInstanceRootVolumeRequiresOneSBSBootVolume(t *testing.T) {
 				t.Fatal("disposableInstanceRootVolume() error = nil")
 			}
 		})
+	}
+}
+
+func TestDisposableInstanceWithVolumeTopologyUsesListWhenExactReadOmitsVolumes(t *testing.T) {
+	const serverID = "11111111-1111-4111-8111-111111111111"
+	const volumeID = "22222222-2222-4222-8222-222222222222"
+	exact := &instanceapi.Server{ID: serverID}
+	listed := &instanceapi.Server{ID: serverID, Volumes: map[string]*instanceapi.VolumeServer{
+		"0": {ID: volumeID, VolumeType: instanceapi.VolumeServerVolumeTypeSbsVolume},
+	}}
+
+	reconciled, err := disposableInstanceWithVolumeTopology(exact, listed)
+	if err != nil {
+		t.Fatalf("disposableInstanceWithVolumeTopology() error = %v", err)
+	}
+	root, err := disposableInstanceRootVolume(reconciled)
+	if err != nil {
+		t.Fatalf("disposableInstanceRootVolume(reconciled) error = %v", err)
+	}
+	if root.ID != volumeID {
+		t.Fatalf("root volume ID = %q, want %q", root.ID, volumeID)
+	}
+}
+
+func TestDisposableInstanceWithVolumeTopologyRejectsContradictoryViews(t *testing.T) {
+	const serverID = "11111111-1111-4111-8111-111111111111"
+	server := func(volumeID string) *instanceapi.Server {
+		return &instanceapi.Server{ID: serverID, Volumes: map[string]*instanceapi.VolumeServer{
+			"0": {ID: volumeID, VolumeType: instanceapi.VolumeServerVolumeTypeSbsVolume},
+		}}
+	}
+	if _, err := disposableInstanceWithVolumeTopology(
+		server("22222222-2222-4222-8222-222222222222"),
+		server("33333333-3333-4333-8333-333333333333"),
+	); err == nil {
+		t.Fatal("contradictory root-volume views were accepted")
 	}
 }
 
