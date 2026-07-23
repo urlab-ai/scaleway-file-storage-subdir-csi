@@ -81,6 +81,40 @@ type nodeDrainState struct {
 	Proof e2erunner.NodeDrainProof
 }
 
+func nodeDrainManifest(request e2erunner.Request, plan e2eplan.Plan, deployment, claim, shortRun string) string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/instance: %q
+    sfs-subdir-e2e-run: %q
+    sfs-subdir-e2e-scenario: node-drain
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {sfs-subdir-e2e-workload: %q}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: %q
+        sfs-subdir-e2e-run: %q
+        sfs-subdir-e2e-scenario: node-drain
+        sfs-subdir-e2e-workload: %q
+    spec:
+      containers:
+        - name: workload
+          image: %s
+          command: ["sh", "-c", "test -e /data/node-drain-marker || { printf node-drain-%s > /data/node-drain-marker; sync; }; sleep 3600"]
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: %s}
+`, deployment, request.DriverNamespace, request.HelmRelease, plan.RunID, deployment,
+		request.HelmRelease, plan.RunID, deployment, request.WorkloadImage, shortRun, claim)
+}
+
 func (backend *scalewayBackend) runDestructiveControllerAndNodeScenarios(
 	ctx context.Context,
 	request e2erunner.Request,
@@ -133,34 +167,7 @@ func (backend *scalewayBackend) normalNodeDrainScenario(ctx context.Context, req
 	if len(nodes) < 2 {
 		return state, fmt.Errorf("normal drain requires at least two Ready Linux nodes")
 	}
-	manifest := fmt.Sprintf(`apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    sfs-subdir-e2e-run: %q
-    sfs-subdir-e2e-scenario: node-drain
-spec:
-  replicas: 1
-  selector:
-    matchLabels: {sfs-subdir-e2e-workload: %q}
-  template:
-    metadata:
-      labels:
-        sfs-subdir-e2e-run: %q
-        sfs-subdir-e2e-scenario: node-drain
-        sfs-subdir-e2e-workload: %q
-    spec:
-      containers:
-        - name: workload
-          image: %s
-          command: ["sh", "-c", "test -e /data/node-drain-marker || { printf node-drain-%s > /data/node-drain-marker; sync; }; sleep 3600"]
-          volumeMounts: [{name: data, mountPath: /data}]
-      volumes:
-        - name: data
-          persistentVolumeClaim: {claimName: %s}
-`, deployment, request.DriverNamespace, plan.RunID, deployment, plan.RunID, deployment, request.WorkloadImage, shortRun, claim)
+	manifest := nodeDrainManifest(request, plan, deployment, claim, shortRun)
 	if _, err := backend.kubectl(ctx, request, strings.NewReader(manifest), "apply", "-f", "-"); err != nil {
 		return state, err
 	}

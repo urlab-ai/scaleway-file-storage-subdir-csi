@@ -235,9 +235,28 @@ removed immediately after the restart proof. Failure cleanup also waits for
 the bounded Helm transaction to finish before it evaluates release state, so a
 child process cannot outlive its background shell and race teardown.
 
-`v0.1.0-rc.19` is the next full qualification candidate and continues to use
+RC19 passed artifact/install, real `virtiofs`, single-node-writer conflict, and
+the functional 100-PVC/20-minute soak checks, including 5,813 writes, 5,732
+reads, and zero checksum failures. Its privileged, credential-free fault
+injector then proved the previously blocked crash window: after the provider
+accepted the second-parent attachment and before the owner claim existed, it
+stopped and killed exactly one cgroup- and ENTRYPOINT-fenced controller
+process. The same Pod restarted once, resumed the exact prepared attempt,
+created the valid immutable owner claim, removed the temporary claim and
+bootstrap journal, completed Helm, and removed the injector. The following
+node-drain scenario mounted and started its workload, then failed before drain
+because the harness-created Pod omitted the Helm release label required by the
+harness's own fail-closed singular-Pod selector. This runner-only labeling
+defect admitted no drain evidence and did not exercise the CSI failure path.
+Automatic cleanup removed all 107 run-owned allocation records through normal
+deletion plus exact GC, completed safe uninstall, and removed the six run-owned
+cloud resources; independent exact-ID and prefix inventories confirmed
+absence. The drain workload Deployment and Pod template now carry the exact
+release identity, with focused regression coverage.
+
+`v0.1.0-rc.20` is the next full qualification candidate and continues to use
 RC14 as its exact public predecessor. No candidate is a production support
-claim until RC19 passes every Linux, kind, CSI, Helm, real Kapsule, and
+claim until RC20 passes every Linux, kind, CSI, Helm, real Kapsule, and
 final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -6646,6 +6665,11 @@ Kapsule matrix must:
     controller, prove all exact mounts and attachments absent, uninstall the
     exact Helm release, remove the retained kubeconfig, and delete every
     run-owned cloud resource by exact retained ID.
+
+Every harness-created object that a later exact selector observes must carry
+both the unique run label and the Helm release identity used by that selector.
+The harness must fail closed on absent or ambiguous objects; it must not weaken
+the selector to compensate for a missing identity label.
 
 The soak is a correctness and recovery test, not a throughput benchmark. Its
 20-minute minimum is measured after every sampled writer and reader is Ready.
