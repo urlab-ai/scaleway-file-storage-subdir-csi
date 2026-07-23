@@ -255,8 +255,8 @@ type ProviderForeignAttachProof struct {
 
 // ProviderBootstrapCrashProof records a real first-claim interruption after
 // the provider accepted the attachment but before the immutable parent claim
-// existed. The same Pod and runtime identity must resume the exact durable
-// Lease journal after kubelet restarts the killed controller process.
+// existed. A restarted controller process in the same Pod and on the same node
+// must resume the exact durable Lease journal.
 type ProviderBootstrapCrashProof struct {
 	ParentFilesystemID              string `json:"parentFilesystemId"`
 	LeaseUID                        string `json:"leaseUid"`

@@ -1035,12 +1035,16 @@ bootstrap_crash_add_parent() {
   bootstrap_parent_root="/var/lib/scaleway-sfs-subdir-csi/controller-parents/$parent_b"
   bootstrap_owner_path="$bootstrap_parent_root/.sfs-subdir-csi-owner.json"
   bootstrap_upgrade_pid=
-  bootstrap_stopped_pod=
+  bootstrap_fault_pod=
+  bootstrap_host_pid=
   bootstrap_process_stopped=false
 
   bootstrap_cleanup() {
-    if [ "$bootstrap_process_stopped" = true ] && [ -n "$bootstrap_stopped_pod" ]; then
-      k -n "$namespace" exec "$bootstrap_stopped_pod" -c driver -- sh -c 'kill -CONT 1' >/dev/null 2>&1 || true
+    if [ "$bootstrap_process_stopped" = true ] && [ -n "$bootstrap_fault_pod" ] && [ -n "$bootstrap_host_pid" ]; then
+      k -n "$namespace" exec "$bootstrap_fault_pod" -- sh -c 'kill -CONT "$1"' sh "$bootstrap_host_pid" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$bootstrap_fault_pod" ]; then
+      k -n "$namespace" delete "pod/$bootstrap_fault_pod" --ignore-not-found --wait=true --timeout=2m >/dev/null 2>&1 || true
     fi
     if [ -n "$bootstrap_upgrade_pid" ] && kill -0 "$bootstrap_upgrade_pid" 2>/dev/null; then
       kill "$bootstrap_upgrade_pid" 2>/dev/null || true
@@ -1118,6 +1122,67 @@ bootstrap_crash_add_parent() {
     if length == 1 then .[0].restartCount else error("driver container status is absent or ambiguous") end
   ')
 
+  # PID 1 in a PID namespace ignores unhandled SIGSTOP and SIGKILL sent from
+  # another process in that same namespace. Use a short-lived, credential-free
+  # hostPID Pod on the exact controller node so the signals originate from the
+  # ancestor PID namespace where Linux guarantees their delivery. CAP_KILL is
+  # the only added capability; no host path or service-account token is needed.
+  bootstrap_fault_pod="e2e-bootstrap-fault-$short_run"
+  k -n "$namespace" apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $bootstrap_fault_pod
+  labels:
+    sfs-subdir-e2e-run: "$run_id"
+    sfs-subdir-e2e-scenario: bootstrap-crash
+spec:
+  automountServiceAccountToken: false
+  hostPID: true
+  nodeName: $bootstrap_node_name
+  restartPolicy: Never
+  securityContext:
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: fault-injector
+      image: $workload_image
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 3600 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: false
+        runAsUser: 0
+        capabilities:
+          drop: ["ALL"]
+          add: ["KILL"]
+EOF
+  k -n "$namespace" wait "pod/$bootstrap_fault_pod" --for=condition=Ready --timeout=5m
+
+  bootstrap_cgroup_uid=$(printf '%s' "$bootstrap_pod_uid" | tr '-' '_')
+  bootstrap_host_pid=$(k -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
+    pod_uid=$1
+    cgroup_uid=$2
+    matches=
+    for process in /proc/[0-9]*; do
+      [ -r "$process/cgroup" ] || continue
+      if ! grep -Fq "$pod_uid" "$process/cgroup" && ! grep -Fq "$cgroup_uid" "$process/cgroup"; then
+        continue
+      fi
+      executable=$(readlink "$process/exe" 2>/dev/null || true)
+      [ "${executable##*/}" = scaleway-sfs-subdir-csi ] || continue
+      pid=${process#/proc/}
+      matches="$matches $pid"
+    done
+    set -- $matches
+    [ "$#" -eq 1 ] || {
+      echo "controller host process is absent or ambiguous" >&2
+      exit 1
+    }
+    printf "%s" "$1"
+  ' sh "$bootstrap_pod_uid" "$bootstrap_cgroup_uid")
+  printf '%s\n' "$bootstrap_host_pid" | grep -Eq '^[1-9][0-9]*$'
+
   bootstrap_deadline=$(( $(date +%s) + 600 ))
   while :; do
     bootstrap_server=$(s instance server get server-id="$bootstrap_instance" zone="$bootstrap_zone" -o json)
@@ -1127,8 +1192,21 @@ bootstrap_crash_add_parent() {
     ')
     if [ -n "$bootstrap_transition" ]; then
       [ "$bootstrap_transition" = attaching ] || [ "$bootstrap_transition" = available ]
-      k --request-timeout=15s -n "$namespace" exec "$bootstrap_pod" -c driver -- sh -c 'kill -STOP 1'
-      bootstrap_stopped_pod=$bootstrap_pod
+      k --request-timeout=15s -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
+        pid=$1
+        kill -STOP "$pid"
+        attempts=0
+        while [ "$attempts" -lt 100 ]; do
+          state=$(sed -n "s/^State:[[:space:]]*\\([^[:space:]]\\).*/\\1/p" "/proc/$pid/status")
+          if [ "$state" = T ] || [ "$state" = t ]; then
+            exit 0
+          fi
+          attempts=$((attempts + 1))
+          sleep 0.1
+        done
+        echo "controller host process did not enter a stopped state" >&2
+        exit 1
+      ' sh "$bootstrap_host_pid"
       bootstrap_process_stopped=true
       break
     fi
@@ -1164,12 +1242,12 @@ bootstrap_crash_add_parent() {
   ')
   [ -n "$bootstrap_attachment_id" ]
 
-  # kubectl exec may report success or the expected transport loss when PID 1
-  # dies. The same-Pod restartCount and subsequent Ready state below are the
-  # authoritative proof that SIGKILL reached the exact controller process.
-  if k --request-timeout=15s -n "$namespace" exec "$bootstrap_pod" -c driver -- sh -c 'kill -KILL 1' >/dev/null 2>&1; then
-    :
-  fi
+  k --request-timeout=15s -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
+    pid=$1
+    state=$(sed -n "s/^State:[[:space:]]*\\([^[:space:]]\\).*/\\1/p" "/proc/$pid/status")
+    { [ "$state" = T ] || [ "$state" = t ]; }
+    kill -KILL "$pid"
+  ' sh "$bootstrap_host_pid"
   bootstrap_process_stopped=false
 
   bootstrap_deadline=$(( $(date +%s) + 900 ))
@@ -1193,6 +1271,10 @@ bootstrap_crash_add_parent() {
     }
     sleep 2
   done
+
+  k -n "$namespace" delete "pod/$bootstrap_fault_pod" --wait=true --timeout=2m
+  bootstrap_fault_pod=
+  bootstrap_host_pid=
 
   if wait "$bootstrap_upgrade_pid"; then
     bootstrap_upgrade_status=0

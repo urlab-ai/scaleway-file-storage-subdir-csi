@@ -31,9 +31,14 @@ focused regression coverage. RC14 is a bridge candidate so RC15 could use a
 corrected public N-1 predecessor. RC15 reached the 100-PVC scale scenario and
 exposed a stale lifecycle-snapshot race while normal creation advanced to
 `Ready`; the run stopped and removed every run-owned cloud resource. That race
-now has focused regression coverage. RC16 is the next full qualification
-candidate and continues to use RC14 as its exact public predecessor. None is a
-qualified production release until the exact RC16 artifacts pass every gate. The
+now has focused regression coverage. RC16 then proved the functional 100-PVC
+and 20-minute soak path without corruption, but its same-namespace PID 1 signal
+injection could not prove a controller restart. It failed closed and cleaned
+every run-owned cloud resource. The corrected harness uses a temporary,
+credential-free host-PID Pod with only `CAP_KILL`. RC17 is the next full
+qualification candidate and continues to use RC14 as its exact public
+predecessor. None is a qualified production release until the exact RC17
+artifacts pass every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint

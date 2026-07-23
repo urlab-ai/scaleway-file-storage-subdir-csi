@@ -195,10 +195,21 @@ a creation repair dispatched from a stale `CreatingDirectory` snapshot reread
 an allocation that normal `CreateVolume` had already advanced to `Ready` and
 incorrectly degraded maintenance. The run stopped without data corruption and
 removed every run-owned cloud resource. The identity-valid `Ready` no-op
-specified in section 6.5 corrects that race. `v0.1.0-rc.16` is the next full
-qualification candidate and continues to use RC14 as its exact public
-predecessor. No candidate is a production support claim until RC16 passes every
-Linux, kind, CSI, Helm, real Kapsule, and final-cleanup qualification gate.
+specified in section 6.5 corrects that race. RC16 then passed artifact/install,
+real `virtiofs`, single-node-writer, and the functional 100-PVC/20-minute soak
+checks, including 5,904 writes, 5,906 reads, and zero checksum failures. Its
+bootstrap interruption proof nevertheless failed closed: Linux does not deliver
+unhandled `SIGSTOP` or `SIGKILL` sent to namespace PID 1 by another member of
+that same PID namespace, so the harness could not prove that it had stopped or
+killed the controller. The run admitted no 100-PVC scenario result and removed
+every run-owned cloud resource. The harness now uses a temporary
+credential-free `hostPID` fault-injector Pod on the exact controller node,
+identifies exactly one controller process through both Pod UID cgroup identity
+and executable identity, and grants only `CAP_KILL` to stop and kill it from
+the ancestor PID namespace. `v0.1.0-rc.17` is the next full qualification
+candidate and continues to use RC14 as its exact public predecessor. No
+candidate is a production support claim until RC17 passes every Linux, kind,
+CSI, Helm, real Kapsule, and final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
 commercial type for the first controlled run because it is the lowest-priced
@@ -6552,8 +6563,12 @@ Kapsule matrix must:
    sibling volume;
 7. add the fresh second parent through Helm, interrupt the controller after the
    provider accepted its first attachment but before the immutable owner claim,
-   and prove the same Pod/runtime identity resumes the exact durable bootstrap
-   attempt and completes the claim without a temporary claim left behind;
+   and prove a restarted controller process with the same Pod UID and node
+   identity resumes the exact durable bootstrap attempt and completes the claim
+   without a temporary claim left behind. The fault injector is a temporary,
+   credential-free `hostPID` Pod on that exact node; it must identify exactly
+   one process by Pod UID cgroup plus executable identity, add only `CAP_KILL`,
+   and be removed immediately after the restart proof;
 8. attach both parents to the exact standalone run-owned disposable Instance
    outside the Kubernetes node inventory, prove the controller fails closed
    before partial provisioning, detach those exact attachments, prove both

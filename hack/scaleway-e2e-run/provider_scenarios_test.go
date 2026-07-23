@@ -67,10 +67,14 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 	steps := []string{
 		`number_of_attachments == 0`,
 		`sfs-subdir-bootstrap-parent-filesystem-id`,
-		`kill -STOP 1`,
+		`hostPID: true`,
+		`capabilities:`,
+		`controller host process is absent or ambiguous`,
+		`kill -STOP "$pid"`,
+		`controller host process did not enter a stopped state`,
 		`parent owner claim existed before the injected controller crash`,
 		`bootstrap_available=`,
-		`kill -KILL 1`,
+		`kill -KILL "$pid"`,
 		`bootstrap_restart_after=`,
 		`bootstrap_journal_count=`,
 		`bootstrap_claim=`,
@@ -82,6 +86,13 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 			t.Fatalf("bootstrap crash step %q is absent or out of order", step)
 		}
 		previous = index
+	}
+	if strings.Contains(body, `kill -KILL 1`) || strings.Contains(body, `kill -STOP 1`) {
+		t.Fatal("bootstrap crash still signals namespace PID 1 from inside its own PID namespace")
+	}
+	if !strings.Contains(body, `automountServiceAccountToken: false`) ||
+		!strings.Contains(body, `drop: ["ALL"]`) || !strings.Contains(body, `add: ["KILL"]`) {
+		t.Fatal("bootstrap fault injector does not retain its credential-free least-privilege boundary")
 	}
 
 	scaleStart := end + 1

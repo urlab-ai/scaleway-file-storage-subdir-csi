@@ -48,9 +48,15 @@ candidate. RC15 used RC14 as its exact public predecessor and reached the
 100-PVC scale scenario, where it exposed a stale lifecycle-snapshot race that
 temporarily degraded controller maintenance while normal creation advanced to
 `Ready`. The run stopped and cleaned every run-owned cloud resource. The race
-is corrected with focused regression coverage. RC16 is the next full
-qualification candidate and continues to use RC14 as its exact public
-predecessor. Publication remains blocked until the exact RC16 artifacts have
+is corrected with focused regression coverage. RC16 subsequently proved the
+100-PVC and 20-minute read/write soak behavior without corruption, but its
+bootstrap crash harness tried to signal namespace PID 1 from inside the same
+PID namespace and therefore could not prove that the controller restarted.
+That run failed closed and cleaned every run-owned cloud resource. The harness
+now uses a bounded, credential-free host-PID fault injector with only
+`CAP_KILL`. RC17 is the next full qualification candidate and continues to use
+RC14 as its exact public predecessor. Publication remains blocked until the
+exact RC17 artifacts have
 concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
