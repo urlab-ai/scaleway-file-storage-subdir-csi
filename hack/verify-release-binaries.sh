@@ -25,30 +25,29 @@ GO="$GO" RELEASE_TAG="$TAG" VERSION="$VERSION" COMMIT="$COMMIT" \
   BUILD_DATE="$BUILD_DATE" DIST_DIR="$DIST_DIR" \
   "$ROOT_DIR/hack/build-release-binaries.sh"
 
-for arch in amd64 arm64; do
-  for command in scaleway-sfs-subdir-csi csi-admin; do
-    artifact="$DIST_DIR/${command}_${TAG}_linux_${arch}"
-    for required in "$artifact" "$artifact.identity.json" "$artifact.modules.txt"; do
-      if [ ! -s "$required" ]; then
-        echo "release verification failed: missing or empty $required" >&2
-        exit 1
-      fi
-    done
-    expected_identity='{"releaseTag":"v1.2.3","version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","buildDate":"2026-07-13T12:34:56Z","commercialTypes":["TEST-TYPE-1"]}'
-    if [ "$(sed -n '1p' "$artifact.identity.json")" != "$expected_identity" ]; then
-      echo "release verification failed: identity sidecar mismatch for $artifact" >&2
-      exit 1
-    fi
-    if ! grep -Fq "GOOS=linux" "$artifact.modules.txt" || ! grep -Fq "GOARCH=$arch" "$artifact.modules.txt"; then
-      echo "release verification failed: module manifest target mismatch for $artifact" >&2
+arch=amd64
+for command in scaleway-sfs-subdir-csi csi-admin; do
+  artifact="$DIST_DIR/${command}_${TAG}_linux_${arch}"
+  for required in "$artifact" "$artifact.identity.json" "$artifact.modules.txt"; do
+    if [ ! -s "$required" ]; then
+      echo "release verification failed: missing or empty $required" >&2
       exit 1
     fi
   done
+  expected_identity='{"releaseTag":"v1.2.3","version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","buildDate":"2026-07-13T12:34:56Z","commercialTypes":["TEST-TYPE-1"]}'
+  if [ "$(sed -n '1p' "$artifact.identity.json")" != "$expected_identity" ]; then
+    echo "release verification failed: identity sidecar mismatch for $artifact" >&2
+    exit 1
+  fi
+  if ! grep -Fq "GOOS=linux" "$artifact.modules.txt" || ! grep -Fq "GOARCH=$arch" "$artifact.modules.txt"; then
+    echo "release verification failed: module manifest target mismatch for $artifact" >&2
+    exit 1
+  fi
 done
 
 CHECKSUMS="$DIST_DIR/checksums_${TAG}.txt"
-if [ "$(wc -l <"$CHECKSUMS" | tr -d ' ')" -ne 14 ]; then
-  echo "release verification failed: checksum file must cover four binaries, eight sidecars, the SBOM, and provenance" >&2
+if [ "$(wc -l <"$CHECKSUMS" | tr -d ' ')" -ne 8 ]; then
+  echo "release verification failed: checksum file must cover two binaries, four sidecars, the SBOM, and provenance" >&2
   exit 1
 fi
 if ! awk '
@@ -106,15 +105,6 @@ case "$(uname -s)/$(uname -m)" in
   Linux/x86_64|Linux/amd64)
     for command in scaleway-sfs-subdir-csi csi-admin; do
       output=$("$DIST_DIR/${command}_${TAG}_linux_amd64" --version)
-      if [ "$output" != "$VERSION (commit=$COMMIT, built=$BUILD_DATE)" ]; then
-        echo "release verification failed: $command embedded identity mismatch" >&2
-        exit 1
-      fi
-    done
-    ;;
-  Linux/aarch64|Linux/arm64)
-    for command in scaleway-sfs-subdir-csi csi-admin; do
-      output=$("$DIST_DIR/${command}_${TAG}_linux_arm64" --version)
       if [ "$output" != "$VERSION (commit=$COMMIT, built=$BUILD_DATE)" ]; then
         echo "release verification failed: $command embedded identity mismatch" >&2
         exit 1

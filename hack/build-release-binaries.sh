@@ -28,18 +28,17 @@ mkdir -p "$DIST_DIR"
 DIST_DIR=$(CDPATH= cd -- "$DIST_DIR" && pwd)
 LDFLAGS="-s -w -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Version=$VERSION -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.Commit=$COMMIT -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.BuildDate=$BUILD_DATE -X github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/version.QualifiedCommercialTypes=$QUALIFIED_COMMERCIAL_TYPES"
 
-for arch in amd64 arm64; do
-  for command in scaleway-sfs-subdir-csi csi-admin; do
-    output="$DIST_DIR/${command}_${RELEASE_TAG}_linux_${arch}"
-    package="./cmd/$command"
-    echo "building $output"
-    (
-      cd "$ROOT_DIR"
-      CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$GO" build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$output" "$package"
-    )
-    "$GO" version -m "$output" >"$output.modules.txt"
-    printf '%s\n' "$IDENTITY_JSON" >"$output.identity.json"
-  done
+arch=amd64
+for command in scaleway-sfs-subdir-csi csi-admin; do
+  output="$DIST_DIR/${command}_${RELEASE_TAG}_linux_${arch}"
+  package="./cmd/$command"
+  echo "building $output"
+  (
+    cd "$ROOT_DIR"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" "$GO" build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$output" "$package"
+  )
+  "$GO" version -m "$output" >"$output.modules.txt"
+  printf '%s\n' "$IDENTITY_JSON" >"$output.identity.json"
 done
 
 SBOM="$DIST_DIR/scaleway-sfs-subdir-csi_${RELEASE_TAG}.spdx.json"

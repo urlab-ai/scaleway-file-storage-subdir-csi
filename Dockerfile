@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-# Release and development builds share the reviewed multi-architecture base
-# image indexes pinned here by immutable digest.
+# Release and development builds share reviewed base image indexes pinned here
+# by immutable digest. The v1 release procedure targets Linux amd64 only.
 ARG GO_IMAGE=golang:1.26.0-alpine3.23@sha256:d4c4845f5d60c6a974c6000ce58ae079328d03ab7f721a0734277e69905473e5
 ARG RUNTIME_IMAGE=alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 FROM ${GO_IMAGE} AS build

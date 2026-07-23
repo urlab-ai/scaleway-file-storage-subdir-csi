@@ -19,6 +19,8 @@ import (
 	"time"
 )
 
+const releaseArchitecture = "amd64"
+
 type evidenceSubject struct {
 	Name   string            `json:"name"`
 	Digest map[string]string `json:"digest"`
@@ -190,30 +192,28 @@ func releaseModules(dist, tag string) ([]spdxPackage, error) {
 		version string
 	}
 	unique := make(map[moduleIdentity]struct{})
-	for _, arch := range []string{"amd64", "arm64"} {
-		for _, command := range []string{"csi-admin", "scaleway-sfs-subdir-csi"} {
-			modulePath := filepath.Join(dist, fmt.Sprintf("%s_%s_linux_%s.modules.txt", command, tag, arch))
-			file, err := os.Open(modulePath)
-			if err != nil {
-				return nil, fmt.Errorf("open Go module sidecar %q: %w", filepath.Base(modulePath), err)
+	for _, command := range []string{"csi-admin", "scaleway-sfs-subdir-csi"} {
+		modulePath := filepath.Join(dist, fmt.Sprintf("%s_%s_linux_%s.modules.txt", command, tag, releaseArchitecture))
+		file, err := os.Open(modulePath)
+		if err != nil {
+			return nil, fmt.Errorf("open Go module sidecar %q: %w", filepath.Base(modulePath), err)
+		}
+		scanner := bufio.NewScanner(io.LimitReader(file, 8<<20))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) < 3 || fields[0] != "dep" {
+				continue
 			}
-			scanner := bufio.NewScanner(io.LimitReader(file, 8<<20))
-			for scanner.Scan() {
-				fields := strings.Fields(scanner.Text())
-				if len(fields) < 3 || fields[0] != "dep" {
-					continue
-				}
-				if fields[1] == "" || fields[2] == "" || len(fields[1]) > 512 || len(fields[2]) > 256 || strings.ContainsAny(fields[1]+fields[2], "\x00\r\n\t ") {
-					_ = file.Close()
-					return nil, fmt.Errorf("go module sidecar %q contains an invalid dependency", filepath.Base(modulePath))
-				}
-				unique[moduleIdentity{path: fields[1], version: fields[2]}] = struct{}{}
+			if fields[1] == "" || fields[2] == "" || len(fields[1]) > 512 || len(fields[2]) > 256 || strings.ContainsAny(fields[1]+fields[2], "\x00\r\n\t ") {
+				_ = file.Close()
+				return nil, fmt.Errorf("go module sidecar %q contains an invalid dependency", filepath.Base(modulePath))
 			}
-			scanErr := scanner.Err()
-			closeErr := file.Close()
-			if scanErr != nil || closeErr != nil {
-				return nil, fmt.Errorf("read go module sidecar %q: %w", filepath.Base(modulePath), errors.Join(scanErr, closeErr))
-			}
+			unique[moduleIdentity{path: fields[1], version: fields[2]}] = struct{}{}
+		}
+		scanErr := scanner.Err()
+		closeErr := file.Close()
+		if scanErr != nil || closeErr != nil {
+			return nil, fmt.Errorf("read go module sidecar %q: %w", filepath.Base(modulePath), errors.Join(scanErr, closeErr))
 		}
 	}
 	identities := make([]moduleIdentity, 0, len(unique))
@@ -289,14 +289,12 @@ func releaseSubjects(dist, tag, sbomPath, provenancePath string) ([]evidenceSubj
 }
 
 func expectedBinaryArtifacts(tag string) map[string]struct{} {
-	expected := make(map[string]struct{}, 12)
-	for _, arch := range []string{"amd64", "arm64"} {
-		for _, command := range []string{"csi-admin", "scaleway-sfs-subdir-csi"} {
-			name := fmt.Sprintf("%s_%s_linux_%s", command, tag, arch)
-			expected[name] = struct{}{}
-			expected[name+".identity.json"] = struct{}{}
-			expected[name+".modules.txt"] = struct{}{}
-		}
+	expected := make(map[string]struct{}, 6)
+	for _, command := range []string{"csi-admin", "scaleway-sfs-subdir-csi"} {
+		name := fmt.Sprintf("%s_%s_linux_%s", command, tag, releaseArchitecture)
+		expected[name] = struct{}{}
+		expected[name+".identity.json"] = struct{}{}
+		expected[name+".modules.txt"] = struct{}{}
 	}
 	return expected
 }

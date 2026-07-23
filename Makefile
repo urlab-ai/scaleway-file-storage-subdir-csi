@@ -79,11 +79,8 @@ test-linux-privileged:
 test-linux-cross-compile:
 	@set -eu; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/safety-linux-amd64.test" ./pkg/safety; \
-		GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/safety-linux-arm64.test" ./pkg/safety; \
 		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/mount-linux-amd64.test" ./pkg/mount; \
-		GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/mount-linux-arm64.test" ./pkg/mount; \
-		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/driver-linux-amd64.test" ./pkg/driver; \
-		GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/driver-linux-arm64.test" ./pkg/driver
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -o "$$tmp/driver-linux-amd64.test" ./pkg/driver
 
 vet:
 	$(GO) vet ./...

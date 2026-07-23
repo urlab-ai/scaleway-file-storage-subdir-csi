@@ -44,10 +44,14 @@ RC13 qualification attempt installed RC12 as its N-1 predecessor and exposed a
 missing bounded same-process retry during fresh parent bootstrap, plus
 client-side Secret apply retaining credential bytes in an annotation. Both
 defects are corrected with focused regression tests. RC14 is a bridge
-candidate; the intended full RC15 qualification will use corrected RC14 as its
-exact public predecessor. Publication remains blocked until the exact RC15
-artifacts have concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup
-evidence.
+candidate. RC15 used RC14 as its exact public predecessor and reached the
+100-PVC scale scenario, where it exposed a stale lifecycle-snapshot race that
+temporarily degraded controller maintenance while normal creation advanced to
+`Ready`. The run stopped and cleaned every run-owned cloud resource. The race
+is corrected with focused regression coverage. RC16 is the next full
+qualification candidate and continues to use RC14 as its exact public
+predecessor. Publication remains blocked until the exact RC16 artifacts have
+concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
 Storage slots. It is not supported or advertised until retained real-provider
@@ -91,9 +95,12 @@ they are not hard filesystem quotas in v1.
 Prerequisites currently include Go 1.26, Helm 3.18, and `jq` for validating the
 closed runtime JSON rendered by Helm.
 
-The in-cluster v1 binaries target Linux `amd64` and Linux `arm64`. Both are
-cross-compiled in CI; destructive filesystem behavior still requires the
-privileged Linux and real `virtiofs` release suites defined by the specification.
+The in-cluster v1 binaries target Linux `amd64` only. Release CI cross-compiles
+that target; destructive filesystem behavior still requires the privileged
+Linux and real `virtiofs` release suites defined by the specification. Other
+architectures, including Linux `arm64`, remain unsupported until an explicit
+release-matrix change qualifies their kernel, image, Instance type, and real
+Kapsule behavior through the same gates.
 Nodes must expose `statx(STATX_MNT_ID_UNIQUE)` (normally Linux 6.8 or a kernel
 with that primitive backported), `open_tree`, `move_mount`, `mount_setattr`,
 `fsopen`, `fsconfig`, and `fsmount`.

@@ -141,8 +141,8 @@ The public artifact coordinates are:
 - CSI driver name: `file-storage-subdir.csi.urlab.ai`;
 - controller/node image: `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
 - Helm OCI chart: `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`;
-- `csi-admin` Linux `amd64` and Linux `arm64` binaries: matching GitHub Release
-  assets in the source repository.
+- `csi-admin` Linux `amd64` binary: matching GitHub Release asset in the source
+  repository.
 
 Versions follow SemVer 2.0. Git tags and image tags use `vMAJOR.MINOR.PATCH`
 with normal SemVer prerelease suffixes such as `v0.1.0-rc.1`; CSI
@@ -188,24 +188,32 @@ last-applied annotation. Both defects now have focused regression coverage.
 
 Because RC13 contains the same startup defect and cannot safely serve as the
 N-1 predecessor, `v0.1.0-rc.14` is a supersedable bridge candidate carrying the
-correction. The intended full qualification candidate is `v0.1.0-rc.15`, using
-the exact public RC14 artifacts as its predecessor. Neither candidate is a
-production support claim until RC15 passes every Linux, kind, CSI, Helm, real
-Kapsule, and final-cleanup qualification gate.
+correction. RC15 used the exact public RC14 artifacts as its predecessor and
+passed artifact/install preflight, real `virtiofs`, and single-node-writer
+conflict before the 100-PVC scale scenario exposed a periodic lifecycle race:
+a creation repair dispatched from a stale `CreatingDirectory` snapshot reread
+an allocation that normal `CreateVolume` had already advanced to `Ready` and
+incorrectly degraded maintenance. The run stopped without data corruption and
+removed every run-owned cloud resource. The identity-valid `Ready` no-op
+specified in section 6.5 corrects that race. `v0.1.0-rc.16` is the next full
+qualification candidate and continues to use RC14 as its exact public
+predecessor. No candidate is a production support claim until RC16 passes every
+Linux, kind, CSI, Helm, real Kapsule, and final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
 commercial type for the first controlled run because it is the lowest-priced
 currently documented type with two File Storage slots; it does not enter the
 supported allowlist unless that exact run and its cleanup evidence pass.
 
-The v1 controller and node images support Linux `amd64` and Linux `arm64`.
-Release CI must compile both architectures, and the real-provider support matrix
-must retain evidence for every advertised architecture and Instance type. A
-different Linux architecture is unsupported until its descriptor-relative
-filesystem syscalls, mount-identity checks, image, and Kapsule behavior pass the
-same release gates; it must fail clearly rather than use a weaker path-based
-fallback. Operator-side `csi-admin` platforms remain a separate release-matrix
-decision.
+The v1 controller and node images support Linux `amd64` only. Release CI must
+compile that architecture, and the real-provider support matrix must retain
+evidence for every advertised Instance type. Linux `arm64` and every other
+architecture are unsupported until an explicit specification change qualifies
+their descriptor-relative filesystem syscalls, mount-identity checks, image,
+commercial Instance type, and real Kapsule behavior through the same release
+gates. An unsupported architecture must not receive a release image or operator
+binary and must never use a weaker path-based fallback. Operator-side
+`csi-admin` platforms remain a separate release-matrix decision.
 
 Every released chart must reference public images by immutable digest. Tags
 remain required as human-readable release metadata, but production manifests
@@ -230,11 +238,11 @@ their linked identity before runtime operation and before returning a successful
 `--version`. Release cross-compilation emits a per-binary JSON identity sidecar
 whose `commercialTypes` array exposes the same list, and a Go module manifest.
 The same invocation requires the deliberately configured public repository URL,
-emits an SPDX 2.3 SBOM plus unsigned SLSA provenance subjects for those twelve
+emits an SPDX 2.3 SBOM plus unsigned SLSA provenance subjects for those six
 files. The SBOM describes the project artifacts and deduplicates every embedded
-Go module/version reported by the four binaries as a `DEPENDS_ON` package; an
-empty dependency inventory is a release error. The invocation covers all
-fourteen files in the SHA-256 manifest. It never guesses
+Go module/version reported by the two binaries as a `DEPENDS_ON` package; an
+empty dependency inventory is a release error. The invocation covers all eight
+files in the SHA-256 manifest. It never guesses
 release coordinates. Container builds execute both binaries' version validation
 in the build stage. Signing/attestation, image and chart publication, and the
 final cross-artifact provenance remain separate mandatory release gates; an

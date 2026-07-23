@@ -27,9 +27,13 @@ must not be promoted. RC11/RC12 hardened repeated recovery and proved
 cross-node RWX, while the RC13 qualification attempt exposed a missing bounded
 same-process retry during fresh parent bootstrap and client-side Secret apply
 retaining credential bytes in an annotation. Those defects are corrected with
-focused regression coverage. RC14 is a bridge candidate so the intended full
-RC15 qualification can use a corrected public N-1 predecessor. Neither is a
-qualified production release until the exact RC15 artifacts pass every gate. The
+focused regression coverage. RC14 is a bridge candidate so RC15 could use a
+corrected public N-1 predecessor. RC15 reached the 100-PVC scale scenario and
+exposed a stale lifecycle-snapshot race while normal creation advanced to
+`Ready`; the run stopped and removed every run-owned cloud resource. That race
+now has focused regression coverage. RC16 is the next full qualification
+candidate and continues to use RC14 as its exact public predecessor. None is a
+qualified production release until the exact RC16 artifacts pass every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint
