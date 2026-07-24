@@ -262,21 +262,22 @@ func TestProviderAttachDetachProofRequiresFailClosedAndDualAbsence(t *testing.T)
 			{FilesystemID: "55555555-5555-4555-8555-555555555555", FilesystemStatus: "available", ReportedAttachments: 1,
 				AttachmentIDs: []string{"attach-b"}, ResourceIDs: []string{proofSecondNodeID[9:]}, ResourceTypes: []string{"instance_server"}, Zones: []string{"fr-par-1"}},
 		},
-		BootstrapCrash: ProviderBootstrapCrashProof{
+		BootstrapRestart: ProviderBootstrapRestartProof{
 			ParentFilesystemID: "55555555-5555-4555-8555-555555555555", LeaseUID: "77777777-7777-4777-8777-777777777777",
-			AttemptID: "88888888-8888-4888-8888-888888888888", ActiveClusterUID: "99999999-9999-4999-8999-999999999999",
-			ClaimTempPath:    "/.sfs-subdir-csi-owner.88888888-8888-4888-8888-888888888888.tmp",
-			ControllerPodUID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ControllerNodeName: "node-a",
-			ControllerNodeID: proofFirstNodeID, ControllerInstanceID: proofFirstNodeID[9:], ControllerZone: "fr-par-1",
-			AttachmentTransitionState: "attaching", ContainerRestartCountBefore: 0, ContainerRestartCountAfter: 1,
+			BootstrapAttemptID: "88888888-8888-4888-8888-888888888888", ActiveClusterUID: "99999999-9999-4999-8999-999999999999",
+			ClaimTempPath:                   "/.sfs-subdir-csi-owner.88888888-8888-4888-8888-888888888888.tmp",
+			ControllerPodUIDBeforeRestart:   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			ControllerPodUIDAfterRestart:    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			ControllerNodeNameBeforeRestart: "node-a", ControllerNodeNameAfterRestart: "node-b",
+			ControllerNodeIDBeforeRestart: proofFirstNodeID, ControllerNodeIDAfterRestart: proofSecondNodeID,
 			FinalClaimInstallationID: proofRunID, FinalClaimActiveClusterUID: "99999999-9999-4999-8999-999999999999",
 			FinalClaimParentFilesystemID: "55555555-5555-4555-8555-555555555555",
 			FinalClaimBootstrapAttemptID: "88888888-8888-4888-8888-888888888888",
-			InitialAttachmentAbsent:      true, JournalPrepared: true, AttachmentObserved: true,
-			ControllerProcessStopped: true, OwnerAbsentWhileStopped: true, AttachmentAvailableWhileStopped: true,
-			ControllerProcessKilled: true, SamePodRestarted: true, JournalClearedAfterRestart: true,
-			FinalClaimValid: true, TemporaryClaimAbsent: true, ServerAttachmentAvailable: true,
-			RegionalAttachmentAvailable: true, HelmUpgradeCompleted: true,
+			InitialAttachmentAbsent:      true, HelmUpgradeCompleted: true, JournalClearedBeforeRestart: true,
+			ClaimValidBeforeRestart: true, TemporaryClaimAbsentBeforeRestart: true, ControllerRestarted: true,
+			FinalClaimUnchangedAfterRestart: true, JournalClearedAfterRestart: true,
+			TemporaryClaimAbsentAfterRestart: true, ServerAttachmentAvailable: true,
+			RegionalAttachmentAvailable: true,
 		},
 		ForeignTest: ProviderForeignAttachProof{
 			DisposableInstanceID: "66666666-6666-4666-8666-666666666666",
@@ -289,11 +290,16 @@ func TestProviderAttachDetachProofRequiresFailClosedAndDualAbsence(t *testing.T)
 	if err := proof.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	proof.BootstrapCrash.OwnerAbsentWhileStopped = false
+	proof.BootstrapRestart.FinalClaimUnchangedAfterRestart = false
 	if err := proof.Validate(); err == nil {
-		t.Fatal("Validate(owner written before crash) error = nil")
+		t.Fatal("Validate(changed claim after restart) error = nil")
 	}
-	proof.BootstrapCrash.OwnerAbsentWhileStopped = true
+	proof.BootstrapRestart.FinalClaimUnchangedAfterRestart = true
+	proof.BootstrapRestart.ControllerNodeIDAfterRestart = "fr-par-1/cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(controller outside planned node inventory) error = nil")
+	}
+	proof.BootstrapRestart.ControllerNodeIDAfterRestart = proofSecondNodeID
 	proof.ForeignTest.RegionalAttachmentAbsent = false
 	if err := proof.Validate(); err == nil {
 		t.Fatal("Validate(regional attachment retained) error = nil")

@@ -279,9 +279,34 @@ executor now identifies the sole SBS volume at index `0`, proves its exact
 identity-checked list view only when the exact Instance read omits topology,
 and fails closed if two populated provider views disagree.
 
-`v0.1.0-rc.22` is the next full qualification candidate and continues to use
+RC22 passed artifact/install, real `virtiofs`, single-node-writer conflict, and
+the functional 100-PVC/20-minute soak checks, including 5,714 writes, 5,640
+reads, zero checksum failures, one controller restart, and one node-plugin
+restart. Its following bootstrap signal race observed that Scaleway had already
+completed the second-parent attachment and the controller had already installed
+the valid owner claim before the harness could stop the process. The CSI
+completed the Helm transaction safely, but the run admitted no 100-PVC scenario
+result because it had not proved the intended after-attach/before-claim
+interruption. Automatic cleanup removed all 100 scale volumes plus the exact
+terminal archive/retain records, completed safe uninstall with zero blockers,
+and removed the run-owned Private Network, cluster, node pool, two parents,
+disposable Instance, and root SBS volume. The final inventory and independent
+exact-ID reads confirmed all seven resources absent.
+
+RC22 demonstrates that a real-cloud qualification gate cannot depend on
+capturing an externally observed sub-second process window: provider timing can
+make the safe transition complete before the injector acts. The exact durable
+state with a prepared Lease journal, an accepted provider attachment, and no
+owner claim remains a mandatory deterministic recovery test. Real Kapsule
+qualification instead adds the fresh second parent through Helm, proves its
+immutable claim and cleared journal, restarts the complete controller
+Deployment after bootstrap, and proves the claim, mount, attachment, and
+journal remain correct. This preserves the safety guarantee without a flaky
+cloud signal race or a privileged `hostPID` injector.
+
+`v0.1.0-rc.23` is the next full qualification candidate and continues to use
 RC14 as its exact public predecessor. No candidate is a production support
-claim until RC22 passes every Linux, kind, CSI, Helm, real Kapsule, and
+claim until RC23 passes every Linux, kind, CSI, Helm, real Kapsule, and
 final-cleanup qualification gate.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
@@ -6634,19 +6659,15 @@ Kapsule matrix must:
 6. prove cross-node RWX, read-only rejection, `SINGLE_NODE_WRITER` conflict and
    handoff, and `archive`, `retain`, and `delete` behavior without changing a
    sibling volume;
-7. add the fresh second parent through Helm, interrupt the controller after the
-   provider accepted its first attachment but before the immutable owner claim,
-   and prove a restarted controller process with the same Pod UID and node
-   identity resumes the exact durable bootstrap attempt and completes the claim
-   without a temporary claim left behind. The fault injector is a temporary,
-   privileged and credential-free `hostPID` Pod on that exact disposable test
-   node; it must identify exactly one process by Pod UID cgroup plus the
-   complete immutable driver ENTRYPOINT in `argv[0]`, revalidate both
-   identities immediately before each signal, have no ServiceAccount token,
-   provider credential, or hostPath, and be removed immediately after the
-   restart proof. On success, failure, or interruption, the harness must resume
-   any stopped process, remove the injector, and wait for the bounded Helm
-   transaction to exit before cleanup evaluates release state;
+7. add the fresh second parent through Helm, prove its first real attachment,
+   immutable owner claim, absent temporary claim, and cleared bootstrap journal,
+   then restart the complete controller Deployment. Require a distinct
+   controller Pod UID after restart and prove the exact claim bytes remain
+   unchanged, the bootstrap journal and temporary claim remain absent, the
+   `virtiofs` mount is valid, and the Instance plus regional provider views
+   still report the exact available attachment. The deterministic
+   parent-bootstrap suite remains the authoritative gate for interruption after
+   provider attachment acceptance and before owner-claim creation;
 8. attach both parents to the exact standalone run-owned disposable Instance
    outside the Kubernetes node inventory, prove the controller fails closed
    before partial provisioning, detach those exact attachments, prove both
@@ -6720,6 +6741,9 @@ timing-sensitive cloud experiments:
 - interruption before and after every temporary-file fsync, no-replace rename,
   parent-directory fsync, allocation transition, ownership replacement,
   quarantine rename, GC remove marker, compaction, and checkpoint export;
+- parent bootstrap with the exact prepared Lease attempt and accepted provider
+  attachment but no owner claim, followed by restart recovery of that same
+  attempt without generating a new adoption identity;
 - two isolated installations racing for one parent, mismatched installation or
   cluster identity, missing/mismatched ownership state, foreign or orphan
   attachments, and published-node fencing while an Instance remains live;

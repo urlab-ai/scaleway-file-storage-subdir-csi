@@ -10,10 +10,10 @@ import (
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
 )
 
-func TestReadProviderBootstrapCrashProofRequiresExactRegularStrictJSON(t *testing.T) {
+func TestReadProviderBootstrapRestartProofRequiresExactRegularStrictJSON(t *testing.T) {
 	directory := t.TempDir()
-	path := filepath.Join(directory, "provider-bootstrap-crash.json")
-	want := e2erunner.ProviderBootstrapCrashProof{ParentFilesystemID: "11111111-1111-4111-8111-111111111111"}
+	path := filepath.Join(directory, "provider-bootstrap-restart.json")
+	want := e2erunner.ProviderBootstrapRestartProof{ParentFilesystemID: "11111111-1111-4111-8111-111111111111"}
 	encoded, err := canonicaljson.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
@@ -21,16 +21,16 @@ func TestReadProviderBootstrapCrashProofRequiresExactRegularStrictJSON(t *testin
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readProviderBootstrapCrashProof(directory)
+	got, err := readProviderBootstrapRestartProof(directory)
 	if err != nil || got.ParentFilesystemID != want.ParentFilesystemID {
-		t.Fatalf("readProviderBootstrapCrashProof() = %#v, %v", got, err)
+		t.Fatalf("readProviderBootstrapRestartProof() = %#v, %v", got, err)
 	}
 
 	if err := os.WriteFile(path, []byte(`{"unexpected":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readProviderBootstrapCrashProof(directory); err == nil {
-		t.Fatal("readProviderBootstrapCrashProof(unknown field) error = nil")
+	if _, err := readProviderBootstrapRestartProof(directory); err == nil {
+		t.Fatal("readProviderBootstrapRestartProof(unknown field) error = nil")
 	}
 
 	if err := os.Remove(path); err != nil {
@@ -43,12 +43,12 @@ func TestReadProviderBootstrapCrashProofRequiresExactRegularStrictJSON(t *testin
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readProviderBootstrapCrashProof(directory); err == nil {
-		t.Fatal("readProviderBootstrapCrashProof(symlink) error = nil")
+	if _, err := readProviderBootstrapRestartProof(directory); err == nil {
+		t.Fatal("readProviderBootstrapRestartProof(symlink) error = nil")
 	}
 }
 
-func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T) {
+func TestBootstrapRestartScenarioProvesFreshParentBeforeAndAfterControllerRestart(t *testing.T) {
 	working, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -58,57 +58,42 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 		t.Fatal(err)
 	}
 	contents := string(encoded)
-	start := strings.Index(contents, "bootstrap_crash_add_parent() {")
+	start := strings.Index(contents, "bootstrap_restart_add_parent() {")
 	end := strings.Index(contents, "\nscenario_scale() {")
 	if start < 0 || end <= start {
-		t.Fatal("bootstrap crash function boundary is missing")
+		t.Fatal("bootstrap restart function boundary is missing")
 	}
 	body := contents[start:end]
 	steps := []string{
 		`number_of_attachments == 0`,
-		`sfs-subdir-bootstrap-parent-filesystem-id`,
-		`hostPID: true`,
-		`privileged: true`,
-		`controller host process is absent or ambiguous`,
-		`kill -STOP "$pid"`,
-		`controller host process did not enter a stopped state`,
-		`parent owner claim existed before the injected controller crash`,
-		`bootstrap_available=`,
-		`kill -KILL "$pid"`,
-		`bootstrap_restart_after=`,
-		`bootstrap_journal_count=`,
-		`bootstrap_claim=`,
+		`bootstrap_lease_uid=`,
+		`helm_candidate "$bootstrap_parents"`,
+		`bootstrap_claim_before=`,
+		`bootstrap_lease_ready=`,
+		`bootstrap_server_before=`,
+		`rollout restart "$bootstrap_deployment"`,
+		`controller rollout did not leave exactly one active Ready Pod`,
+		`bootstrap_claim_after=`,
+		`[ "$bootstrap_claim_after" = "$bootstrap_claim_before" ]`,
+		`bootstrap_lease_after=`,
+		`bootstrap_server_after=`,
 	}
 	previous := -1
 	for _, step := range steps {
 		index := strings.Index(body, step)
 		if index <= previous {
-			t.Fatalf("bootstrap crash step %q is absent or out of order", step)
+			t.Fatalf("bootstrap restart step %q is absent or out of order", step)
 		}
 		previous = index
 	}
-	if strings.Contains(body, `kill -KILL 1`) || strings.Contains(body, `kill -STOP 1`) {
-		t.Fatal("bootstrap crash still signals namespace PID 1 from inside its own PID namespace")
+	for _, forbidden := range []string{"hostPID:", "privileged:", "kill -STOP", "kill -KILL", "bootstrap_fault_pod"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("bootstrap restart retains timing-sensitive fault injection %q", forbidden)
+		}
 	}
-	if strings.Contains(body, `"$process/exe"`) ||
-		!strings.Contains(body, `"$process/cmdline"`) ||
-		!strings.Contains(body, `[ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ]`) {
-		t.Fatal("bootstrap fault injector does not use the Kapsule-readable exact immutable ENTRYPOINT identity")
-	}
-	if strings.Count(body, `grep -Fq "$pod_uid" "$process/cgroup"`) != 3 ||
-		strings.Count(body, `[ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ]`) != 3 {
-		t.Fatal("bootstrap fault injector does not revalidate cgroup and ENTRYPOINT identity before both signals")
-	}
-	if !strings.Contains(body, `automountServiceAccountToken: false`) ||
-		!strings.Contains(body, `privileged: true`) ||
-		strings.Contains(body, `hostPath:`) ||
-		strings.Contains(body, `SCW_ACCESS_KEY`) ||
-		strings.Contains(body, `SCW_SECRET_KEY`) {
-		t.Fatal("bootstrap fault injector does not retain its temporary credential-free boundary")
-	}
-	if strings.Contains(body, `kill "$bootstrap_upgrade_pid"`) ||
-		!strings.Contains(body, `wait "$bootstrap_upgrade_pid"`) {
-		t.Fatal("bootstrap cleanup can leave the bounded Helm transaction running")
+	if strings.Count(body, `s file attachment list`) != 3 ||
+		strings.Count(body, `findmnt -n -t virtiofs`) != 2 {
+		t.Fatal("bootstrap restart does not prove provider and mount state before and after restart")
 	}
 
 	scaleStart := end + 1
@@ -117,12 +102,12 @@ func TestBootstrapCrashScenarioOrdersRealAttachBeforeSamePodRestart(t *testing.T
 		t.Fatal("scale scenario boundary is missing")
 	}
 	scale := contents[scaleStart : scaleStart+scaleEnd]
-	if !strings.Contains(scale, "bootstrap_crash_add_parent") {
-		t.Fatal("100-PVC scenario does not hand the still-fresh second parent to the bootstrap crash scenario")
+	if !strings.Contains(scale, "bootstrap_restart_add_parent") {
+		t.Fatal("100-PVC scenario does not hand the still-fresh second parent to the bootstrap restart scenario")
 	}
 }
 
-func TestNMinusOneUpgradeLeavesSecondParentFreshForBootstrapCrash(t *testing.T) {
+func TestNMinusOneUpgradeLeavesSecondParentFreshForBootstrapRestart(t *testing.T) {
 	working, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

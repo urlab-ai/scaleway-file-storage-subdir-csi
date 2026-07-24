@@ -135,6 +135,7 @@ func TestBuildReleaseCandidatePlansOneRunOwnedDisposableInstance(t *testing.T) {
 		"delete and recreate the dedicated run-owned driver namespace for checkpoint recovery",
 		"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",
 		"decommission, detach, and remove the second run-owned parent from the driver configuration",
+		"add the fresh second parent and restart the controller after its ownership claim is complete",
 	} {
 		if !slices.Contains(plan.DestructiveOperations, operation) {
 			t.Fatalf("release-candidate destructive operations omit %q: %#v", operation, plan.DestructiveOperations)

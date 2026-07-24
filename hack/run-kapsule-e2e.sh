@@ -455,7 +455,7 @@ controller_path_absent() {
 prepare_n_minus_one_upgrade() {
   upgrade_prepared="$evidence_dir/.n-minus-one-upgrade-prepared.json"
   # The immutable driver digest makes the N-1 and candidate node generations
-  # distinct. Keep parent B completely fresh for the later bootstrap-crash
+  # distinct. Keep parent B completely fresh for the later bootstrap-restart
   # proof instead of using a storage-topology change as a version surrogate.
   upgrade_parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"}]"
   upgrade_node=$(one_name daemonset node)
@@ -1029,37 +1029,11 @@ scenario_single_node_writer() {
   trap - EXIT HUP INT TERM
 }
 
-bootstrap_crash_add_parent() {
-  bootstrap_proof="$evidence_dir/provider-bootstrap-crash.json"
+bootstrap_restart_add_parent() {
+  bootstrap_proof="$evidence_dir/provider-bootstrap-restart.json"
   bootstrap_upgrade_log="$evidence_dir/provider-bootstrap-helm.log"
   bootstrap_parent_root="/var/lib/scaleway-sfs-subdir-csi/controller-parents/$parent_b"
   bootstrap_owner_path="$bootstrap_parent_root/.sfs-subdir-csi-owner.json"
-  bootstrap_upgrade_pid=
-  bootstrap_fault_pod=
-  bootstrap_host_pid=
-  bootstrap_process_stopped=false
-
-  bootstrap_cleanup() {
-    if [ "$bootstrap_process_stopped" = true ] && [ -n "$bootstrap_fault_pod" ] && [ -n "$bootstrap_host_pid" ]; then
-      k -n "$namespace" exec "$bootstrap_fault_pod" -- sh -c 'kill -CONT "$1"' sh "$bootstrap_host_pid" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$bootstrap_fault_pod" ]; then
-      k -n "$namespace" delete "pod/$bootstrap_fault_pod" --ignore-not-found --wait=true --timeout=2m >/dev/null 2>&1 || true
-    fi
-    if [ -n "$bootstrap_upgrade_pid" ] && kill -0 "$bootstrap_upgrade_pid" 2>/dev/null; then
-      # helm_candidate has its own bounded timeout. Wait for that complete
-      # transaction instead of killing only the background shell while its
-      # Helm child continues to mutate the release during cleanup.
-      wait "$bootstrap_upgrade_pid" 2>/dev/null || true
-    fi
-  }
-  bootstrap_interrupted() {
-    bootstrap_cleanup
-    trap - EXIT HUP INT TERM
-    exit 130
-  }
-  trap bootstrap_cleanup EXIT
-  trap bootstrap_interrupted HUP INT TERM
 
   bootstrap_parent_before=$(s file filesystem get filesystem-id="$parent_b" region="$region" -o json)
   printf '%s' "$bootstrap_parent_before" | "$JQ" -e --arg parent "$parent_b" '
@@ -1070,280 +1044,112 @@ bootstrap_crash_add_parent() {
   k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json | "$JQ" -e '
     [.metadata.annotations | to_entries[] | select(.key | startswith("sfs-subdir-bootstrap-"))] | length == 0
   ' >/dev/null
+  bootstrap_lease_before=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
+  bootstrap_lease_uid=$(printf '%s' "$bootstrap_lease_before" | "$JQ" -er '.metadata.uid')
 
   bootstrap_parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"},{\"id\":\"$parent_b\",\"name\":\"e2e-parent-b\",\"state\":\"active\"}]"
-  helm_candidate "$bootstrap_parents" >"$bootstrap_upgrade_log" 2>&1 &
-  bootstrap_upgrade_pid=$!
-
-  bootstrap_deadline=$(( $(date +%s) + 600 ))
-  while :; do
-    bootstrap_lease=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
-    bootstrap_journal_parent=$(printf '%s' "$bootstrap_lease" | "$JQ" -r '.metadata.annotations["sfs-subdir-bootstrap-parent-filesystem-id"] // ""')
-    if [ "$bootstrap_journal_parent" = "$parent_b" ]; then
-      bootstrap_phase=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-phase"]')
-      [ "$bootstrap_phase" = Prepared ]
-      bootstrap_lease_uid=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.uid')
-      bootstrap_attempt=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-attempt-id"]')
-      bootstrap_cluster_uid=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-active-cluster-uid"]')
-      bootstrap_temp_path=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-claim-temp-path"]')
-      bootstrap_node_id=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-controller-node-id"]')
-      bootstrap_instance=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-controller-instance-id"]')
-      bootstrap_zone=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations["sfs-subdir-bootstrap-controller-zone"]')
-      bootstrap_holder=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.spec.holderIdentity')
-      [ "$bootstrap_temp_path" = "/.sfs-subdir-csi-owner.$bootstrap_attempt.tmp" ]
-      [ "$bootstrap_node_id" = "$bootstrap_zone/$bootstrap_instance" ]
-      break
-    fi
-    if ! kill -0 "$bootstrap_upgrade_pid" 2>/dev/null; then
-      if wait "$bootstrap_upgrade_pid"; then
-        bootstrap_upgrade_status=0
-      else
-        bootstrap_upgrade_status=$?
-      fi
-      bootstrap_upgrade_pid=
-      cat "$bootstrap_upgrade_log" >&2
-      echo "Helm upgrade ended with status $bootstrap_upgrade_status before the parent bootstrap journal appeared" >&2
-      return 1
-    fi
-    [ "$(date +%s)" -lt "$bootstrap_deadline" ] || {
-      echo "timed out waiting for the prepared parent bootstrap journal" >&2
-      return 1
-    }
-    sleep 1
-  done
-
-  bootstrap_pod_json=$(k -n "$namespace" get pods -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o json | "$JQ" -e -c --arg uid "$bootstrap_holder" '
-    [.items[] | select(.metadata.uid == $uid)] |
-    if length == 1 then .[0] else error("prepared bootstrap holder Pod is absent or ambiguous") end
-  ')
-  bootstrap_pod=$(printf '%s' "$bootstrap_pod_json" | "$JQ" -er '.metadata.name')
-  bootstrap_pod_uid=$(printf '%s' "$bootstrap_pod_json" | "$JQ" -er '.metadata.uid')
-  bootstrap_node_name=$(printf '%s' "$bootstrap_pod_json" | "$JQ" -er '.spec.nodeName')
-  bootstrap_restart_before=$(printf '%s' "$bootstrap_pod_json" | "$JQ" -er '
-    [.status.containerStatuses[] | select(.name == "driver")] |
-    if length == 1 then .[0].restartCount else error("driver container status is absent or ambiguous") end
-  ')
-
-  # PID 1 in a PID namespace ignores unhandled SIGSTOP and SIGKILL sent from
-  # another process in that same namespace. Kapsule also denies cross-container
-  # signals from a hostPID container with only CAP_KILL. Use a short-lived
-  # privileged, credential-free hostPID Pod on the exact disposable test node
-  # so the signals originate from the ancestor PID namespace without the
-  # managed runtime confinement that rejected the narrower profile. Exact
-  # cgroup and immutable ENTRYPOINT checks below fence every signal. The Pod has
-  # no service-account token, provider credential, or hostPath and is removed
-  # immediately after the restart proof.
-  bootstrap_fault_pod="e2e-bootstrap-fault-$short_run"
-  k -n "$namespace" apply -f - <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: $bootstrap_fault_pod
-  labels:
-    sfs-subdir-e2e-run: "$run_id"
-    sfs-subdir-e2e-scenario: bootstrap-crash
-spec:
-  automountServiceAccountToken: false
-  hostPID: true
-  nodeName: $bootstrap_node_name
-  restartPolicy: Never
-  containers:
-    - name: fault-injector
-      image: $workload_image
-      command: ["/bin/sh", "-c"]
-      args: ["trap 'exit 0' TERM INT; sleep 3600 & wait"]
-      securityContext:
-        privileged: true
-        readOnlyRootFilesystem: true
-        runAsNonRoot: false
-        runAsUser: 0
-EOF
-  k -n "$namespace" wait "pod/$bootstrap_fault_pod" --for=condition=Ready --timeout=5m
-
-  bootstrap_cgroup_uid=$(printf '%s' "$bootstrap_pod_uid" | tr '-' '_')
-  bootstrap_host_pid=$(k -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
-    pod_uid=$1
-    cgroup_uid=$2
-    matches=
-    for process in /proc/[0-9]*; do
-      [ -r "$process/cgroup" ] || continue
-      if ! grep -Fq "$pod_uid" "$process/cgroup" && ! grep -Fq "$cgroup_uid" "$process/cgroup"; then
-        continue
-      fi
-      # Kapsule exposes the host process table to this least-privilege Pod but
-      # denies /proc/<pid>/exe without CAP_SYS_PTRACE. The immutable image
-      # ENTRYPOINT remains available as argv[0]. Match its complete path, not a
-      # truncated comm value or a user-controlled substring.
-      [ -r "$process/cmdline" ] || continue
-      entrypoint=$(tr "\000" "\n" <"$process/cmdline" 2>/dev/null | sed -n "1p")
-      [ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ] || continue
-      pid=${process#/proc/}
-      matches="$matches $pid"
-    done
-    set -- $matches
-    [ "$#" -eq 1 ] || {
-      echo "controller host process is absent or ambiguous" >&2
-      exit 1
-    }
-    printf "%s" "$1"
-  ' sh "$bootstrap_pod_uid" "$bootstrap_cgroup_uid")
-  printf '%s\n' "$bootstrap_host_pid" | grep -Eq '^[1-9][0-9]*$'
-
-  bootstrap_deadline=$(( $(date +%s) + 600 ))
-  while :; do
-    bootstrap_server=$(s instance server get server-id="$bootstrap_instance" zone="$bootstrap_zone" -o json)
-    bootstrap_transition=$(printf '%s' "$bootstrap_server" | "$JQ" -r --arg parent "$parent_b" '
-      [(.filesystems // .server.filesystems // [])[] | select(.filesystem_id == $parent)] |
-      if length == 0 then "" elif length == 1 then .[0].state else error("bootstrap parent is attached more than once") end
-    ')
-    if [ -n "$bootstrap_transition" ]; then
-      [ "$bootstrap_transition" = attaching ] || [ "$bootstrap_transition" = available ]
-      k --request-timeout=15s -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
-        pid=$1
-        pod_uid=$2
-        cgroup_uid=$3
-        process=/proc/$pid
-        [ -r "$process/cgroup" ]
-        grep -Fq "$pod_uid" "$process/cgroup" || grep -Fq "$cgroup_uid" "$process/cgroup"
-        [ -r "$process/cmdline" ]
-        entrypoint=$(tr "\000" "\n" <"$process/cmdline" 2>/dev/null | sed -n "1p")
-        [ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ] || {
-          echo "controller host process identity changed before stop" >&2
-          exit 1
-        }
-        kill -STOP "$pid"
-        attempts=0
-        while [ "$attempts" -lt 100 ]; do
-          state=$(sed -n "s/^State:[[:space:]]*\\([^[:space:]]\\).*/\\1/p" "/proc/$pid/status")
-          if [ "$state" = T ] || [ "$state" = t ]; then
-            exit 0
-          fi
-          attempts=$((attempts + 1))
-          sleep 0.1
-        done
-        echo "controller host process did not enter a stopped state" >&2
-        exit 1
-      ' sh "$bootstrap_host_pid" "$bootstrap_pod_uid" "$bootstrap_cgroup_uid"
-      bootstrap_process_stopped=true
-      break
-    fi
-    [ "$(date +%s)" -lt "$bootstrap_deadline" ] || {
-      echo "timed out waiting for the real bootstrap attachment transition" >&2
-      return 1
-    }
-    sleep 0.2
-  done
-
-  if ! k --request-timeout=15s -n "$namespace" exec "$bootstrap_pod" -c driver -- sh -c 'test ! -e "$1"' sh "$bootstrap_owner_path"; then
-    echo "parent owner claim existed before the injected controller crash" >&2
-    return 1
-  fi
-
-  bootstrap_deadline=$(( $(date +%s) + 600 ))
-  while :; do
-    bootstrap_server=$(s instance server get server-id="$bootstrap_instance" zone="$bootstrap_zone" -o json)
-    bootstrap_available=$(printf '%s' "$bootstrap_server" | "$JQ" -r --arg parent "$parent_b" '
-      [(.filesystems // .server.filesystems // [])[] | select(.filesystem_id == $parent and .state == "available")] | length
-    ')
-    [ "$bootstrap_available" = 1 ] && break
-    [ "$(date +%s)" -lt "$bootstrap_deadline" ] || {
-      echo "timed out waiting for the stopped bootstrap attachment to become available" >&2
-      return 1
-    }
-    sleep 1
-  done
-  bootstrap_regional=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json)
-  bootstrap_attachment_id=$(printf '%s' "$bootstrap_regional" | "$JQ" -er --arg parent "$parent_b" --arg instance "$bootstrap_instance" --arg zone "$bootstrap_zone" '
-    [.[] | select(.filesystem_id == $parent and .resource_id == $instance and .resource_type == "instance_server" and .zone == $zone)] |
-    if length == 1 then .[0].id else error("regional bootstrap attachment is absent or ambiguous") end
-  ')
-  [ -n "$bootstrap_attachment_id" ]
-
-  k --request-timeout=15s -n "$namespace" exec "$bootstrap_fault_pod" -- sh -ec '
-    pid=$1
-    pod_uid=$2
-    cgroup_uid=$3
-    process=/proc/$pid
-    [ -r "$process/cgroup" ]
-    grep -Fq "$pod_uid" "$process/cgroup" || grep -Fq "$cgroup_uid" "$process/cgroup"
-    [ -r "$process/cmdline" ]
-    entrypoint=$(tr "\000" "\n" <"$process/cmdline" 2>/dev/null | sed -n "1p")
-    [ "$entrypoint" = /usr/local/bin/scaleway-sfs-subdir-csi ] || {
-      echo "controller host process identity changed before kill" >&2
-      exit 1
-    }
-    state=$(sed -n "s/^State:[[:space:]]*\\([^[:space:]]\\).*/\\1/p" "/proc/$pid/status")
-    { [ "$state" = T ] || [ "$state" = t ]; }
-    kill -KILL "$pid"
-  ' sh "$bootstrap_host_pid" "$bootstrap_pod_uid" "$bootstrap_cgroup_uid"
-  bootstrap_process_stopped=false
-
-  bootstrap_deadline=$(( $(date +%s) + 900 ))
-  while :; do
-    bootstrap_restarted_pod=$(k -n "$namespace" get "pod/$bootstrap_pod" -o json)
-    bootstrap_restarted_uid=$(printf '%s' "$bootstrap_restarted_pod" | "$JQ" -er '.metadata.uid')
-    bootstrap_restart_after=$(printf '%s' "$bootstrap_restarted_pod" | "$JQ" -er '
-      [.status.containerStatuses[] | select(.name == "driver")] |
-      if length == 1 then .[0].restartCount else error("restarted driver container status is absent or ambiguous") end
-    ')
-    bootstrap_ready=$(printf '%s' "$bootstrap_restarted_pod" | "$JQ" -r '[.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length')
-    bootstrap_lease_after=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
-    bootstrap_journal_count=$(printf '%s' "$bootstrap_lease_after" | "$JQ" -r '[.metadata.annotations | to_entries[] | select(.key | startswith("sfs-subdir-bootstrap-"))] | length')
-    if [ "$bootstrap_restarted_uid" = "$bootstrap_pod_uid" ] && [ "$bootstrap_restart_after" -gt "$bootstrap_restart_before" ] &&
-       [ "$bootstrap_ready" = 1 ] && [ "$bootstrap_journal_count" = 0 ]; then
-      break
-    fi
-    [ "$(date +%s)" -lt "$bootstrap_deadline" ] || {
-      echo "timed out waiting for exact same-Pod bootstrap recovery" >&2
-      return 1
-    }
-    sleep 2
-  done
-
-  k -n "$namespace" delete "pod/$bootstrap_fault_pod" --wait=true --timeout=2m
-  bootstrap_fault_pod=
-  bootstrap_host_pid=
-
-  if wait "$bootstrap_upgrade_pid"; then
-    bootstrap_upgrade_status=0
-  else
-    bootstrap_upgrade_status=$?
-    bootstrap_upgrade_pid=
+  if ! helm_candidate "$bootstrap_parents" >"$bootstrap_upgrade_log" 2>&1; then
     cat "$bootstrap_upgrade_log" >&2
-    echo "Helm parent-pool upgrade failed after bootstrap recovery with status $bootstrap_upgrade_status" >&2
+    echo "Helm parent-pool upgrade failed before the fresh parent became ready" >&2
     return 1
   fi
-  bootstrap_upgrade_pid=
   chmod 600 "$bootstrap_upgrade_log"
 
-  bootstrap_claim=$(k -n "$namespace" exec "$bootstrap_pod" -c driver -- sh -c 'cat "$1"' sh "$bootstrap_owner_path")
-  printf '%s' "$bootstrap_claim" | "$JQ" -e --arg run "$run_id" --arg cluster "$bootstrap_cluster_uid" --arg parent "$parent_b" --arg attempt "$bootstrap_attempt" '
+  bootstrap_controller_before=$(one_name pod controller)
+  bootstrap_pod_before=$(k -n "$namespace" get "$bootstrap_controller_before" -o json)
+  bootstrap_pod_uid_before=$(printf '%s' "$bootstrap_pod_before" | "$JQ" -er '.metadata.uid')
+  bootstrap_node_name_before=$(printf '%s' "$bootstrap_pod_before" | "$JQ" -er '.spec.nodeName')
+  bootstrap_node_id_before=$(node_id_for_name "$bootstrap_node_name_before")
+  bootstrap_instance_before=$(printf '%s' "$bootstrap_node_id_before" | cut -d/ -f2)
+  bootstrap_zone_before=$(printf '%s' "$bootstrap_node_id_before" | cut -d/ -f1)
+
+  bootstrap_claim_before=$(k -n "$namespace" exec "$bootstrap_controller_before" -c driver -- sh -c 'cat "$1"' sh "$bootstrap_owner_path")
+  bootstrap_attempt=$(printf '%s' "$bootstrap_claim_before" | "$JQ" -er '.bootstrapAttemptID')
+  bootstrap_cluster_uid=$(printf '%s' "$bootstrap_claim_before" | "$JQ" -er '.activeClusterUID')
+  bootstrap_temp_path="/.sfs-subdir-csi-owner.$bootstrap_attempt.tmp"
+  printf '%s' "$bootstrap_claim_before" | "$JQ" -e --arg run "$run_id" --arg cluster "$bootstrap_cluster_uid" --arg parent "$parent_b" --arg attempt "$bootstrap_attempt" '
     .installationID == $run and .activeClusterUID == $cluster and .parentFilesystemID == $parent and
     .bootstrapAttemptID == $attempt and .schemaVersion == "1" and .revision == 1 and
     .leadershipLeaseName == "scaleway-sfs-subdir-csi-controller" and
     (.contentChecksum | test("^sha256:[0-9a-f]{64}$"))
   ' >/dev/null
-  k -n "$namespace" exec "$bootstrap_pod" -c driver -- sh -c 'test ! -e "$1"' sh "$bootstrap_parent_root$bootstrap_temp_path"
-  k -n "$namespace" exec "$bootstrap_pod" -c driver -- findmnt -n -t virtiofs -T "$bootstrap_parent_root" >/dev/null
+  bootstrap_lease_ready=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
+  printf '%s' "$bootstrap_lease_ready" | "$JQ" -e --arg uid "$bootstrap_lease_uid" '
+    .metadata.uid == $uid and
+    ([.metadata.annotations | to_entries[] | select(.key | startswith("sfs-subdir-bootstrap-"))] | length == 0)
+  ' >/dev/null
+  k -n "$namespace" exec "$bootstrap_controller_before" -c driver -- sh -c 'test ! -e "$1"' sh "$bootstrap_parent_root$bootstrap_temp_path"
+  k -n "$namespace" exec "$bootstrap_controller_before" -c driver -- findmnt -n -t virtiofs -T "$bootstrap_parent_root" >/dev/null
 
-  "$JQ" -n -c --arg parent "$parent_b" --arg lease_uid "$bootstrap_lease_uid" --arg attempt "$bootstrap_attempt" \
-    --arg cluster "$bootstrap_cluster_uid" --arg temp "$bootstrap_temp_path" --arg pod_uid "$bootstrap_pod_uid" \
-    --arg node_name "$bootstrap_node_name" --arg node_id "$bootstrap_node_id" --arg instance "$bootstrap_instance" \
-    --arg zone "$bootstrap_zone" --arg transition "$bootstrap_transition" --arg run "$run_id" \
-    --argjson restart_before "$bootstrap_restart_before" --argjson restart_after "$bootstrap_restart_after" '
-      {parentFilesystemId:$parent,leaseUid:$lease_uid,attemptId:$attempt,activeClusterUid:$cluster,claimTempPath:$temp,
-       controllerPodUid:$pod_uid,controllerNodeName:$node_name,controllerNodeId:$node_id,controllerInstanceId:$instance,
-       controllerZone:$zone,attachmentTransitionState:$transition,containerRestartCountBefore:$restart_before,
-       containerRestartCountAfter:$restart_after,finalClaimInstallationId:$run,finalClaimActiveClusterUid:$cluster,
+  bootstrap_server_before=$(s instance server get server-id="$bootstrap_instance_before" zone="$bootstrap_zone_before" -o json)
+  printf '%s' "$bootstrap_server_before" | "$JQ" -e --arg parent "$parent_b" '
+    [(.filesystems // .server.filesystems // [])[] | select(.filesystem_id == $parent and .state == "available")] | length == 1
+  ' >/dev/null
+  bootstrap_regional_before_restart=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json)
+  printf '%s' "$bootstrap_regional_before_restart" | "$JQ" -e --arg parent "$parent_b" --arg instance "$bootstrap_instance_before" --arg zone "$bootstrap_zone_before" '
+    [.[] | select(.filesystem_id == $parent and .resource_id == $instance and .resource_type == "instance_server" and .zone == $zone)] | length == 1
+  ' >/dev/null
+
+  bootstrap_deployment=$(one_name deployment controller)
+  k -n "$namespace" rollout restart "$bootstrap_deployment"
+  k -n "$namespace" rollout status "$bootstrap_deployment" --timeout=20m
+  # A completed Deployment rollout can briefly retain the terminating old Pod.
+  # Select the one non-terminating Ready controller instead of depending on
+  # object-list timing.
+  bootstrap_controller_after=$(k -n "$namespace" get pods \
+    -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o json | "$JQ" -er '
+      .items |
+      map(select(.metadata.deletionTimestamp == null) |
+          select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))) |
+      if length == 1 then "pod/" + .[0].metadata.name
+      else error("controller rollout did not leave exactly one active Ready Pod")
+      end
+    ')
+  bootstrap_pod_after=$(k -n "$namespace" get "$bootstrap_controller_after" -o json)
+  bootstrap_pod_uid_after=$(printf '%s' "$bootstrap_pod_after" | "$JQ" -er '.metadata.uid')
+  [ "$bootstrap_pod_uid_after" != "$bootstrap_pod_uid_before" ]
+  bootstrap_node_name_after=$(printf '%s' "$bootstrap_pod_after" | "$JQ" -er '.spec.nodeName')
+  bootstrap_node_id_after=$(node_id_for_name "$bootstrap_node_name_after")
+  bootstrap_instance_after=$(printf '%s' "$bootstrap_node_id_after" | cut -d/ -f2)
+  bootstrap_zone_after=$(printf '%s' "$bootstrap_node_id_after" | cut -d/ -f1)
+
+  bootstrap_claim_after=$(k -n "$namespace" exec "$bootstrap_controller_after" -c driver -- sh -c 'cat "$1"' sh "$bootstrap_owner_path")
+  [ "$bootstrap_claim_after" = "$bootstrap_claim_before" ]
+  bootstrap_lease_after=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
+  printf '%s' "$bootstrap_lease_after" | "$JQ" -e --arg uid "$bootstrap_lease_uid" '
+    .metadata.uid == $uid and
+    ([.metadata.annotations | to_entries[] | select(.key | startswith("sfs-subdir-bootstrap-"))] | length == 0)
+  ' >/dev/null
+  k -n "$namespace" exec "$bootstrap_controller_after" -c driver -- sh -c 'test ! -e "$1"' sh "$bootstrap_parent_root$bootstrap_temp_path"
+  k -n "$namespace" exec "$bootstrap_controller_after" -c driver -- findmnt -n -t virtiofs -T "$bootstrap_parent_root" >/dev/null
+
+  bootstrap_server_after=$(s instance server get server-id="$bootstrap_instance_after" zone="$bootstrap_zone_after" -o json)
+  printf '%s' "$bootstrap_server_after" | "$JQ" -e --arg parent "$parent_b" '
+    [(.filesystems // .server.filesystems // [])[] | select(.filesystem_id == $parent and .state == "available")] | length == 1
+  ' >/dev/null
+  bootstrap_regional_after=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json)
+  printf '%s' "$bootstrap_regional_after" | "$JQ" -e --arg parent "$parent_b" --arg instance "$bootstrap_instance_after" --arg zone "$bootstrap_zone_after" '
+    [.[] | select(.filesystem_id == $parent and .resource_id == $instance and .resource_type == "instance_server" and .zone == $zone)] | length == 1
+  ' >/dev/null
+
+  "$JQ" -n -c --arg parent "$parent_b" --arg lease_uid "$bootstrap_lease_uid" \
+    --arg attempt "$bootstrap_attempt" --arg cluster "$bootstrap_cluster_uid" --arg temp "$bootstrap_temp_path" \
+    --arg pod_before "$bootstrap_pod_uid_before" --arg pod_after "$bootstrap_pod_uid_after" \
+    --arg node_name_before "$bootstrap_node_name_before" --arg node_name_after "$bootstrap_node_name_after" \
+    --arg node_id_before "$bootstrap_node_id_before" --arg node_id_after "$bootstrap_node_id_after" --arg run "$run_id" '
+      {parentFilesystemId:$parent,leaseUid:$lease_uid,bootstrapAttemptId:$attempt,activeClusterUid:$cluster,claimTempPath:$temp,
+       controllerPodUidBeforeRestart:$pod_before,controllerPodUidAfterRestart:$pod_after,
+       controllerNodeNameBeforeRestart:$node_name_before,controllerNodeNameAfterRestart:$node_name_after,
+       controllerNodeIdBeforeRestart:$node_id_before,controllerNodeIdAfterRestart:$node_id_after,
+       finalClaimInstallationId:$run,finalClaimActiveClusterUid:$cluster,
        finalClaimParentFilesystemId:$parent,finalClaimBootstrapAttemptId:$attempt,initialAttachmentAbsent:true,
-       journalPrepared:true,attachmentObserved:true,controllerProcessStopped:true,ownerAbsentWhileStopped:true,
-       attachmentAvailableWhileStopped:true,controllerProcessKilled:true,samePodRestarted:true,
-       journalClearedAfterRestart:true,finalClaimValid:true,temporaryClaimAbsent:true,
-       serverAttachmentAvailable:true,regionalAttachmentAvailable:true,helmUpgradeCompleted:true}
+       helmUpgradeCompleted:true,journalClearedBeforeRestart:true,claimValidBeforeRestart:true,
+       temporaryClaimAbsentBeforeRestart:true,controllerRestarted:true,finalClaimUnchangedAfterRestart:true,
+       journalClearedAfterRestart:true,temporaryClaimAbsentAfterRestart:true,
+       serverAttachmentAvailable:true,regionalAttachmentAvailable:true}
     ' >"$bootstrap_proof.tmp"
   chmod 600 "$bootstrap_proof.tmp"
   mv "$bootstrap_proof.tmp" "$bootstrap_proof"
-  trap - EXIT HUP INT TERM
 }
 
 run_scale_soak() {
@@ -1658,7 +1464,7 @@ scenario_scale() {
   mv "$proof.tmp" "$proof"
 
   k -n "$namespace" delete pod -l "$scale_selector" --wait=true --timeout=20m
-  bootstrap_crash_add_parent
+  bootstrap_restart_add_parent
 }
 
 scenario_controller_failure() {

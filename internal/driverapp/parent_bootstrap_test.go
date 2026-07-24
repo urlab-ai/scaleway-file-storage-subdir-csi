@@ -205,12 +205,15 @@ func TestParentBootstrapFreshClaimPersistsJournalBeforeAttachAndClearsAfterClaim
 	}
 }
 
-func TestParentBootstrapResumeReplaysExactLeaseCASWithoutNewAttempt(t *testing.T) {
+func TestParentBootstrapResumesAfterProviderAttachmentBeforeOwnerClaim(t *testing.T) {
 	manager, leadership, _, filesystem, ids, parentID := parentBootstrapTestManager(t)
 	attempt := bootstrapAttemptForManager(t, manager, parentID, "77777777-7777-4777-8777-777777777777")
 	annotations, _ := attempt.Annotations()
 	leadership.snapshot.Annotations = annotations
 	seedBootstrapProviderAttachment(manager.provider.(*scaleway.FakeAPI), manager.localNodeID, parentID)
+	if filesystem.claimPresent {
+		t.Fatal("crash-window fixture unexpectedly starts with an owner claim")
+	}
 
 	if err := manager.EnsureClaimed(context.Background(), parentID); err != nil {
 		t.Fatalf("EnsureClaimed(resume) error = %v", err)
@@ -224,8 +227,9 @@ func TestParentBootstrapResumeReplaysExactLeaseCASWithoutNewAttempt(t *testing.T
 	if filesystem.claim.BootstrapAttemptID != attempt.AttemptID {
 		t.Fatalf("resumed claim attempt = %q", filesystem.claim.BootstrapAttemptID)
 	}
-	if len(*leadership.events) == 0 || (*leadership.events)[0] != "set" {
-		t.Fatalf("resume did not prove Lease before attach: %#v", *leadership.events)
+	wantOrder := []string{"set", "mount", "read", "inspect", "install", "read", "remove-temp", "clear", "layout", "close"}
+	if !slices.Equal(*leadership.events, wantOrder) {
+		t.Fatalf("resume after provider attachment events = %#v, want %#v", *leadership.events, wantOrder)
 	}
 }
 

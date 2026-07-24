@@ -215,14 +215,14 @@ type NodeDrainProof struct {
 // The driver must fail closed while that Instance is outside the Kubernetes
 // inventory and recover only after both provider surfaces prove detachment.
 type ProviderAttachDetachProof struct {
-	SchemaVersion  string                      `json:"schemaVersion"`
-	Scenario       string                      `json:"scenario"`
-	RunID          string                      `json:"runId"`
-	ObservedAt     string                      `json:"observedAt"`
-	PlannedNodeIDs []string                    `json:"plannedNodeIds"`
-	Parents        []ProviderParentProof       `json:"parents"`
-	BootstrapCrash ProviderBootstrapCrashProof `json:"bootstrapCrash"`
-	ForeignTest    ProviderForeignAttachProof  `json:"foreignTest"`
+	SchemaVersion    string                        `json:"schemaVersion"`
+	Scenario         string                        `json:"scenario"`
+	RunID            string                        `json:"runId"`
+	ObservedAt       string                        `json:"observedAt"`
+	PlannedNodeIDs   []string                      `json:"plannedNodeIds"`
+	Parents          []ProviderParentProof         `json:"parents"`
+	BootstrapRestart ProviderBootstrapRestartProof `json:"bootstrapRestart"`
+	ForeignTest      ProviderForeignAttachProof    `json:"foreignTest"`
 }
 
 // ProviderParentProof retains the agreeing regional attachment identities for
@@ -253,42 +253,38 @@ type ProviderForeignAttachProof struct {
 	PVCBoundAfterDetach        bool     `json:"pvcBoundAfterDetach"`
 }
 
-// ProviderBootstrapCrashProof records a real first-claim interruption after
-// the provider accepted the attachment but before the immutable parent claim
-// existed. A restarted controller process in the same Pod and on the same node
-// must resume the exact durable Lease journal.
-type ProviderBootstrapCrashProof struct {
-	ParentFilesystemID              string `json:"parentFilesystemId"`
-	LeaseUID                        string `json:"leaseUid"`
-	AttemptID                       string `json:"attemptId"`
-	ActiveClusterUID                string `json:"activeClusterUid"`
-	ClaimTempPath                   string `json:"claimTempPath"`
-	ControllerPodUID                string `json:"controllerPodUid"`
-	ControllerNodeName              string `json:"controllerNodeName"`
-	ControllerNodeID                string `json:"controllerNodeId"`
-	ControllerInstanceID            string `json:"controllerInstanceId"`
-	ControllerZone                  string `json:"controllerZone"`
-	AttachmentTransitionState       string `json:"attachmentTransitionState"`
-	ContainerRestartCountBefore     int32  `json:"containerRestartCountBefore"`
-	ContainerRestartCountAfter      int32  `json:"containerRestartCountAfter"`
-	FinalClaimInstallationID        string `json:"finalClaimInstallationId"`
-	FinalClaimActiveClusterUID      string `json:"finalClaimActiveClusterUid"`
-	FinalClaimParentFilesystemID    string `json:"finalClaimParentFilesystemId"`
-	FinalClaimBootstrapAttemptID    string `json:"finalClaimBootstrapAttemptId"`
-	InitialAttachmentAbsent         bool   `json:"initialAttachmentAbsent"`
-	JournalPrepared                 bool   `json:"journalPrepared"`
-	AttachmentObserved              bool   `json:"attachmentObserved"`
-	ControllerProcessStopped        bool   `json:"controllerProcessStopped"`
-	OwnerAbsentWhileStopped         bool   `json:"ownerAbsentWhileStopped"`
-	AttachmentAvailableWhileStopped bool   `json:"attachmentAvailableWhileStopped"`
-	ControllerProcessKilled         bool   `json:"controllerProcessKilled"`
-	SamePodRestarted                bool   `json:"samePodRestarted"`
-	JournalClearedAfterRestart      bool   `json:"journalClearedAfterRestart"`
-	FinalClaimValid                 bool   `json:"finalClaimValid"`
-	TemporaryClaimAbsent            bool   `json:"temporaryClaimAbsent"`
-	ServerAttachmentAvailable       bool   `json:"serverAttachmentAvailable"`
-	RegionalAttachmentAvailable     bool   `json:"regionalAttachmentAvailable"`
-	HelmUpgradeCompleted            bool   `json:"helmUpgradeCompleted"`
+// ProviderBootstrapRestartProof records a real fresh-parent Helm addition,
+// immutable claim, and complete controller restart after bootstrap. The exact
+// after-attach/before-claim crash window is deliberately covered by the
+// deterministic parent-bootstrap tests rather than a timing-sensitive cloud
+// signal race.
+type ProviderBootstrapRestartProof struct {
+	ParentFilesystemID                string `json:"parentFilesystemId"`
+	LeaseUID                          string `json:"leaseUid"`
+	BootstrapAttemptID                string `json:"bootstrapAttemptId"`
+	ActiveClusterUID                  string `json:"activeClusterUid"`
+	ClaimTempPath                     string `json:"claimTempPath"`
+	ControllerPodUIDBeforeRestart     string `json:"controllerPodUidBeforeRestart"`
+	ControllerPodUIDAfterRestart      string `json:"controllerPodUidAfterRestart"`
+	ControllerNodeNameBeforeRestart   string `json:"controllerNodeNameBeforeRestart"`
+	ControllerNodeNameAfterRestart    string `json:"controllerNodeNameAfterRestart"`
+	ControllerNodeIDBeforeRestart     string `json:"controllerNodeIdBeforeRestart"`
+	ControllerNodeIDAfterRestart      string `json:"controllerNodeIdAfterRestart"`
+	FinalClaimInstallationID          string `json:"finalClaimInstallationId"`
+	FinalClaimActiveClusterUID        string `json:"finalClaimActiveClusterUid"`
+	FinalClaimParentFilesystemID      string `json:"finalClaimParentFilesystemId"`
+	FinalClaimBootstrapAttemptID      string `json:"finalClaimBootstrapAttemptId"`
+	InitialAttachmentAbsent           bool   `json:"initialAttachmentAbsent"`
+	HelmUpgradeCompleted              bool   `json:"helmUpgradeCompleted"`
+	JournalClearedBeforeRestart       bool   `json:"journalClearedBeforeRestart"`
+	ClaimValidBeforeRestart           bool   `json:"claimValidBeforeRestart"`
+	TemporaryClaimAbsentBeforeRestart bool   `json:"temporaryClaimAbsentBeforeRestart"`
+	ControllerRestarted               bool   `json:"controllerRestarted"`
+	FinalClaimUnchangedAfterRestart   bool   `json:"finalClaimUnchangedAfterRestart"`
+	JournalClearedAfterRestart        bool   `json:"journalClearedAfterRestart"`
+	TemporaryClaimAbsentAfterRestart  bool   `json:"temporaryClaimAbsentAfterRestart"`
+	ServerAttachmentAvailable         bool   `json:"serverAttachmentAvailable"`
+	RegionalAttachmentAvailable       bool   `json:"regionalAttachmentAvailable"`
 }
 
 // CheckpointRestoreProof records one complete same-cluster namespace restore.
@@ -1095,12 +1091,17 @@ func (proof ProviderAttachDetachProof) Validate() error {
 	if len(proof.PlannedNodeIDs) < 2 || len(proof.Parents) != 2 {
 		return fmt.Errorf("provider proof does not cover two nodes and two parents")
 	}
+	plannedNodes := make(map[string]struct{}, len(proof.PlannedNodeIDs))
 	plannedInstances := make(map[string]struct{}, len(proof.PlannedNodeIDs))
 	for _, nodeID := range proof.PlannedNodeIDs {
 		target, err := scaleway.ParseNodeID(nodeID)
 		if err != nil {
 			return fmt.Errorf("provider planned node ID: %w", err)
 		}
+		if _, duplicate := plannedNodes[nodeID]; duplicate {
+			return fmt.Errorf("provider proof repeats planned node %q", nodeID)
+		}
+		plannedNodes[nodeID] = struct{}{}
 		if _, duplicate := plannedInstances[target.ServerID]; duplicate {
 			return fmt.Errorf("provider proof repeats planned Instance %q", target.ServerID)
 		}
@@ -1130,8 +1131,8 @@ func (proof ProviderAttachDetachProof) Validate() error {
 			}
 		}
 	}
-	if err := proof.BootstrapCrash.validate(proof.RunID, parentIDs); err != nil {
-		return fmt.Errorf("provider bootstrap crash: %w", err)
+	if err := proof.BootstrapRestart.validate(proof.RunID, parentIDs, plannedNodes); err != nil {
+		return fmt.Errorf("provider bootstrap restart: %w", err)
 	}
 	foreign := proof.ForeignTest
 	if !validBoundedIdentity(foreign.DisposableInstanceID) || !validKubernetesName(foreign.PendingPVCName) {
@@ -1161,7 +1162,11 @@ func (proof ProviderAttachDetachProof) Validate() error {
 	return nil
 }
 
-func (proof ProviderBootstrapCrashProof) validate(runID string, parentIDs map[string]struct{}) error {
+func (proof ProviderBootstrapRestartProof) validate(
+	runID string,
+	parentIDs map[string]struct{},
+	plannedNodes map[string]struct{},
+) error {
 	if err := volume.ValidateParentFilesystemID(proof.ParentFilesystemID); err != nil {
 		return fmt.Errorf("parent filesystem ID: %w", err)
 	}
@@ -1171,44 +1176,50 @@ func (proof ProviderBootstrapCrashProof) validate(runID string, parentIDs map[st
 	if err := volume.ValidateOperationID(proof.LeaseUID); err != nil {
 		return fmt.Errorf("lease UID: %w", err)
 	}
-	if err := volume.ValidateOperationID(proof.AttemptID); err != nil {
-		return fmt.Errorf("attempt ID: %w", err)
+	if err := volume.ValidateOperationID(proof.BootstrapAttemptID); err != nil {
+		return fmt.Errorf("bootstrap attempt ID: %w", err)
 	}
 	if err := volume.ValidateClusterUID(proof.ActiveClusterUID); err != nil {
 		return fmt.Errorf("active cluster UID: %w", err)
 	}
-	if err := volume.ValidateOperationID(proof.ControllerPodUID); err != nil {
-		return fmt.Errorf("controller Pod UID: %w", err)
+	if err := volume.ValidateOperationID(proof.ControllerPodUIDBeforeRestart); err != nil {
+		return fmt.Errorf("controller Pod UID before restart: %w", err)
 	}
-	if !validKubernetesName(proof.ControllerNodeName) {
+	if err := volume.ValidateOperationID(proof.ControllerPodUIDAfterRestart); err != nil {
+		return fmt.Errorf("controller Pod UID after restart: %w", err)
+	}
+	if proof.ControllerPodUIDBeforeRestart == proof.ControllerPodUIDAfterRestart {
+		return fmt.Errorf("controller Pod UID did not change across restart")
+	}
+	if !validKubernetesName(proof.ControllerNodeNameBeforeRestart) || !validKubernetesName(proof.ControllerNodeNameAfterRestart) {
 		return fmt.Errorf("controller node name is invalid")
 	}
-	target, err := scaleway.ParseNodeID(proof.ControllerNodeID)
-	if err != nil {
-		return fmt.Errorf("controller node ID: %w", err)
+	if _, err := scaleway.ParseNodeID(proof.ControllerNodeIDBeforeRestart); err != nil {
+		return fmt.Errorf("controller node ID before restart: %w", err)
 	}
-	if target.ServerID != proof.ControllerInstanceID || target.Zone != proof.ControllerZone {
-		return fmt.Errorf("controller runtime identities disagree")
+	if _, planned := plannedNodes[proof.ControllerNodeIDBeforeRestart]; !planned {
+		return fmt.Errorf("controller node before restart is outside the planned node inventory")
 	}
-	if proof.ClaimTempPath != "/.sfs-subdir-csi-owner."+proof.AttemptID+".tmp" {
+	if _, err := scaleway.ParseNodeID(proof.ControllerNodeIDAfterRestart); err != nil {
+		return fmt.Errorf("controller node ID after restart: %w", err)
+	}
+	if _, planned := plannedNodes[proof.ControllerNodeIDAfterRestart]; !planned {
+		return fmt.Errorf("controller node after restart is outside the planned node inventory")
+	}
+	if proof.ClaimTempPath != "/.sfs-subdir-csi-owner."+proof.BootstrapAttemptID+".tmp" {
 		return fmt.Errorf("claim temporary path does not match the attempt")
 	}
-	if proof.AttachmentTransitionState != "attaching" && proof.AttachmentTransitionState != "available" {
-		return fmt.Errorf("attachment transition state is invalid")
-	}
-	if proof.ContainerRestartCountBefore < 0 || proof.ContainerRestartCountAfter <= proof.ContainerRestartCountBefore {
-		return fmt.Errorf("controller container restart was not observed")
-	}
 	if proof.FinalClaimInstallationID != runID || proof.FinalClaimActiveClusterUID != proof.ActiveClusterUID ||
-		proof.FinalClaimParentFilesystemID != proof.ParentFilesystemID || proof.FinalClaimBootstrapAttemptID != proof.AttemptID {
+		proof.FinalClaimParentFilesystemID != proof.ParentFilesystemID ||
+		proof.FinalClaimBootstrapAttemptID != proof.BootstrapAttemptID {
 		return fmt.Errorf("final parent claim does not match the prepared attempt")
 	}
-	if !proof.InitialAttachmentAbsent || !proof.JournalPrepared || !proof.AttachmentObserved ||
-		!proof.ControllerProcessStopped || !proof.OwnerAbsentWhileStopped || !proof.AttachmentAvailableWhileStopped ||
-		!proof.ControllerProcessKilled || !proof.SamePodRestarted || !proof.JournalClearedAfterRestart ||
-		!proof.FinalClaimValid || !proof.TemporaryClaimAbsent || !proof.ServerAttachmentAvailable ||
-		!proof.RegionalAttachmentAvailable || !proof.HelmUpgradeCompleted {
-		return fmt.Errorf("bootstrap interruption or exact resume proof is incomplete")
+	if !proof.InitialAttachmentAbsent || !proof.HelmUpgradeCompleted || !proof.JournalClearedBeforeRestart ||
+		!proof.ClaimValidBeforeRestart || !proof.TemporaryClaimAbsentBeforeRestart || !proof.ControllerRestarted ||
+		!proof.FinalClaimUnchangedAfterRestart || !proof.JournalClearedAfterRestart ||
+		!proof.TemporaryClaimAbsentAfterRestart || !proof.ServerAttachmentAvailable ||
+		!proof.RegionalAttachmentAvailable {
+		return fmt.Errorf("bootstrap addition or restart proof is incomplete")
 	}
 	return nil
 }

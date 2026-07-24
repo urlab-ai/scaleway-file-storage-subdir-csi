@@ -48,20 +48,22 @@ candidate. RC15 used RC14 as its exact public predecessor and reached the
 100-PVC scale scenario, where it exposed a stale lifecycle-snapshot race that
 temporarily degraded controller maintenance while normal creation advanced to
 `Ready`. The run stopped and cleaned every run-owned cloud resource. The race
-is corrected with focused regression coverage. RC16 subsequently proved the
-100-PVC and 20-minute read/write soak behavior without corruption, but its
-bootstrap crash harness tried to signal namespace PID 1 from inside the same
-PID namespace and therefore could not prove that the controller restarted.
-That run failed closed and cleaned every run-owned cloud resource. The harness
-then used a bounded, credential-free host-PID fault injector with only
-`CAP_KILL`, but RC17 proved that Kapsule denies its `/proc/<pid>/exe` identity
-read without `CAP_SYS_PTRACE`; cleanup-only then removed every run-owned cloud
-resource. The injector now retains the same narrow capability and instead
-combines the exact Pod cgroup with the immutable driver ENTRYPOINT available in
-`argv[0]`, revalidating both immediately before each signal. RC18 is the next
-full qualification candidate and continues to use RC14 as its exact public
-predecessor. Publication remains blocked until the exact RC18 artifacts have
-concrete Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
+is corrected with focused regression coverage. RC16 through RC19 then proved
+the 100-PVC and 20-minute read/write soak behavior without corruption while
+iterating on a Kapsule bootstrap fault injector; RC19 captured the intended
+crash window, but its next node-drain harness selector failed closed. RC20 and
+RC21 exposed and corrected incomplete accounting of the disposable Instance
+root SBS volume and live Instance API topology differences before CSI
+qualification began. RC22 passed artifact/install, real `virtiofs`,
+single-node-writer conflict, and a 100-PVC/20-minute soak with 5,714 writes,
+5,640 reads, and zero checksum failures. Its external signal race observed the
+valid parent claim only after Scaleway had already completed the attachment, so
+it correctly admitted no crash-window evidence and removed all seven run-owned
+cloud resources. RC23 replaces that timing-sensitive cloud race with a real
+fresh-parent addition plus complete post-claim controller restart. The exact
+after-attach/before-claim state remains a deterministic recovery gate.
+Publication remains blocked until the exact RC23 artifacts have concrete
+Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
 Storage slots. It is not supported or advertised until retained real-provider

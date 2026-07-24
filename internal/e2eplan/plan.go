@@ -215,7 +215,7 @@ func Build(request Request) (Plan, error) {
 			"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",
 			"decommission, detach, and remove the second run-owned parent from the driver configuration",
 			"stop or delete only disposable run-owned Instances for recovery fencing",
-			"inject controller interruption around the run-owned bootstrap claim",
+			"add the fresh second parent and restart the controller after its ownership claim is complete",
 		)
 	}
 	plannedResources := make([]ResourcePlan, 0, 7)

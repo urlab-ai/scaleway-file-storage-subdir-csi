@@ -105,7 +105,7 @@ func (backend *scalewayBackend) collectProviderAttachmentEvidence(ctx context.Co
 }
 
 func (backend *scalewayBackend) providerAttachDetachScenario(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, inventory e2ecleanup.Inventory, evidenceDirectory string) (result e2erunner.ScenarioResult, returnErr error) {
-	bootstrapCrash, err := readProviderBootstrapCrashProof(evidenceDirectory)
+	bootstrapRestart, err := readProviderBootstrapRestartProof(evidenceDirectory)
 	if err != nil {
 		return result, err
 	}
@@ -197,7 +197,7 @@ func (backend *scalewayBackend) providerAttachDetachScenario(ctx context.Context
 	proof := e2erunner.ProviderAttachDetachProof{
 		SchemaVersion: "1", Scenario: "provider-attach-detach", RunID: plan.RunID,
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), PlannedNodeIDs: slices.Clone(baseline.PlannedNodeIDs), Parents: parents,
-		BootstrapCrash: bootstrapCrash,
+		BootstrapRestart: bootstrapRestart,
 		ForeignTest: e2erunner.ProviderForeignAttachProof{
 			DisposableInstanceID: instanceID, FilesystemIDs: slices.Clone(filesystemIDs), AttachmentIDs: foreignAttachmentIDs,
 			InitialAttachmentAbsent: true, AttachmentReachedAvailable: true, PendingPVCName: probePVC,
@@ -211,22 +211,22 @@ func (backend *scalewayBackend) providerAttachDetachScenario(ctx context.Context
 	return writeScenarioJSON(evidenceDirectory, "provider-attach-detach", proof)
 }
 
-func readProviderBootstrapCrashProof(evidenceDirectory string) (e2erunner.ProviderBootstrapCrashProof, error) {
-	path := filepath.Join(evidenceDirectory, "provider-bootstrap-crash.json")
+func readProviderBootstrapRestartProof(evidenceDirectory string) (e2erunner.ProviderBootstrapRestartProof, error) {
+	path := filepath.Join(evidenceDirectory, "provider-bootstrap-restart.json")
 	info, err := os.Lstat(path)
 	if err != nil {
-		return e2erunner.ProviderBootstrapCrashProof{}, fmt.Errorf("inspect provider bootstrap crash proof: %w", err)
+		return e2erunner.ProviderBootstrapRestartProof{}, fmt.Errorf("inspect provider bootstrap restart proof: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 1<<20 {
-		return e2erunner.ProviderBootstrapCrashProof{}, fmt.Errorf("provider bootstrap crash proof must be an exact regular file of 1 to 1 MiB")
+		return e2erunner.ProviderBootstrapRestartProof{}, fmt.Errorf("provider bootstrap restart proof must be an exact regular file of 1 to 1 MiB")
 	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
-		return e2erunner.ProviderBootstrapCrashProof{}, fmt.Errorf("read provider bootstrap crash proof: %w", err)
+		return e2erunner.ProviderBootstrapRestartProof{}, fmt.Errorf("read provider bootstrap restart proof: %w", err)
 	}
-	var proof e2erunner.ProviderBootstrapCrashProof
+	var proof e2erunner.ProviderBootstrapRestartProof
 	if err := strictjson.Decode(encoded, &proof); err != nil {
-		return e2erunner.ProviderBootstrapCrashProof{}, fmt.Errorf("decode provider bootstrap crash proof: %w", err)
+		return e2erunner.ProviderBootstrapRestartProof{}, fmt.Errorf("decode provider bootstrap restart proof: %w", err)
 	}
 	return proof, nil
 }
