@@ -624,6 +624,17 @@ Scaleway zone: v1 requires node-level rescheduling capacity, not a multi-zone
 cluster. Multi-zone placement is an operator availability choice and is not an
 installation prerequisite.
 
+The two-candidate rule is a fresh-installation admission floor, not a runtime
+attachment-authorization rule. It must be enforced while the initial
+controller Lease is still provisional and before any reservation journal,
+provider attachment, or parent-filesystem mutation. Once an installation is
+established, an ordinary authorization refresh must not reapply this floor:
+temporarily cordoning one of two nodes must allow the drain, cleanup, and
+controller parent access to converge on the remaining valid node. The
+installation remains expected to restore at least two candidates after
+maintenance; this temporary allowance does not make a permanent single-node
+production topology supported.
+
 A narrower storage-only node set is not production-supported in v1. An
 acknowledgement flag is not an enforcement mechanism, and `Immediate` binding
 does not constrain pod scheduling. Supporting a narrower set requires the
@@ -772,7 +783,12 @@ The implementation must therefore keep two distinct sets: Ready schedulable
 Node/CSINode identities eligible for a new publish target, and all existing
 matching Linux Node/CSINode identities recognized for regional attachment
 inventory. The latter includes cordoned or temporarily unschedulable nodes.
-Membership in the broader known set never authorizes a new attachment.
+Membership in the broader known set never authorizes a new attachment. Runtime
+refresh continues to validate the complete eligible set, its provider
+identities, configuration generations, exclusivity, and attachment budgets, but
+does not reapply the fresh-installation two-candidate floor. A cordoned identity
+therefore remains safe ownership evidence without becoming a publish target or
+blocking the normal drain operations that remove its workload.
 
 In the pinned SDK, `ListAttachments` fills an omitted request zone from the
 client's default zone. The implementation must therefore use a dedicated
@@ -7518,8 +7534,11 @@ The development is complete only when all criteria below are satisfied.
 - Logical PVC expansion is disabled in v1.
 - The v1 controller runs as one replica and rejects accidental multi-replica
   configuration.
-- Production preflight requires at least two Ready compatible controller
-  candidate nodes and the chart does not pin the controller to one node.
+- Fresh-production-installation preflight requires at least two Ready
+  compatible controller candidate nodes before durable or provider mutation,
+  and the chart does not pin the controller to one node. An established
+  installation can temporarily drain one candidate without authorizing that
+  cordoned node for a new publish.
 - The controller holds its Kubernetes Lease before any mutating operation.
 - The controller Lease uses the fixed non-configurable v1 name
   `scaleway-sfs-subdir-csi-controller`.

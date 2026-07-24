@@ -88,6 +88,14 @@ the same mount generation is private. Cleanup retries reconcile it before
 treating an absent public target as success or detaching a parent.
 The two candidates may be in the same Scaleway zone; production preflight does
 not require a multi-zone cluster.
+The driver enforces this two-candidate floor while admitting a fresh
+installation, before it creates reservation journals or changes a parent. For
+an established installation, a planned cordon keeps the affected Node identity
+known for attachment ownership but removes it from new-publish eligibility.
+This lets normal drain and controller-parent access finish on the remaining
+compatible node. Restore at least two Ready candidates after maintenance; the
+temporary drain behavior does not qualify a permanent single-node production
+topology.
 The chart's sorted `compatibility.qualifiedCommercialTypes` must exactly match
 the allowlist embedded in the release binaries and the retained real-E2E
 matrix. Changing Helm values alone cannot qualify a new Instance type and makes

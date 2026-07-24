@@ -69,6 +69,22 @@ func (authorizations *controllerNodeAuthorizations) Refresh(ctx context.Context)
 	return cloneTargetMap(refresh.KnownInstances), cloneSet(refresh.EligibleInstanceIDs), nil
 }
 
+// ValidateFreshInstallationPreflight enforces the production controller
+// rescheduling floor only while a brand-new installation is still
+// provisional. Reapplying this admission rule during ordinary authorization
+// refresh would deadlock a graceful drain: cordoning one of two nodes must
+// remove it from new-publish eligibility without preventing cleanup or
+// controller parent access on the remaining eligible node.
+func (authorizations *controllerNodeAuthorizations) ValidateFreshInstallationPreflight(ctx context.Context) error {
+	if !authorizations.production {
+		return nil
+	}
+	if _, err := authorizations.refreshSnapshot(ctx, true); err != nil {
+		return fmt.Errorf("validate fresh production installation node preflight: %w", err)
+	}
+	return nil
+}
+
 // NodeExists implements driver.NodeExistenceReader without consulting
 // Scaleway. CSI sanity's context-less unknown-node probe is allowed to observe
 // a conclusive Kubernetes absence before immutable-context validation, but it
@@ -107,7 +123,15 @@ type controllerNodeAuthorizationRefresh struct {
 	UnknownAttachments map[string]map[observability.UnknownAttachmentClass]uint64
 }
 
+// RefreshSnapshot validates the live operational authorization set. It
+// deliberately does not enforce the fresh-installation two-candidate floor:
+// a cordoned node remains known for attachment ownership but is excluded from
+// new-publish eligibility so a normal drain can converge safely.
 func (authorizations *controllerNodeAuthorizations) RefreshSnapshot(ctx context.Context) (controllerNodeAuthorizationRefresh, error) {
+	return authorizations.refreshSnapshot(ctx, false)
+}
+
+func (authorizations *controllerNodeAuthorizations) refreshSnapshot(ctx context.Context, requireControllerReschedulingFloor bool) (controllerNodeAuthorizationRefresh, error) {
 	observed, err := authorizations.inventory.Snapshot(ctx)
 	if err != nil {
 		return controllerNodeAuthorizationRefresh{}, err
@@ -162,7 +186,7 @@ func (authorizations *controllerNodeAuthorizations) RefreshSnapshot(ctx context.
 	if err != nil {
 		return controllerNodeAuthorizationRefresh{}, err
 	}
-	if authorizations.production {
+	if requireControllerReschedulingFloor {
 		if err := driver.ValidateControllerCandidates(controllerCandidates); err != nil {
 			return controllerNodeAuthorizationRefresh{}, err
 		}

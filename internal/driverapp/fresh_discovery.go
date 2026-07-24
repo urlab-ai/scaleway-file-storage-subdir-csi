@@ -76,6 +76,15 @@ func (discovery *freshInstallationDiscovery) VerifyFreshInstallation(ctx context
 	if err := discovery.requireKubernetesEmpty(ctx); err != nil {
 		return err
 	}
+	// The two-candidate availability floor is an admission property of a new
+	// production installation, not a runtime attachment authorization rule.
+	// Enforce it here, while the Lease is still provisional and before any
+	// reservation journal, provider attachment, or filesystem state is
+	// created. Established installations may then drain one node without
+	// losing safe cleanup or controller-parent access on the remaining node.
+	if err := discovery.manager.authorizations.ValidateFreshInstallationPreflight(ctx); err != nil {
+		return err
+	}
 	// Commit the complete permanent journal set before provider attachment or
 	// parent-root mutation. A crash can therefore resume an Initializing set
 	// while the fresh proof is still valid; after Ready, operational startup

@@ -26,6 +26,7 @@ func (inventory *staticNodeInventory) Snapshot(context.Context) ([]k8s.NodeInven
 
 func TestControllerNodeAuthorizationsKeepsCordonedNodeKnownOnly(t *testing.T) {
 	configured, provider, inventory, eligibleNodeID, cordonedNodeID, _ := controllerParentFixture(t)
+	configured.Runtime.Mode = config.ModeProduction
 	authorizations, err := newControllerNodeAuthorizations(inventory, provider, configured)
 	if err != nil {
 		t.Fatalf("newControllerNodeAuthorizations() error = %v", err)
@@ -78,19 +79,19 @@ func TestControllerNodeAuthorizationRefreshRejectsForeignEligibleAttachment(t *t
 	}
 }
 
-func TestControllerNodeAuthorizationRefreshEnforcesProductionReschedulingFloor(t *testing.T) {
+func TestControllerNodeAuthorizationFreshInstallationPreflightEnforcesProductionReschedulingFloor(t *testing.T) {
 	configured, provider, inventory, _, _, _ := controllerParentFixture(t)
 	configured.Runtime.Mode = config.ModeProduction
 	authorizations, err := newControllerNodeAuthorizations(inventory, provider, configured)
 	if err != nil {
 		t.Fatalf("newControllerNodeAuthorizations() error = %v", err)
 	}
-	if _, err := authorizations.RefreshSnapshot(context.Background()); err == nil {
-		t.Fatal("RefreshSnapshot(single production candidate) error = nil")
+	if err := authorizations.ValidateFreshInstallationPreflight(context.Background()); err == nil {
+		t.Fatal("ValidateFreshInstallationPreflight(single production candidate) error = nil")
 	}
 }
 
-func TestControllerNodeAuthorizationRefreshAllowsProductionCandidatesInOneZone(t *testing.T) {
+func TestControllerNodeAuthorizationFreshInstallationPreflightAllowsProductionCandidatesInOneZone(t *testing.T) {
 	configured, provider, inventory, _, _, _ := controllerParentFixture(t)
 	configured.Runtime.Mode = config.ModeProduction
 	const secondNodeID = "fr-par-1/77777777-7777-4777-8777-777777777777"
@@ -107,6 +108,9 @@ func TestControllerNodeAuthorizationRefreshAllowsProductionCandidatesInOneZone(t
 	authorizations, err := newControllerNodeAuthorizations(inventory, provider, configured)
 	if err != nil {
 		t.Fatalf("newControllerNodeAuthorizations() error = %v", err)
+	}
+	if err := authorizations.ValidateFreshInstallationPreflight(context.Background()); err != nil {
+		t.Fatalf("ValidateFreshInstallationPreflight(single-zone production) error = %v", err)
 	}
 	refresh, err := authorizations.RefreshSnapshot(context.Background())
 	if err != nil {
@@ -170,8 +174,9 @@ func TestControllerParentAccessRejectsRegionalInstanceDisagreement(t *testing.T)
 	}
 }
 
-func TestControllerParentAccessValidatesAttachmentBeforeSingleMount(t *testing.T) {
+func TestControllerParentAccessContinuesMountedParentAccessDuringProductionDrain(t *testing.T) {
 	configured, provider, inventory, eligibleNodeID, _, parentID := controllerParentFixture(t)
+	configured.Runtime.Mode = config.ModeProduction
 	eligibleTarget, _ := scaleway.ParseNodeID(eligibleNodeID)
 	filesystem := provider.Filesystems[configured.Runtime.Provider.Region+"/"+parentID]
 	filesystem.NumberOfAttachments = 1

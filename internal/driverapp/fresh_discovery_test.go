@@ -77,6 +77,15 @@ func (source *sequencedFreshAllocations) List(context.Context) ([]k8s.StoredAllo
 	return nil, nil
 }
 
+type recordingFreshDiscoveryJournals struct {
+	calls int
+}
+
+func (journals *recordingFreshDiscoveryJournals) BootstrapFresh(context.Context, []string, string) error {
+	journals.calls++
+	return nil
+}
+
 func TestFreshInstallationDiscoveryHandsExactSameProcessEvidenceToBootstrap(t *testing.T) {
 	manager, leadership, _, filesystem, _, parentID := parentBootstrapTestManager(t)
 	discovery, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
@@ -112,6 +121,29 @@ func TestFreshInstallationDiscoveryHandsExactSameProcessEvidenceToBootstrap(t *t
 	}
 	if !filesystem.claimPresent {
 		t.Fatal("fresh-discovery bootstrap did not install the parent claim")
+	}
+}
+
+func TestFreshInstallationDiscoveryRejectsProductionReschedulingFloorBeforeMutation(t *testing.T) {
+	manager, leadership, _, _, _, _ := parentBootstrapTestManager(t)
+	manager.authorizations.production = true
+	journals := &recordingFreshDiscoveryJournals{}
+	discovery, err := newFreshInstallationDiscovery(
+		manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{}, journals,
+		[]string{"standard"}, manager.clusterUID, time.Minute, fixedFreshDiscoveryJitter{},
+	)
+	if err != nil {
+		t.Fatalf("newFreshInstallationDiscovery() error = %v", err)
+	}
+	err = discovery.VerifyFreshInstallation(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "at least two Ready compatible candidate nodes") {
+		t.Fatalf("VerifyFreshInstallation(single production candidate) error = %v", err)
+	}
+	if journals.calls != 0 {
+		t.Fatalf("failed production preflight bootstrapped %d reservation journal sets", journals.calls)
+	}
+	if len(*leadership.events) != 0 {
+		t.Fatalf("failed production preflight touched a parent: %#v", *leadership.events)
 	}
 }
 
