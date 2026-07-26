@@ -54,3 +54,30 @@ func TestReleaseScenarioShellEmitsProofsInExecutionOrder(t *testing.T) {
 		previous = index
 	}
 }
+
+func TestUpgradeProofAdmissionDoesNotDependOnLaterVirtioFSWorkload(t *testing.T) {
+	source, err := os.ReadFile(filepath.Clean(filepath.Join("..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	start := strings.Index(text, "scenario_upgrade() {")
+	end := strings.Index(text, "\nremove_test_workloads() {")
+	if start == -1 || end <= start {
+		t.Fatal("scenario_upgrade function is absent or ambiguous")
+	}
+	body := text[start:end]
+	if strings.Contains(body, "e2e-smoke-") {
+		t.Fatal("N-1 proof admission depends on the later virtiofs smoke workload")
+	}
+	for _, required := range []string{
+		`prepared="$evidence_dir/.n-minus-one-upgrade-prepared.json"`,
+		`test -s "$prepared"`,
+		`h history "$release" -n "$namespace" | grep -q deployed`,
+		`cp "$prepared" "$proof.tmp"`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("scenario_upgrade is missing required proof admission step %q", required)
+		}
+	}
+}

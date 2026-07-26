@@ -330,11 +330,22 @@ release and complete run labels through `kubectl label --local`, and submit the
 result in one API create. It must never persist the manifest, expose credential
 values in arguments, or create an unlabeled Secret during a second mutation.
 
-RC26 keeps RC14 as its exact public predecessor and makes the
-hard-failure injection deterministic by freezing only the exact controller
-process before the provider stop. No candidate is a production support claim
-until every Linux, kind, CSI, Helm, real Kapsule, and final-cleanup
-qualification gate passes.
+RC26 kept RC14 as its exact public predecessor and passed candidate artifact
+and install admission plus the complete staggered N/N-1 upgrade, including
+rollback, fail-closed mixed generations, convergence, new provisioning, and all
+three deletion policies. Its proof-admission step then referenced the
+`e2e-smoke-*` Pod before the following `virtiofs` scenario created that Pod.
+The run therefore admitted only the artifact/install result and stopped before
+the remaining candidate scenarios. Exact cleanup removed the run-owned Private
+Network, cluster, node pool, two parents, disposable Instance, and root SBS
+volume; the final seven-resource inventory recorded every exact ID absent.
+RC26 is superseded and must not be promoted. N/N-1 proof admission now depends
+only on its already completed structured proof, converged controller/node
+generation, and deployed Helm history, as required by the closed execution
+order.
+
+No candidate is a production support claim until every Linux, kind, CSI, Helm,
+real Kapsule, and final-cleanup qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
 commercial type for the first controlled run because it is the lowest-priced

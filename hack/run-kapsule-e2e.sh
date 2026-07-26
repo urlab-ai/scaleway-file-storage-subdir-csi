@@ -1749,7 +1749,6 @@ scenario_upgrade() {
   proof="$evidence_dir/n-minus-one-upgrade.json"
   test -s "$prepared"
   h history "$release" -n "$namespace" | grep -q deployed
-  k -n "$namespace" exec "e2e-smoke-$short_run" -- cat /data/sentinel
   cp "$prepared" "$proof.tmp"
   chmod 600 "$proof.tmp"
   mv "$proof.tmp" "$proof"
