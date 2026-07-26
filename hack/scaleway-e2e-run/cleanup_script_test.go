@@ -419,15 +419,24 @@ read_test_allocations
 	}
 }
 
-func TestScenarioCredentialSecretIsStreamedAndNotPersisted(t *testing.T) {
+func TestScenarioSecretsAreLabeledStreamedAndNotPersisted(t *testing.T) {
 	working, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(source), "--labels") {
+		t.Fatal("scenario runner uses the unsupported kubectl create secret --labels flag")
+	}
 	temporary := t.TempDir()
 	evidence := filepath.Join(temporary, "evidence")
 	streamProof := filepath.Join(temporary, "stream-proof")
+	credentialLabelProof := filepath.Join(temporary, "credential-label-proof")
+	identityLabelProof := filepath.Join(temporary, "identity-label-proof")
 	argumentLeak := filepath.Join(temporary, "argument-leak")
 	environmentLeak := filepath.Join(temporary, "environment-leak")
 
@@ -444,18 +453,40 @@ case "$*" in
   "get namespace driver-system") exit 1 ;;
   "create namespace driver-system") exit 0 ;;
   "label namespace driver-system "*) exit 0 ;;
-  *"create secret generic scaleway-sfs-subdir-csi-credentials --from-env-file=/dev/stdin "*"--dry-run=client -o yaml")
+  *"create secret generic scaleway-sfs-subdir-csi-credentials --from-env-file=/dev/stdin --dry-run=client -o yaml")
     streamed=$(cat)
     expected='SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE
 SCW_SECRET_KEY=test-secret-fixture'
     [ "$streamed" = "$expected" ] || exit 91
     printf '%s\n' streamed >"$STREAM_PROOF"
-    printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-credentials'
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-credentials' 'data:' '  fixture: credential-stream-preserved'
+    ;;
+  *"create secret generic scaleway-sfs-subdir-csi-identity --from-literal=installationID=11111111-1111-4111-8111-111111111111 --dry-run=client -o yaml")
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-identity' 'data:' '  fixture: identity-stream-preserved'
+    ;;
+  "label --local -f - app.kubernetes.io/instance=driver sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o yaml")
+    generated=$(cat)
+    case "$generated" in
+      *"name: scaleway-sfs-subdir-csi-credentials"*"credential-stream-preserved"*)
+        printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-credentials' '  labels:' '    app.kubernetes.io/instance: driver' '    sfs-subdir-e2e-run: 11111111-1111-4111-8111-111111111111' 'data:' '  fixture: credential-stream-preserved'
+        ;;
+      *"name: scaleway-sfs-subdir-csi-identity"*"identity-stream-preserved"*)
+        printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: scaleway-sfs-subdir-csi-identity' '  labels:' '    app.kubernetes.io/instance: driver' '    sfs-subdir-e2e-run: 11111111-1111-4111-8111-111111111111' 'data:' '  fixture: identity-stream-preserved'
+        ;;
+      *) exit 94 ;;
+    esac
     ;;
   "create -f -")
     created=$(cat)
     case "$created" in
-      *"name: scaleway-sfs-subdir-csi-credentials"*) exit 0 ;;
+      *"name: scaleway-sfs-subdir-csi-credentials"*"app.kubernetes.io/instance: driver"*"sfs-subdir-e2e-run: 11111111-1111-4111-8111-111111111111"*"credential-stream-preserved"*)
+        : >"$CREDENTIAL_LABEL_PROOF"
+        exit 0
+        ;;
+      *"name: scaleway-sfs-subdir-csi-identity"*"app.kubernetes.io/instance: driver"*"sfs-subdir-e2e-run: 11111111-1111-4111-8111-111111111111"*"identity-stream-preserved"*)
+        : >"$IDENTITY_LABEL_PROOF"
+        exit 0
+        ;;
       *) exit 92 ;;
     esac
     ;;
@@ -477,12 +508,21 @@ esac
 		"SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE", // gitleaks:allow -- non-secret test fixture.
 		"SCW_SECRET_KEY=test-secret-fixture",  // gitleaks:allow -- non-secret test fixture.
 		"KUBECTL="+kubectl, "HELM="+unused, "JQ="+unused, "SCW="+unused,
-		"STREAM_PROOF="+streamProof, "ARGUMENT_LEAK="+argumentLeak, "ENVIRONMENT_LEAK="+environmentLeak)
+		"STREAM_PROOF="+streamProof, "CREDENTIAL_LABEL_PROOF="+credentialLabelProof,
+		"IDENTITY_LABEL_PROOF="+identityLabelProof, "ARGUMENT_LEAK="+argumentLeak, "ENVIRONMENT_LEAK="+environmentLeak)
 	if output, err := command.CombinedOutput(); err == nil {
-		t.Fatalf("scenario unexpectedly continued after the intentional identity-Secret failure: %s", output)
+		t.Fatalf("scenario unexpectedly continued after the intentional post-Secret failure: %s", output)
 	}
 	if proof, err := os.ReadFile(streamProof); err != nil || string(proof) != "streamed\n" {
 		t.Fatalf("credential stdin proof = %q, %v", proof, err)
+	}
+	for name, path := range map[string]string{
+		"credential Secret labels": credentialLabelProof,
+		"identity Secret labels":   identityLabelProof,
+	} {
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("%s proof = %#v, %v", name, info, err)
+		}
 	}
 	if _, err := os.Stat(argumentLeak); !os.IsNotExist(err) {
 		t.Fatalf("credential appeared in a kubectl process argument: %v", err)

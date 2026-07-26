@@ -39,10 +39,20 @@ credential-free host-PID Pod with only `CAP_KILL`, but RC17 proved that Kapsule
 denies `/proc/<pid>/exe` to that least-privilege Pod; cleanup-only then removed
 every run-owned cloud resource. The injector now combines the exact Pod cgroup
 with the immutable driver ENTRYPOINT from readable `argv[0]` and revalidates
-both immediately before each signal, without adding `CAP_SYS_PTRACE`. RC18 is
-the next full qualification candidate and continues to use RC14 as its exact
-public predecessor. None is a qualified production release until the exact
-RC18 artifacts pass every gate. The
+both immediately before each signal, without adding `CAP_SYS_PTRACE`. RC18
+through RC24 continued the controlled qualification history recorded in
+[`SPECIFICATION.md`](SPECIFICATION.md); RC24 reached the hard-failure proof and
+failed closed because provider `poweroff` allowed a graceful Lease handoff.
+RC25 corrected that injection but stopped before Helm installation because the
+harness passed the unsupported `--labels` flag to
+`kubectl create secret generic`. Automatic cleanup and independent Project
+inventory reads proved its Private Network, cluster, node pool, two parents,
+disposable Instance, and root SBS volume absent. The corrected harness labels
+each streamed Secret manifest locally before its single API create, so no
+credential file or temporarily unlabeled Secret exists. RC26 is the next full
+qualification candidate and continues to use RC14 as its exact public
+predecessor. None is a qualified production release until the exact RC26
+artifacts pass every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint

@@ -318,7 +318,19 @@ parents, disposable Instance, and root SBS volume; independent exact-ID reads
 confirmed all seven resources absent. RC24 is superseded and must not be
 promoted.
 
-The next candidate keeps RC14 as its exact public predecessor and makes the
+RC25 made that process freeze deterministic, then stopped before Helm
+installation because the qualification harness passed the unsupported
+`--labels` flag to `kubectl create secret generic`. The failure occurred while
+creating the external credential Secret, before installing either the
+predecessor or candidate driver. Automatic cleanup marked the exact run-owned
+Private Network, cluster, node pool, two parents, disposable Instance, and root
+SBS volume absent; independent Project inventories confirmed no surviving run
+resource. The harness must generate each Secret in memory, add both the Helm
+release and complete run labels through `kubectl label --local`, and submit the
+result in one API create. It must never persist the manifest, expose credential
+values in arguments, or create an unlabeled Secret during a second mutation.
+
+RC26 keeps RC14 as its exact public predecessor and makes the
 hard-failure injection deterministic by freezing only the exact controller
 process before the provider stop. No candidate is a production support claim
 until every Linux, kind, CSI, Helm, real Kapsule, and final-cleanup

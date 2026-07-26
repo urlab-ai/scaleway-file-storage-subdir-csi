@@ -65,11 +65,20 @@ single-node-writer conflict, the 100-PVC multiplex proof, a 20-minute soak with
 normal drain path. It was not promoted: Scaleway `poweroff` alone let the
 controller perform a graceful Lease handoff, so the harness correctly rejected
 the intended abrupt-failure proof. Cleanup removed all seven exact run-owned
-resources and independent reads confirmed their absence. The next candidate
-uses a credential-free, qualification-only process freeze immediately before
-the provider stop, with exact Pod UID, cgroup, entrypoint, and PID checks. The
+resources and independent reads confirmed their absence. RC25 corrected the
+hard-failure injection but stopped before Helm installation because the
+qualification harness passed the unsupported `--labels` flag to
+`kubectl create secret generic`. Automatic cleanup removed the exact run-owned
+Private Network, cluster, node pool, two parents, disposable Instance, and root
+SBS volume; independent Project inventories confirmed no surviving run
+resource. The harness now adds both ownership labels to each streamed Secret
+manifest through `kubectl label --local` before its single API create, without
+persisting credential data or creating an unlabeled Secret. RC26 is the next
+candidate. It uses a credential-free, qualification-only process freeze
+immediately before the provider stop, with exact Pod UID, cgroup, entrypoint,
+and PID checks. The
 exact after-attach/before-claim state remains a deterministic recovery gate.
-Publication remains blocked until the next exact candidate has concrete Linux,
+Promotion remains blocked until the next exact candidate has concrete Linux,
 kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File

@@ -145,6 +145,16 @@ new_uuid() {
 short_run=$(printf '%s' "$run_id" | cut -c1-8)
 run_label="sfs-subdir-e2e-run=$run_id"
 
+label_run_object() {
+  # kubectl create secret generic has no label flag. Label the generated
+  # manifest locally so both ownership labels are present in the single API
+  # create, without staging the Secret or its encoded data on disk.
+  k label --local -f - \
+    "app.kubernetes.io/instance=$release" \
+    "sfs-subdir-e2e-run=$run_id" \
+    -o yaml
+}
+
 write_credentials() {
   : "${provider_access_key:?SCW_ACCESS_KEY is required only for approved live execution}"
   : "${provider_secret_key:?SCW_SECRET_KEY is required only for approved live execution}"
@@ -154,8 +164,8 @@ write_credentials() {
   printf 'SCW_ACCESS_KEY=%s\nSCW_SECRET_KEY=%s\n' "$provider_access_key" "$provider_secret_key" |
     k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-credentials \
       --from-env-file=/dev/stdin \
-      --labels="app.kubernetes.io/instance=$release,sfs-subdir-e2e-run=$run_id" \
       --dry-run=client -o yaml |
+    label_run_object |
     k create -f -
 }
 
@@ -808,8 +818,9 @@ scenario_artifact_and_install() {
   write_credentials
   k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-identity \
     --from-literal="installationID=$run_id" \
-    --labels="app.kubernetes.io/instance=$release,sfs-subdir-e2e-run=$run_id" \
-    --dry-run=client -o yaml | k create -f -
+    --dry-run=client -o yaml |
+    label_run_object |
+    k create -f -
   parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"},{\"id\":\"$parent_b\",\"name\":\"e2e-parent-b\",\"state\":\"active\"}]"
   if [ "$profile" = release-candidate ]; then
     # First prove that logical-volume fan-out exceeds one Instance's physical
