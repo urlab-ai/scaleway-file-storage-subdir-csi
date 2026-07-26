@@ -343,12 +343,37 @@ func (backend *scalewayBackend) waitRegionalAttachment(ctx context.Context, file
 }
 
 func (backend *scalewayBackend) ensureForeignAttachmentAbsent(ctx context.Context, zone scw.Zone, instanceID, filesystemID string) error {
+	return backend.ensureAttachmentAbsent(ctx, zone, instanceID, filesystemID, false)
+}
+
+// ensureRecoveryAttachmentAbsent is the idempotent recovery variant used only
+// after an exact journal has already proved the stopped run-owned Instance
+// identity. A provider NotFound is not treated as a general success: the
+// regional File Storage view must still prove that the exact attachment is
+// absent.
+func (backend *scalewayBackend) ensureRecoveryAttachmentAbsent(ctx context.Context, zone scw.Zone, instanceID, filesystemID string) error {
+	return backend.ensureAttachmentAbsent(ctx, zone, instanceID, filesystemID, true)
+}
+
+func (backend *scalewayBackend) ensureAttachmentAbsent(
+	ctx context.Context,
+	zone scw.Zone,
+	instanceID, filesystemID string,
+	allowMissingServer bool,
+) error {
 	response, err := backend.instance.GetServer(&instanceapi.GetServerRequest{Zone: zone, ServerID: instanceID}, scw.WithContext(ctx))
+	if providerNotFound(err) && allowMissingServer {
+		_, regionalErr := backend.waitRegionalAttachment(ctx, filesystemID, instanceID, false)
+		return regionalErr
+	}
 	if err != nil {
 		return fmt.Errorf("read disposable Instance before exact detach: %w", err)
 	}
 	if response == nil || response.Server == nil {
 		return fmt.Errorf("read disposable Instance before exact detach: provider returned an empty Instance")
+	}
+	if response.Server.ID != instanceID {
+		return fmt.Errorf("read disposable Instance before exact detach: provider returned another Instance")
 	}
 	if serverHasFilesystem(response.Server, filesystemID) {
 		if _, err := backend.instance.DetachServerFileSystem(&instanceapi.DetachServerFileSystemRequest{
@@ -372,6 +397,48 @@ func (backend *scalewayBackend) ensureForeignAttachmentsAbsent(ctx context.Conte
 		}
 	}
 	return cleanupErr
+}
+
+// recoverDisposableInstanceAttachments closes the only provider-only crash
+// window in the qualification matrix. An in-process defer handles ordinary
+// failures, but --cleanup-only must also detach the two exact parents if the
+// runner process disappeared after AttachServerFileSystem committed.
+func (backend *scalewayBackend) recoverDisposableInstanceAttachments(
+	ctx context.Context,
+	request e2erunner.Request,
+	inventory e2ecleanup.Inventory,
+) error {
+	if backend.plan.Profile != e2eplan.ProfileReleaseCandidate {
+		return nil
+	}
+	instanceID := resourceID(inventory, e2ecleanup.ResourceKindInstance, 0)
+	if instanceID == "" {
+		// A valid provisioning prefix without the disposable Instance cannot
+		// have reached the provider attach/detach scenario.
+		return nil
+	}
+	instanceResource, found := inventoryResource(inventory, instanceID)
+	if !found || instanceResource.Kind != e2ecleanup.ResourceKindInstance || !instanceResource.CreatedByRun {
+		return fmt.Errorf("disposable attachment recovery lacks the exact run-owned Instance")
+	}
+	var recoveryErr error
+	for ordinal := 0; ordinal < int(backend.plan.Parents.Count); ordinal++ {
+		parentID := resourceID(inventory, e2ecleanup.ResourceKindParent, ordinal)
+		if parentID == "" {
+			continue
+		}
+		parent, found := inventoryResource(inventory, parentID)
+		if !found || parent.Kind != e2ecleanup.ResourceKindParent || !parent.CreatedByRun {
+			return fmt.Errorf("disposable attachment recovery lacks exact run-owned parent %d", ordinal)
+		}
+		if parent.State == e2ecleanup.ResourceStateAbsent {
+			continue
+		}
+		if err := backend.ensureRecoveryAttachmentAbsent(ctx, scw.Zone(request.Zone), instanceID, parentID); err != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recover disposable Instance attachment for parent %s: %w", parentID, err))
+		}
+	}
+	return recoveryErr
 }
 
 func (backend *scalewayBackend) waitProvisioningFailure(ctx context.Context, request e2erunner.Request, pvcName, foreignInstanceID string) error {
@@ -766,5 +833,12 @@ func writeScenarioJSON(directory, name string, value any) (e2erunner.ScenarioRes
 	if err != nil {
 		return e2erunner.ScenarioResult{}, err
 	}
-	return e2erunner.ScenarioResult{Name: name, Succeeded: true, EvidenceFile: fileName, EvidenceSHA: digest, Proof: encoded}, nil
+	proofDigest, err := e2erunner.CompactScenarioProofDigest(encoded)
+	if err != nil {
+		return e2erunner.ScenarioResult{}, err
+	}
+	return e2erunner.ScenarioResult{
+		Name: name, Succeeded: true, EvidenceFile: fileName, EvidenceSHA: digest,
+		Proof: encoded, ProofSHA256: proofDigest,
+	}, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -25,5 +26,31 @@ func TestScenarioScriptAcceptsEveryBackendPhase(t *testing.T) {
 				t.Fatalf("scenario script rejected backend phase before closed-input validation: %s", message)
 			}
 		})
+	}
+}
+
+func TestReleaseScenarioShellEmitsProofsInExecutionOrder(t *testing.T) {
+	source, err := os.ReadFile(filepath.Clean(filepath.Join("..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	ordered := []string{
+		"run_scenario artifact-and-install-preflight scenario_artifact_and_install",
+		"run_scenario n-minus-one-upgrade scenario_upgrade",
+		"run_scenario virtiofs-mount-api scenario_virtiofs",
+		"run_scenario single-node-writer-conflict scenario_single_node_writer",
+		"run_scenario one-hundred-pvc-scale scenario_scale",
+		"run_scenario parent-decommission scenario_decommission",
+		"run_scenario official-csi-coexistence scenario_official_coexistence",
+		"run_scenario safe-uninstall scenario_safe_uninstall",
+	}
+	previous := -1
+	for _, statement := range ordered {
+		index := strings.LastIndex(text, statement)
+		if index <= previous {
+			t.Fatalf("scenario statement %q is missing or out of order", statement)
+		}
+		previous = index
 	}
 }

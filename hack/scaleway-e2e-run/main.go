@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
@@ -45,7 +46,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	encodedPlan, err := e2eplan.Encode(plan)
+	encodedPlan, err := encodeExecutionReview(plan, request.Predecessor)
 	if err != nil {
 		fail(err)
 	}
@@ -116,6 +117,25 @@ func main() {
 		fail(err)
 	}
 	fmt.Println(output)
+}
+
+type executionReview struct {
+	SchemaVersion string                 `json:"schemaVersion"`
+	Plan          e2eplan.Plan           `json:"plan"`
+	Predecessor   *e2erunner.Predecessor `json:"predecessor,omitempty"`
+}
+
+func encodeExecutionReview(plan e2eplan.Plan, predecessor *e2erunner.Predecessor) ([]byte, error) {
+	var retained *e2erunner.Predecessor
+	if predecessor != nil {
+		copy := *predecessor
+		retained = &copy
+	}
+	return canonicaljson.Marshal(executionReview{
+		SchemaVersion: e2erunner.SchemaVersionV1,
+		Plan:          plan,
+		Predecessor:   retained,
+	})
 }
 
 func readRequest(path string) (e2erunner.Request, error) {

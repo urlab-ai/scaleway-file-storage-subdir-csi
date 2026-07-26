@@ -29,6 +29,7 @@ type kubernetesPod struct {
 		Name              string            `json:"name"`
 		UID               string            `json:"uid"`
 		DeletionTimestamp *string           `json:"deletionTimestamp"`
+		Labels            map[string]string `json:"labels"`
 		Annotations       map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
@@ -153,7 +154,7 @@ func (backend *scalewayBackend) runDestructiveControllerAndNodeScenarios(
 	if err != nil {
 		return nil, err
 	}
-	return []e2erunner.ScenarioResult{controllerResult, nodeResult}, nil
+	return []e2erunner.ScenarioResult{nodeResult, controllerResult}, nil
 }
 
 func (backend *scalewayBackend) normalNodeDrainScenario(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan) (state nodeDrainState, returnErr error) {
@@ -275,6 +276,13 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 	if err != nil {
 		return proof, replacement, err
 	}
+	recoveryJournal := newControllerRecoveryJournal(plan, clusterID, poolID, controller, lease, oldKapsuleNode, oldTarget)
+	if err := recoveryJournal.validateForRequest(request, plan, inventory); err != nil {
+		return proof, replacement, err
+	}
+	if err := backend.writeControllerRecoveryJournal(plan, recoveryJournal); err != nil {
+		return proof, replacement, fmt.Errorf("arm durable controller recovery: %w", err)
+	}
 	readyNodes, err := backend.readyLinuxNodeNames(ctx, request)
 	if err != nil {
 		return proof, replacement, err
@@ -295,11 +303,50 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 	if err := backend.applyMarkerPod(ctx, request, plan, failurePod, failureClaim, survivor, "controller-hard-failure"); err != nil {
 		return proof, replacement, err
 	}
+	faultInjectorName := "e2e-controller-fault-" + shortRun
+	freeze, err := backend.freezeControllerProcess(ctx, request, plan, controller, faultInjectorName)
+	if err != nil {
+		return proof, replacement, err
+	}
+	instanceStopped := false
+	faultInjectorPresent := true
+	defer func() {
+		if !instanceStopped {
+			resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resumeErr := backend.continueControllerProcess(resumeCtx, request, freeze)
+			cancel()
+			if resumeErr != nil {
+				// Preserve the credential-free injector as the only exact,
+				// already-validated recovery path. Removing it after an
+				// ambiguous provider failure could strand a live controller.
+				returnErr = errors.Join(returnErr, fmt.Errorf(
+					"fault injector Pod %q retained for exact-process recovery: %w",
+					freeze.InjectorPodName, resumeErr,
+				))
+				return
+			}
+		}
+		if faultInjectorPresent {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			deleteErr := backend.deleteControllerFaultInjector(cleanupCtx, request, freeze.InjectorPodName, instanceStopped)
+			cancel()
+			returnErr = errors.Join(returnErr, deleteErr)
+		}
+	}()
 	if err := backend.instance.ServerActionAndWait(&instanceapi.ServerActionAndWaitRequest{
 		Zone: scw.Zone(oldTarget.Zone), ServerID: oldTarget.ServerID, Action: instanceapi.ServerActionPoweroff,
 	}, scw.WithContext(ctx)); err != nil {
 		return proof, replacement, fmt.Errorf("hard-stop exact controller Instance: %w", err)
 	}
+	instanceStopped = true
+	recoveryJournal.Phase = controllerRecoveryPhaseStopped
+	if err := backend.writeControllerRecoveryJournal(plan, recoveryJournal); err != nil {
+		return proof, replacement, fmt.Errorf("retain stopped controller recovery state: %w", err)
+	}
+	if err := backend.deleteControllerFaultInjector(ctx, request, freeze.InjectorPodName, true); err != nil {
+		return proof, replacement, err
+	}
+	faultInjectorPresent = false
 	if _, err := backend.kubectl(ctx, request, nil, "cordon", controller.Spec.NodeName); err != nil {
 		return proof, replacement, err
 	}
@@ -382,6 +429,9 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "delete", "secret/sfs-subdir-controller-approval", "--wait=true", "--timeout=5m"); err != nil {
 		return proof, replacement, err
 	}
+	if err := backend.removeControllerRecoveryJournal(plan); err != nil {
+		return proof, replacement, fmt.Errorf("complete durable controller recovery: %w", err)
+	}
 	newClaim := "e2e-after-hard-failure-" + shortRun
 	if err := backend.applyPVC(ctx, request, plan, newClaim); err != nil {
 		return proof, replacement, err
@@ -408,14 +458,15 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 		OldNodeID: oldNodeID, NewNodeID: newNodeID, ParentFilesystemIDs: parentIDs,
 		ApprovalSecretUID: approvalUID, ApprovalRequestID: approvalRequestID,
 		OperatorSteps: []string{
-			"stop-old-controller-instance", "cordon-old-kubernetes-node", "force-delete-old-controller-pod",
+			"freeze-exact-controller-process", "stop-old-controller-instance",
+			"cordon-old-kubernetes-node", "force-delete-old-controller-pod",
 			"verify-successor-blocked-by-uncleared-lease", "detach-exact-parents-and-verify-dual-absence",
 			"replace-stopped-kapsule-node",
 			"create-immutable-abnormal-takeover-approval", "verify-approval-consumption-and-controller-recovery",
 			"delete-consumed-approval-secret",
 		},
 		RecoverySeconds: controllerRecoverySeconds, OldHolderMatched: true,
-		OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
+		OldControllerProcessFrozen: true, OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
 		ServerAttachmentsAbsent: true, RegionalAttachmentsAbsent: true, ApprovalConsumed: true,
 		ExistingVolumeReadWrite: true, NewPVCName: newClaim, NewPVCBound: true,
 		LeaseUIDPreserved: true, ControllerAvailable: true, ApprovalSecretDeletedAfterAudit: true,

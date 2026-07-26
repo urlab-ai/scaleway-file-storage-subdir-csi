@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
@@ -216,7 +217,7 @@ func TestControllerFailureProofRequiresLeaseBoundReplacement(t *testing.T) {
 		ParentFilesystemIDs: []string{"44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"},
 		ApprovalSecretUID:   "66666666-6666-4666-8666-666666666666", ApprovalRequestID: "77777777-7777-4777-8777-777777777777",
 		OperatorSteps: slices.Clone(controllerFailureOperatorSteps), RecoverySeconds: 120,
-		OldHolderMatched: true, OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
+		OldHolderMatched: true, OldControllerProcessFrozen: true, OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
 		ServerAttachmentsAbsent: true, RegionalAttachmentsAbsent: true, ApprovalConsumed: true, ExistingVolumeReadWrite: true,
 		NewPVCName: "replacement-claim", NewPVCBound: true, LeaseUIDPreserved: true, ControllerAvailable: true,
 		ApprovalSecretDeletedAfterAudit: true,
@@ -224,6 +225,11 @@ func TestControllerFailureProofRequiresLeaseBoundReplacement(t *testing.T) {
 	if err := proof.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
+	proof.OldControllerProcessFrozen = false
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(unfrozen controller process) error = nil")
+	}
+	proof.OldControllerProcessFrozen = true
 	proof.LeaseUIDPreserved = false
 	if err := proof.Validate(); err == nil {
 		t.Fatal("Validate(changed Lease) error = nil")
@@ -351,6 +357,43 @@ func TestCheckpointAndMissingLeaseProofsRequireCompleteRecoveryFence(t *testing.
 	if err := missing.Validate(); err != nil {
 		t.Fatalf("missing-Lease Validate() error = %v", err)
 	}
+	resultFor := func(name string, proof any) ScenarioResult {
+		t.Helper()
+		encoded, err := json.Marshal(proof)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, err := CompactScenarioProofDigest(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ScenarioResult{
+			Name: name, Succeeded: true, EvidenceFile: name + ".json",
+			EvidenceSHA: "sha256:" + strings.Repeat("c", 64),
+			Proof:       encoded, ProofSHA256: digest,
+		}
+	}
+	results := []ScenarioResult{
+		resultFor("checkpoint-and-restore", checkpoint),
+		resultFor("missing-lease-recovery", missing),
+	}
+	if err := ValidateAvailableScenarioProofsForRun(results, proofRunID); err != nil {
+		t.Fatalf("ValidateAvailableScenarioProofsForRun() error = %v", err)
+	}
+	if err := ValidateAvailableScenarioProofsForRun(results, "99999999-9999-4999-8999-999999999999"); err == nil {
+		t.Fatal("ValidateAvailableScenarioProofsForRun(other run) error = nil")
+	}
+	results[0].ProofSHA256 = "sha256:" + strings.Repeat("f", 64)
+	if err := ValidateAvailableScenarioProofsForRun(results, proofRunID); err == nil {
+		t.Fatal("ValidateAvailableScenarioProofsForRun(wrong proof digest) error = nil")
+	}
+	results[0] = resultFor("checkpoint-and-restore", checkpoint)
+	otherCheckpoint := missing
+	otherCheckpoint.CheckpointRequestID = "66666666-6666-4666-8666-666666666666"
+	results[1] = resultFor("missing-lease-recovery", otherCheckpoint)
+	if err := ValidateAvailableScenarioProofsForRun(results, proofRunID); err == nil {
+		t.Fatal("ValidateAvailableScenarioProofsForRun(mixed checkpoints) error = nil")
+	}
 	missing.ControllerNonServingBeforeFence = false
 	if err := missing.Validate(); err == nil {
 		t.Fatal("missing-Lease Validate(served before fence) error = nil")
@@ -363,6 +406,7 @@ func TestArtifactInstallProofRequiresEverySchedulableNode(t *testing.T) {
 		DriverName: "sfs-subdir.csi.urlab.ai", StorageClassName: "sfs-subdir-rwx", LeaseUID: proofRunID, ControllerPodUID: proofFirstNodeID[9:],
 		SchedulableLinuxNodes: 2, ReadyNodePluginPods: 2, RegisteredCSINodes: 2,
 		NamespacePrivileged: true, LeaseHolderExact: true, HolderEvidenceComplete: true, AllImagesImmutable: true,
+		Images:                     testProofImages(),
 		ProductionSecurityContexts: true, ControllerCannotMutatePods: true, StorageClassNonDefault: true, NodeConfigurationGenerationSet: true,
 	}
 	if err := proof.Validate(); err != nil {
@@ -372,6 +416,21 @@ func TestArtifactInstallProofRequiresEverySchedulableNode(t *testing.T) {
 	if err := proof.Validate(); err == nil {
 		t.Fatal("Validate(partial node coverage) error = nil")
 	}
+	proof.ReadyNodePluginPods = 2
+	proof.Images = proof.Images[:4]
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(partial image set) error = nil")
+	}
+}
+
+func testProofImages() []e2eplan.ImageDigest {
+	digest := "sha256:" + strings.Repeat("9", 64)
+	names := []string{"csi-node-driver-registrar", "driver", "external-attacher", "external-provisioner", "livenessprobe"}
+	images := make([]e2eplan.ImageDigest, 0, len(names))
+	for _, name := range names {
+		images = append(images, e2eplan.ImageDigest{Name: name, Reference: "registry.example/" + name + "@" + digest})
+	}
+	return images
 }
 
 func TestOfficialCSICoexistenceProofRequiresExactIdleDriver(t *testing.T) {
@@ -418,9 +477,15 @@ func TestSafeUninstallProofRequiresCompletedAuditAndAbsence(t *testing.T) {
 func TestNMinusOneUpgradeProofRequiresMixedGenerationAndLifecycleCompatibility(t *testing.T) {
 	proof := NMinusOneUpgradeProof{
 		SchemaVersion: SchemaVersionV1, Scenario: "n-minus-one-upgrade", RunID: proofRunID, ObservedAt: "2026-07-21T18:00:00Z",
-		PreviousDriverImage:          "registry.example/driver@sha256:" + strings.Repeat("a", 64),
-		CandidateDriverImage:         "registry.example/driver@sha256:" + strings.Repeat("b", 64),
-		PreviousNodeConfigGeneration: strings.Repeat("c", 64), CandidateNodeConfigGeneration: strings.Repeat("d", 64),
+		PredecessorKind: "release-candidate", PredecessorVersion: "0.1.0-rc.14",
+		PredecessorReleaseTag:            "v0.1.0-rc.14",
+		PredecessorPublicReference:       "https://github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkgs/container/scaleway-file-storage-subdir-csi",
+		PredecessorCompatibilityIdentity: "sha256:" + strings.Repeat("e", 64),
+		PredecessorChartSHA256:           "sha256:" + strings.Repeat("f", 64),
+		PredecessorValuesSHA256:          "sha256:" + strings.Repeat("1", 64),
+		PreviousDriverImage:              "registry.example/driver@sha256:" + strings.Repeat("a", 64),
+		CandidateDriverImage:             "registry.example/driver@sha256:" + strings.Repeat("b", 64),
+		PreviousNodeConfigGeneration:     strings.Repeat("c", 64), CandidateNodeConfigGeneration: strings.Repeat("d", 64),
 		SchedulableLinuxNodes: 2, PreviousPodsBeforeUpgrade: 2, PreviousPodsDuringStagger: 1,
 		CandidatePodsDuringStagger: 1, CandidatePodsAfterConvergence: 2,
 		UpgradePreflightAccepted: true, NewNodeOldControllerBlocked: true, InterruptedNodeRolloutRolledBack: true,
@@ -434,6 +499,24 @@ func TestNMinusOneUpgradeProofRequiresMixedGenerationAndLifecycleCompatibility(t
 	}
 	if err := proof.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+	encoded, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := Predecessor{
+		Kind: proof.PredecessorKind, Version: proof.PredecessorVersion,
+		ReleaseTag: proof.PredecessorReleaseTag, PublicReference: proof.PredecessorPublicReference,
+		CompatibilityIdentity: proof.PredecessorCompatibilityIdentity,
+		ChartSHA256:           proof.PredecessorChartSHA256, ValuesSHA256: proof.PredecessorValuesSHA256,
+		DriverImage: proof.PreviousDriverImage,
+	}
+	if err := ValidatePredecessorScenario([]ScenarioResult{{Name: proof.Scenario, Proof: encoded}}, expected); err != nil {
+		t.Fatalf("validatePredecessorScenario() error = %v", err)
+	}
+	expected.ChartSHA256 = "sha256:" + strings.Repeat("2", 64)
+	if err := ValidatePredecessorScenario([]ScenarioResult{{Name: proof.Scenario, Proof: encoded}}, expected); err == nil {
+		t.Fatal("validatePredecessorScenario(mismatched chart) error = nil")
 	}
 	proof.CandidatePodsDuringStagger = 0
 	if err := proof.Validate(); err == nil {

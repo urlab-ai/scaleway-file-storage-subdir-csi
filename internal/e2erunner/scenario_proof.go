@@ -1,11 +1,16 @@
 package e2erunner
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/admin"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
@@ -163,6 +168,7 @@ type ControllerFailureProof struct {
 	OperatorSteps                   []string `json:"operatorSteps"`
 	RecoverySeconds                 int64    `json:"recoverySeconds"`
 	OldHolderMatched                bool     `json:"oldHolderMatched"`
+	OldControllerProcessFrozen      bool     `json:"oldControllerProcessFrozen"`
 	OldInstanceReachedStopped       bool     `json:"oldInstanceReachedStopped"`
 	SuccessorBlockedBeforeApproval  bool     `json:"successorBlockedBeforeApproval"`
 	ServerAttachmentsAbsent         bool     `json:"serverAttachmentsAbsent"`
@@ -364,25 +370,26 @@ type MissingLeaseRecoveryProof struct {
 // ArtifactInstallProof records that the exact candidate is installed with the
 // production security and coordination boundaries on every schedulable node.
 type ArtifactInstallProof struct {
-	SchemaVersion                  string `json:"schemaVersion"`
-	Scenario                       string `json:"scenario"`
-	RunID                          string `json:"runId"`
-	ObservedAt                     string `json:"observedAt"`
-	DriverName                     string `json:"driverName"`
-	StorageClassName               string `json:"storageClassName"`
-	LeaseUID                       string `json:"leaseUid"`
-	ControllerPodUID               string `json:"controllerPodUid"`
-	SchedulableLinuxNodes          int    `json:"schedulableLinuxNodes"`
-	ReadyNodePluginPods            int    `json:"readyNodePluginPods"`
-	RegisteredCSINodes             int    `json:"registeredCsiNodes"`
-	NamespacePrivileged            bool   `json:"namespacePrivileged"`
-	LeaseHolderExact               bool   `json:"leaseHolderExact"`
-	HolderEvidenceComplete         bool   `json:"holderEvidenceComplete"`
-	AllImagesImmutable             bool   `json:"allImagesImmutable"`
-	ProductionSecurityContexts     bool   `json:"productionSecurityContexts"`
-	ControllerCannotMutatePods     bool   `json:"controllerCannotMutatePods"`
-	StorageClassNonDefault         bool   `json:"storageClassNonDefault"`
-	NodeConfigurationGenerationSet bool   `json:"nodeConfigurationGenerationSet"`
+	SchemaVersion                  string                `json:"schemaVersion"`
+	Scenario                       string                `json:"scenario"`
+	RunID                          string                `json:"runId"`
+	ObservedAt                     string                `json:"observedAt"`
+	DriverName                     string                `json:"driverName"`
+	StorageClassName               string                `json:"storageClassName"`
+	LeaseUID                       string                `json:"leaseUid"`
+	ControllerPodUID               string                `json:"controllerPodUid"`
+	SchedulableLinuxNodes          int                   `json:"schedulableLinuxNodes"`
+	ReadyNodePluginPods            int                   `json:"readyNodePluginPods"`
+	RegisteredCSINodes             int                   `json:"registeredCsiNodes"`
+	NamespacePrivileged            bool                  `json:"namespacePrivileged"`
+	LeaseHolderExact               bool                  `json:"leaseHolderExact"`
+	HolderEvidenceComplete         bool                  `json:"holderEvidenceComplete"`
+	AllImagesImmutable             bool                  `json:"allImagesImmutable"`
+	Images                         []e2eplan.ImageDigest `json:"images"`
+	ProductionSecurityContexts     bool                  `json:"productionSecurityContexts"`
+	ControllerCannotMutatePods     bool                  `json:"controllerCannotMutatePods"`
+	StorageClassNonDefault         bool                  `json:"storageClassNonDefault"`
+	NodeConfigurationGenerationSet bool                  `json:"nodeConfigurationGenerationSet"`
 }
 
 // OfficialCSICoexistenceProof binds coexistence to Scaleway's exact official
@@ -438,6 +445,13 @@ type NMinusOneUpgradeProof struct {
 	Scenario                          string `json:"scenario"`
 	RunID                             string `json:"runId"`
 	ObservedAt                        string `json:"observedAt"`
+	PredecessorKind                   string `json:"predecessorKind"`
+	PredecessorVersion                string `json:"predecessorVersion"`
+	PredecessorReleaseTag             string `json:"predecessorReleaseTag"`
+	PredecessorPublicReference        string `json:"predecessorPublicReference"`
+	PredecessorCompatibilityIdentity  string `json:"predecessorCompatibilityIdentity"`
+	PredecessorChartSHA256            string `json:"predecessorChartSha256"`
+	PredecessorValuesSHA256           string `json:"predecessorValuesSha256"`
 	PreviousDriverImage               string `json:"previousDriverImage"`
 	CandidateDriverImage              string `json:"candidateDriverImage"`
 	PreviousNodeConfigGeneration      string `json:"previousNodeConfigGeneration"`
@@ -636,6 +650,74 @@ func ValidateAvailableScenarioProofs(scenarios []ScenarioResult) error {
 		}
 	}
 	return nil
+}
+
+// ValidateAvailableScenarioProofsForRun binds every embedded semantic proof to
+// the exact run and to a digest over its compact JSON bytes. It also couples
+// the two halves of checkpoint recovery so independently valid proofs from
+// different checkpoints cannot be combined.
+func ValidateAvailableScenarioProofsForRun(scenarios []ScenarioResult, runID string) error {
+	if err := volume.ValidateOperationID(runID); err != nil {
+		return fmt.Errorf("scenario proof expected run ID: %w", err)
+	}
+	var checkpoint *CheckpointRestoreProof
+	var missingLease *MissingLeaseRecoveryProof
+	for _, scenario := range scenarios {
+		if len(scenario.Proof) == 0 {
+			return fmt.Errorf("scenario %q has no embedded semantic proof", scenario.Name)
+		}
+		digest, err := CompactScenarioProofDigest(scenario.Proof)
+		if err != nil {
+			return fmt.Errorf("digest scenario %q proof: %w", scenario.Name, err)
+		}
+		if scenario.ProofSHA256 != digest {
+			return fmt.Errorf("scenario %q embedded proof digest mismatch", scenario.Name)
+		}
+		var envelope struct {
+			RunID string `json:"runId"`
+		}
+		if err := json.Unmarshal(scenario.Proof, &envelope); err != nil || envelope.RunID != runID {
+			return fmt.Errorf("scenario %q proof belongs to another run", scenario.Name)
+		}
+		switch scenario.Name {
+		case "checkpoint-and-restore":
+			var proof CheckpointRestoreProof
+			if err := strictjson.Decode(scenario.Proof, &proof); err != nil {
+				return fmt.Errorf("decode checkpoint proof for cross-binding: %w", err)
+			}
+			checkpoint = &proof
+		case "missing-lease-recovery":
+			var proof MissingLeaseRecoveryProof
+			if err := strictjson.Decode(scenario.Proof, &proof); err != nil {
+				return fmt.Errorf("decode missing-Lease proof for cross-binding: %w", err)
+			}
+			missingLease = &proof
+		}
+	}
+	if err := ValidateAvailableScenarioProofs(scenarios); err != nil {
+		return err
+	}
+	if checkpoint != nil || missingLease != nil {
+		if checkpoint == nil || missingLease == nil ||
+			checkpoint.CheckpointRequestID != missingLease.CheckpointRequestID ||
+			checkpoint.ManifestSHA256 != missingLease.CheckpointManifestSHA256 ||
+			!slices.Equal(checkpoint.OldInstanceIDs, missingLease.OldInstanceIDs) ||
+			!slices.Equal(checkpoint.ReplacementInstanceIDs, missingLease.ReplacementInstanceIDs) {
+			return fmt.Errorf("checkpoint and missing-Lease proofs do not describe one exact recovery")
+		}
+	}
+	return nil
+}
+
+// CompactScenarioProofDigest returns the stable identity used to bind an
+// embedded proof independently from the retained file's trailing newline.
+func CompactScenarioProofDigest(encoded []byte) (string, error) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, encoded); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(compact.Bytes())
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 // Validate verifies the real virtiofs mount, immutable parent claim, and
@@ -856,6 +938,16 @@ func (proof NMinusOneUpgradeProof) Validate() error {
 		proof.PreviousDriverImage == proof.CandidateDriverImage {
 		return fmt.Errorf("N-1 upgrade images are not distinct immutable references")
 	}
+	predecessor := Predecessor{
+		Kind: proof.PredecessorKind, Version: proof.PredecessorVersion,
+		ReleaseTag: proof.PredecessorReleaseTag, PublicReference: proof.PredecessorPublicReference,
+		CompatibilityIdentity: proof.PredecessorCompatibilityIdentity,
+		ChartSHA256:           proof.PredecessorChartSHA256, ValuesSHA256: proof.PredecessorValuesSHA256,
+		DriverImage: proof.PreviousDriverImage,
+	}
+	if err := predecessor.Validate(); err != nil {
+		return fmt.Errorf("N-1 predecessor identity: %w", err)
+	}
 	if !validDigest("sha256:"+proof.PreviousNodeConfigGeneration) || !validDigest("sha256:"+proof.CandidateNodeConfigGeneration) ||
 		proof.PreviousNodeConfigGeneration == proof.CandidateNodeConfigGeneration {
 		return fmt.Errorf("N-1 upgrade node configuration generations are invalid or equal")
@@ -879,6 +971,32 @@ func (proof NMinusOneUpgradeProof) Validate() error {
 	return nil
 }
 
+// ValidatePredecessorScenario binds the observed N-1 proof to the closed
+// public predecessor supplied before live execution.
+func ValidatePredecessorScenario(scenarios []ScenarioResult, expected Predecessor) error {
+	for _, scenario := range scenarios {
+		if scenario.Name != "n-minus-one-upgrade" {
+			continue
+		}
+		var proof NMinusOneUpgradeProof
+		if err := strictjson.Decode(scenario.Proof, &proof); err != nil {
+			return fmt.Errorf("decode N-1 proof for predecessor binding: %w", err)
+		}
+		observed := Predecessor{
+			Kind: proof.PredecessorKind, Version: proof.PredecessorVersion,
+			ReleaseTag: proof.PredecessorReleaseTag, PublicReference: proof.PredecessorPublicReference,
+			CompatibilityIdentity: proof.PredecessorCompatibilityIdentity,
+			ChartSHA256:           proof.PredecessorChartSHA256, ValuesSHA256: proof.PredecessorValuesSHA256,
+			DriverImage: proof.PreviousDriverImage,
+		}
+		if observed != expected {
+			return fmt.Errorf("N-1 proof differs from the exact public predecessor retained by the run")
+		}
+		return nil
+	}
+	return fmt.Errorf("N-1 proof is absent from release qualification evidence")
+}
+
 // Validate verifies the live production installation boundary.
 func (proof ArtifactInstallProof) Validate() error {
 	if err := validateProofEnvelope(proof.SchemaVersion, proof.Scenario, "artifact-and-install-preflight", proof.RunID, proof.ObservedAt); err != nil {
@@ -899,6 +1017,9 @@ func (proof ArtifactInstallProof) Validate() error {
 	if proof.SchedulableLinuxNodes < 2 || proof.ReadyNodePluginPods != proof.SchedulableLinuxNodes ||
 		proof.RegisteredCSINodes != proof.SchedulableLinuxNodes {
 		return fmt.Errorf("artifact install does not cover every schedulable Linux node")
+	}
+	if err := validateArtifactImages(proof.Images); err != nil {
+		return fmt.Errorf("artifact install image identities: %w", err)
 	}
 	if !proof.NamespacePrivileged || !proof.LeaseHolderExact || !proof.HolderEvidenceComplete ||
 		!proof.AllImagesImmutable || !proof.ProductionSecurityContexts || !proof.ControllerCannotMutatePods ||
@@ -971,6 +1092,7 @@ func (proof SafeUninstallProof) Validate() error {
 }
 
 var controllerFailureOperatorSteps = []string{
+	"freeze-exact-controller-process",
 	"stop-old-controller-instance",
 	"cordon-old-kubernetes-node",
 	"force-delete-old-controller-pod",
@@ -1023,7 +1145,7 @@ func (proof ControllerFailureProof) Validate() error {
 	if !slices.Equal(proof.OperatorSteps, controllerFailureOperatorSteps) || proof.RecoverySeconds <= 0 || proof.RecoverySeconds > 3600 {
 		return fmt.Errorf("controller failure operator audit is incomplete")
 	}
-	if !proof.OldHolderMatched || !proof.OldInstanceReachedStopped || !proof.SuccessorBlockedBeforeApproval ||
+	if !proof.OldHolderMatched || !proof.OldControllerProcessFrozen || !proof.OldInstanceReachedStopped || !proof.SuccessorBlockedBeforeApproval ||
 		!proof.ServerAttachmentsAbsent || !proof.RegionalAttachmentsAbsent || !proof.ApprovalConsumed ||
 		!proof.ExistingVolumeReadWrite || !proof.NewPVCBound || !proof.LeaseUIDPreserved ||
 		!proof.ControllerAvailable || !proof.ApprovalSecretDeletedAfterAudit {

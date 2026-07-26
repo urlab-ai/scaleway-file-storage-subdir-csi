@@ -82,28 +82,13 @@ func TestBuildProducesNonAuthorizingRunOwnedPlan(t *testing.T) {
 	}
 }
 
-func TestBuildNeverMarksReusedClusterForDeletion(t *testing.T) {
+func TestBuildRejectsReusedCluster(t *testing.T) {
 	request := validRequest()
 	request.Profile = ProfileReleaseCandidate
 	request.Parents.SizeBytes = 100_000_000_000
-	request.Cluster = ClusterRequest{Disposition: ClusterReuse, ExistingID: "33333333-3333-4333-8333-333333333333"}
-	plan, err := Build(request)
-	if err != nil {
-		t.Fatalf("Build() error = %v", err)
-	}
-	if plan.Cluster.CreatedByRun || plan.Cluster.DeleteOnCleanup || plan.PlannedResources[0].DeleteOnCleanup {
-		t.Fatalf("reused cluster deletion authority = cluster %#v resources %#v", plan.Cluster, plan.PlannedResources)
-	}
-	if len(plan.PlannedResources) != 6 || plan.PlannedResources[0].Kind != "kapsule-cluster" {
-		t.Fatalf("reused cluster must not plan a Private Network: %#v", plan.PlannedResources)
-	}
-	if !plan.NodePool.CreatedByRun || !plan.NodePool.DeleteOnCleanup || !plan.PlannedResources[1].DeleteOnCleanup || !plan.PlannedResources[2].DeleteOnCleanup {
-		t.Fatalf("run-owned node pool is not scheduled for cleanup: nodePool %#v resources %#v", plan.NodePool, plan.PlannedResources)
-	}
-	for _, operation := range plan.DestructiveOperations {
-		if strings.Contains(operation, "run-owned ephemeral cluster") || strings.Contains(operation, "run-owned Private Network") {
-			t.Fatalf("reused cluster plan contains cluster-network deletion: %q", operation)
-		}
+	request.Cluster = ClusterRequest{Disposition: "reuse", ExistingID: "33333333-3333-4333-8333-333333333333"}
+	if _, err := Build(request); err == nil {
+		t.Fatal("Build(reused cluster) error = nil")
 	}
 }
 
@@ -155,9 +140,9 @@ func TestRequestValidationRejectsUnsafeOrIncompletePlans(t *testing.T) {
 		"created with ID": func(request *Request) {
 			request.Cluster.ExistingID = "33333333-3333-4333-8333-333333333333"
 		},
-		"reuse without ID": func(request *Request) { request.Cluster = ClusterRequest{Disposition: ClusterReuse} },
+		"reuse without ID": func(request *Request) { request.Cluster = ClusterRequest{Disposition: "reuse"} },
 		"reused base cluster": func(request *Request) {
-			request.Cluster = ClusterRequest{Disposition: ClusterReuse, ExistingID: "33333333-3333-4333-8333-333333333333"}
+			request.Cluster = ClusterRequest{Disposition: "reuse", ExistingID: "33333333-3333-4333-8333-333333333333"}
 		},
 		"one node":               func(request *Request) { request.NodePool.Count = 1 },
 		"three-node base smoke":  func(request *Request) { request.NodePool.Count = 3 },

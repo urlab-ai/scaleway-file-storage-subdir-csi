@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+# Capture provider authority using shell builtins, then remove it from the
+# exported environment before even resolving this script's path. No general
+# child process, including dirname, may inherit provider credentials.
+provider_access_key=${SCW_ACCESS_KEY-}
+provider_secret_key=${SCW_SECRET_KEY-}
+unset SCW_ACCESS_KEY SCW_SECRET_KEY
+readonly provider_access_key provider_secret_key
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 KUBECTL=${KUBECTL:-kubectl}
@@ -9,16 +17,6 @@ JQ=${JQ:-jq}
 SCW=${SCW:-scw}
 BOOTSTRAP_DRIVER_NAME=file-storage-subdir.csi.urlab.ai
 readonly BOOTSTRAP_DRIVER_NAME
-
-# The live executor must receive provider credentials, but kubectl, Helm, jq,
-# and the other scenario tools must not inherit them. Keep an unexported copy
-# in this shell and expose it only to the exact scw invocation that needs it.
-# The controller Secret is populated through stdin below, never through process
-# arguments or a plaintext file in the retained evidence directory.
-provider_access_key=${SCW_ACCESS_KEY-}
-provider_secret_key=${SCW_SECRET_KEY-}
-unset SCW_ACCESS_KEY SCW_SECRET_KEY
-readonly provider_access_key provider_secret_key
 
 mode=${1:-}
 [ "$mode" = run-smoke ] || [ "$mode" = run-pre ] || [ "$mode" = run-mid ] || [ "$mode" = run-post ] || [ "$mode" = cleanup ] || {
@@ -30,6 +28,8 @@ shift
 kubeconfig= chart= values= namespace= release= admin= workload_image=
 project_id= region= run_id= cluster_id= parent_a= parent_b= results= evidence_dir= max_filesystems=
 preconditions= validator= previous_chart= previous_values= profile= cluster_created_by_run=
+predecessor_kind= predecessor_version= predecessor_release_tag= predecessor_public_reference=
+predecessor_compatibility_identity= predecessor_chart_sha256= predecessor_values_sha256= predecessor_driver_image=
 for argument in "$@"; do
   case "$argument" in
     --kubeconfig=*) kubeconfig=${argument#*=} ;;
@@ -54,6 +54,14 @@ for argument in "$@"; do
     --validator=*) validator=${argument#*=} ;;
     --previous-chart=*) previous_chart=${argument#*=} ;;
     --previous-values=*) previous_values=${argument#*=} ;;
+    --predecessor-kind=*) predecessor_kind=${argument#*=} ;;
+    --predecessor-version=*) predecessor_version=${argument#*=} ;;
+    --predecessor-release-tag=*) predecessor_release_tag=${argument#*=} ;;
+    --predecessor-public-reference=*) predecessor_public_reference=${argument#*=} ;;
+    --predecessor-compatibility-identity=*) predecessor_compatibility_identity=${argument#*=} ;;
+    --predecessor-chart-sha256=*) predecessor_chart_sha256=${argument#*=} ;;
+    --predecessor-values-sha256=*) predecessor_values_sha256=${argument#*=} ;;
+    --predecessor-driver-image=*) predecessor_driver_image=${argument#*=} ;;
     *) echo "unknown Kapsule E2E argument: $argument" >&2; exit 2 ;;
   esac
 done
@@ -90,6 +98,24 @@ if [ "$mode" = run-smoke ]; then
 elif [ "$mode" = run-pre ] || [ "$mode" = run-mid ] || [ "$mode" = run-post ]; then
   [ "$profile" = release-candidate ] || { echo "$mode requires profile release-candidate" >&2; exit 2; }
   printf '%s\n' "$max_filesystems" | grep -Eq '^[1-9][0-9]*$' || { echo "$mode requires a positive max_filesystems" >&2; exit 2; }
+  for required in previous_chart previous_values predecessor_kind predecessor_version predecessor_release_tag \
+    predecessor_public_reference predecessor_compatibility_identity predecessor_chart_sha256 \
+    predecessor_values_sha256 predecessor_driver_image; do
+    require_value "$required"
+  done
+  { [ "$predecessor_kind" = release ] || [ "$predecessor_kind" = release-candidate ]; } ||
+    { echo "predecessor kind must be release or release-candidate" >&2; exit 2; }
+  [ "$predecessor_release_tag" = "v$predecessor_version" ] ||
+    { echo "predecessor version and release tag disagree" >&2; exit 2; }
+  printf '%s\n' "$predecessor_public_reference" |
+    grep -Eq '^https://github\.com/urlab-ai/scaleway-file-storage-subdir-csi/[^[:space:]]+$' ||
+    { echo "predecessor public reference is outside the project" >&2; exit 2; }
+  for predecessor_digest in "$predecessor_compatibility_identity" "$predecessor_chart_sha256" "$predecessor_values_sha256"; do
+    printf '%s\n' "$predecessor_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' ||
+      { echo "predecessor digest is invalid" >&2; exit 2; }
+  done
+  printf '%s\n' "$predecessor_driver_image" | grep -Eq '^[^[:space:]@]+@sha256:[0-9a-f]{64}$' ||
+    { echo "predecessor driver image is not immutable" >&2; exit 2; }
 elif [ "$mode" = cleanup ]; then
   { [ "$profile" = base ] || [ "$profile" = release-candidate ]; } || { echo "cleanup requires a supported profile" >&2; exit 2; }
   [ "$region" = fr-par ] || { echo "cleanup requires the v1 region fr-par" >&2; exit 2; }
@@ -127,7 +153,9 @@ write_credentials() {
   # that both expected Secret keys are present before Helm can install anything.
   printf 'SCW_ACCESS_KEY=%s\nSCW_SECRET_KEY=%s\n' "$provider_access_key" "$provider_secret_key" |
     k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-credentials \
-      --from-env-file=/dev/stdin --dry-run=client -o yaml |
+      --from-env-file=/dev/stdin \
+      --labels="app.kubernetes.io/instance=$release,sfs-subdir-e2e-run=$run_id" \
+      --dry-run=client -o yaml |
     k create -f -
 }
 
@@ -142,6 +170,64 @@ helm_candidate() {
     --set-json "pools.standard.filesystems=$filesystems" \
     --set-json 'controller.affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"topology.kubernetes.io/zone","operator":"In","values":["fr-par-1","fr-par-2"]}]}]}}}' \
     --wait --timeout 30m
+}
+
+n_minus_one_recovery_path() {
+  printf '%s/.n-minus-one-upgrade-active.json\n' "$evidence_dir"
+}
+
+arm_n_minus_one_recovery() {
+  recovery_marker=$(n_minus_one_recovery_path)
+  [ ! -e "$recovery_marker" ] && [ ! -L "$recovery_marker" ] || {
+    echo "N-1 recovery marker already exists" >&2
+    return 1
+  }
+  "$JQ" -cn --arg run "$run_id" --arg namespace "$namespace" --arg release "$release" \
+    --arg parent "$parent_a" --arg chart "$chart" --arg values "$values" \
+    '{schemaVersion:"1",runId:$run,namespace:$namespace,release:$release,parentFilesystemId:$parent,chart:$chart,values:$values}' \
+    >"$recovery_marker.tmp"
+  chmod 600 "$recovery_marker.tmp"
+  sync "$recovery_marker.tmp"
+  mv "$recovery_marker.tmp" "$recovery_marker"
+  sync
+}
+
+disarm_n_minus_one_recovery() {
+  recovery_marker=$(n_minus_one_recovery_path)
+  rm -f "$recovery_marker"
+  sync
+}
+
+recover_n_minus_one_transition() {
+  recovery_marker=$(n_minus_one_recovery_path)
+  if [ ! -e "$recovery_marker" ] && [ ! -L "$recovery_marker" ]; then
+    return 0
+  fi
+  [ -f "$recovery_marker" ] && [ ! -L "$recovery_marker" ] || {
+    echo "N-1 recovery marker is not an exact regular file" >&2
+    return 1
+  }
+  for required in chart values namespace release project_id parent_a; do
+    require_value "$required"
+  done
+  "$JQ" -e --arg run "$run_id" --arg namespace "$namespace" --arg release "$release" \
+    --arg parent "$parent_a" --arg chart "$chart" --arg values "$values" '
+      .schemaVersion == "1" and .runId == $run and .namespace == $namespace and
+      .release == $release and .parentFilesystemId == $parent and
+      .chart == $chart and .values == $values and (keys | sort) ==
+      ["chart","namespace","parentFilesystemId","release","runId","schemaVersion","values"]
+    ' "$recovery_marker" >/dev/null
+  recovery_parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"}]"
+  helm_candidate "$recovery_parents"
+  recovery_controller=$(one_name deployment controller)
+  recovery_node=$(one_name daemonset node)
+  k -n "$namespace" rollout status "$recovery_controller" --timeout=20m
+  k -n "$namespace" rollout status "$recovery_node" --timeout=20m
+  recovery_controller_generation=$(k -n "$namespace" get "$recovery_controller" -o jsonpath='{.spec.template.metadata.annotations.scaleway-sfs-subdir-csi\.io/node-config-generation}')
+  recovery_node_generation=$(k -n "$namespace" get "$recovery_node" -o jsonpath='{.spec.template.metadata.annotations.scaleway-sfs-subdir-csi\.io/node-config-generation}')
+  [ -n "$recovery_controller_generation" ] && [ "$recovery_controller_generation" = "$recovery_node_generation" ]
+  [ "$(k -n "$namespace" get "$recovery_node" -o jsonpath='{.spec.updateStrategy.type}')" = RollingUpdate ]
+  disarm_n_minus_one_recovery
 }
 
 wait_pvcs_bound() {
@@ -462,6 +548,7 @@ prepare_n_minus_one_upgrade() {
   upgrade_controller=$(one_name deployment controller)
   upgrade_previous_generation=$(k -n "$namespace" get "$upgrade_node" -o jsonpath='{.spec.template.metadata.annotations.scaleway-sfs-subdir-csi\.io/node-config-generation}')
   upgrade_previous_image=$(k -n "$namespace" get "$upgrade_node" -o json | "$JQ" -er '.spec.template.spec.containers[] | select(.name == "driver") | .image')
+  [ "$upgrade_previous_image" = "$predecessor_driver_image" ]
   upgrade_old_controller_uid=$(k -n "$namespace" get pods -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o json | "$JQ" -er '.items | if length == 1 then .[0].metadata.uid else error("previous controller is not singular") end')
   upgrade_lease_uid=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o jsonpath='{.metadata.uid}')
   upgrade_schedulable=$(k get nodes -l kubernetes.io/os=linux -o json | "$JQ" -r '[.items[] | select(.spec.unschedulable != true)] | length')
@@ -470,6 +557,7 @@ prepare_n_minus_one_upgrade() {
     '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
       select(.metadata.annotations["scaleway-sfs-subdir-csi.io/node-config-generation"] == $generation)] | length')
   [ "$upgrade_previous_ready" = "$upgrade_schedulable" ]
+  arm_n_minus_one_recovery
 
   for upgrade_policy in archive retain delete; do
     upgrade_class="e2e-upgrade-$upgrade_policy-$short_run"
@@ -682,10 +770,18 @@ prepare_n_minus_one_upgrade() {
   k delete storageclass -l "$run_label,sfs-subdir-e2e-scenario=n-minus-one-upgrade" --wait=true --timeout=5m
 
   "$JQ" -n -c --arg run "$run_id" --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg predecessor_kind "$predecessor_kind" --arg predecessor_version "$predecessor_version" \
+    --arg predecessor_release_tag "$predecessor_release_tag" --arg predecessor_public_reference "$predecessor_public_reference" \
+    --arg predecessor_compatibility_identity "$predecessor_compatibility_identity" \
+    --arg predecessor_chart_sha256 "$predecessor_chart_sha256" --arg predecessor_values_sha256 "$predecessor_values_sha256" \
     --arg previous_image "$upgrade_previous_image" --arg candidate_image "$upgrade_candidate_image" \
     --arg previous_generation "$upgrade_previous_generation" --arg candidate_generation "$upgrade_candidate_generation" \
     --argjson nodes "$upgrade_schedulable" --argjson previous_during "$((upgrade_schedulable - 1))" '
       {schemaVersion:"1",scenario:"n-minus-one-upgrade",runId:$run,observedAt:$observed,
+       predecessorKind:$predecessor_kind,predecessorVersion:$predecessor_version,
+       predecessorReleaseTag:$predecessor_release_tag,predecessorPublicReference:$predecessor_public_reference,
+       predecessorCompatibilityIdentity:$predecessor_compatibility_identity,
+       predecessorChartSha256:$predecessor_chart_sha256,predecessorValuesSha256:$predecessor_values_sha256,
        previousDriverImage:$previous_image,candidateDriverImage:$candidate_image,
        previousNodeConfigGeneration:$previous_generation,candidateNodeConfigGeneration:$candidate_generation,
        schedulableLinuxNodes:$nodes,previousPodsBeforeUpgrade:$nodes,previousPodsDuringStagger:$previous_during,
@@ -700,18 +796,20 @@ prepare_n_minus_one_upgrade() {
     ' >"$upgrade_prepared.tmp"
   chmod 600 "$upgrade_prepared.tmp"
   mv "$upgrade_prepared.tmp" "$upgrade_prepared"
+  disarm_n_minus_one_recovery
 }
 
 scenario_artifact_and_install() {
   proof="$evidence_dir/artifact-and-install-preflight.json"
-  command -v go
-  "$admin" version
   k get namespace "$namespace" >/dev/null 2>&1 || k create namespace "$namespace"
   k label namespace "$namespace" pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite
   k label namespace "$namespace" sfs-subdir-e2e-run="$run_id" --overwrite
+  k label namespace "$namespace" app.kubernetes.io/instance="$release" --overwrite
   write_credentials
   k -n "$namespace" create secret generic scaleway-sfs-subdir-csi-identity \
-    --from-literal="installationID=$run_id" --dry-run=client -o yaml | k create -f -
+    --from-literal="installationID=$run_id" \
+    --labels="app.kubernetes.io/instance=$release,sfs-subdir-e2e-run=$run_id" \
+    --dry-run=client -o yaml | k create -f -
   parents="[{\"id\":\"$parent_a\",\"name\":\"e2e-parent-a\",\"state\":\"active\"},{\"id\":\"$parent_b\",\"name\":\"e2e-parent-b\",\"state\":\"active\"}]"
   if [ "$profile" = release-candidate ]; then
     # First prove that logical-volume fan-out exceeds one Instance's physical
@@ -777,6 +875,19 @@ scenario_artifact_and_install() {
     [$controller[0].spec.template.spec.containers[].image,$node[0].spec.template.spec.containers[].image] |
     length >= 5 and all(.[]; test("@sha256:[0-9a-f]{64}$"))
   ' >/dev/null
+  observed_images=$("$JQ" -n -c --slurpfile controller "$controller_json" --slurpfile node "$node_json" '
+    [$controller[0].spec.template.spec.containers[], $node[0].spec.template.spec.containers[]] as $containers |
+    def exact_reference($container_name):
+      [$containers[] | select(.name == $container_name) | .image] | unique |
+      if length == 1 then .[0] else error("container image identity is absent or inconsistent") end;
+    [
+      {name:"csi-node-driver-registrar",reference:exact_reference("node-driver-registrar")},
+      {name:"driver",reference:exact_reference("driver")},
+      {name:"external-attacher",reference:exact_reference("external-attacher")},
+      {name:"external-provisioner",reference:exact_reference("external-provisioner")},
+      {name:"livenessprobe",reference:exact_reference("liveness-probe")}
+    ]
+  ')
   "$JQ" -e -n --slurpfile controller "$controller_json" --slurpfile node "$node_json" '
     ($controller[0].spec.template.spec.containers[] | select(.name == "driver")) as $controllerDriver |
     ($node[0].spec.template.spec.containers[] | select(.name == "driver")) as $nodeDriver |
@@ -824,11 +935,12 @@ scenario_artifact_and_install() {
 
   "$JQ" -n -c --arg run "$run_id" --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg driver "$driver" --arg lease "$lease_uid" --arg controller_uid "$controller_pod_uid" \
-    --argjson nodes "$schedulable_nodes" --argjson plugins "$ready_node_plugins" --argjson registrations "$registered_csi_nodes" '
+    --argjson nodes "$schedulable_nodes" --argjson plugins "$ready_node_plugins" \
+    --argjson registrations "$registered_csi_nodes" --argjson images "$observed_images" '
       {schemaVersion:"1",scenario:"artifact-and-install-preflight",runId:$run,observedAt:$observed,
        driverName:$driver,storageClassName:"sfs-subdir-rwx",leaseUid:$lease,controllerPodUid:$controller_uid,
        schedulableLinuxNodes:$nodes,readyNodePluginPods:$plugins,registeredCsiNodes:$registrations,
-       namespacePrivileged:true,leaseHolderExact:true,holderEvidenceComplete:true,allImagesImmutable:true,
+       namespacePrivileged:true,leaseHolderExact:true,holderEvidenceComplete:true,allImagesImmutable:true,images:$images,
        productionSecurityContexts:true,controllerCannotMutatePods:true,storageClassNonDefault:true,
        nodeConfigurationGenerationSet:true}
     ' >"$proof.tmp"
@@ -2029,6 +2141,7 @@ validate_uninstall_result_file() {
 cleanup_cluster() {
 	  uninstall_result="$evidence_dir/uninstall-result-$run_id.json"
 	  bootstrap_result="$evidence_dir/bootstrap-abort-cleanup-$run_id.json"
+	  recover_n_minus_one_transition
 	  releases=$(h list -n "$namespace" --all -o json)
 	  release_count=$(printf '%s' "$releases" | "$JQ" -er --arg release "$release" '[.[] | select(.name == $release)] | length')
 	  [ "$release_count" = 0 ] || [ "$release_count" = 1 ] || {
@@ -2225,14 +2338,17 @@ if [ "$mode" = run-smoke ]; then
   run_scenario controller-hard-failure scenario_controller_failure
 elif [ "$mode" = run-pre ]; then
   run_scenario artifact-and-install-preflight scenario_artifact_and_install
+  # The real N-1 upgrade necessarily installs the predecessor before the
+  # candidate. Admit its already-completed proof immediately instead of hiding
+  # it until a later phase.
+  run_scenario n-minus-one-upgrade scenario_upgrade
   run_scenario virtiofs-mount-api scenario_virtiofs
   run_scenario single-node-writer-conflict scenario_single_node_writer
   run_scenario one-hundred-pvc-scale scenario_scale
 elif [ "$mode" = run-mid ]; then
-  run_scenario n-minus-one-upgrade scenario_upgrade
   run_scenario parent-decommission scenario_decommission
-  run_scenario official-csi-coexistence scenario_official_coexistence
 else
+  run_scenario official-csi-coexistence scenario_official_coexistence
   run_scenario safe-uninstall scenario_safe_uninstall
 fi
 "$JQ" -s '.' "$entries" >"$results"

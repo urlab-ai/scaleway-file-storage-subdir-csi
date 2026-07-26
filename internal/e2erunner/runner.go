@@ -17,6 +17,7 @@ import (
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
 
@@ -24,19 +25,19 @@ const SchemaVersionV1 = "1"
 
 var RequiredScenarios = []string{
 	"artifact-and-install-preflight",
+	"n-minus-one-upgrade",
 	"virtiofs-mount-api",
 	"single-node-writer-conflict",
 	"one-hundred-pvc-scale",
-	"controller-hard-failure",
-	"node-drain-and-replacement",
 	"provider-attach-detach",
 	"parent-growth",
+	"node-drain-and-replacement",
+	"controller-hard-failure",
+	"parent-decommission",
 	"checkpoint-and-restore",
 	"missing-lease-recovery",
-	"n-minus-one-upgrade",
-	"parent-decommission",
-	"safe-uninstall",
 	"official-csi-coexistence",
+	"safe-uninstall",
 }
 
 // SmokeScenarios is the closed, deliberately non-qualifying base-profile
@@ -86,9 +87,27 @@ type Request struct {
 	WorkloadImage     string          `json:"workloadImage"`
 	PreviousChart     string          `json:"previousChart,omitempty"`
 	PreviousValues    string          `json:"previousValues,omitempty"`
+	PreviousManifest  string          `json:"previousManifest,omitempty"`
+	Predecessor       *Predecessor    `json:"predecessor,omitempty"`
 	DriverNamespace   string          `json:"driverNamespace"`
 	HelmRelease       string          `json:"helmRelease"`
 	ScenarioDeadline  string          `json:"scenarioDeadline"`
+}
+
+// Predecessor binds the N-1 upgrade to one explicitly public compatible
+// release or release candidate. CompatibilityIdentity is the SHA-256 of the
+// predecessor's canonical candidate manifest; the chart, values and driver
+// identities are retained separately so the live runner can compare each
+// observed artifact before mutation.
+type Predecessor struct {
+	Kind                  string `json:"kind"`
+	Version               string `json:"version"`
+	ReleaseTag            string `json:"releaseTag"`
+	PublicReference       string `json:"publicReference"`
+	CompatibilityIdentity string `json:"compatibilityIdentity"`
+	ChartSHA256           string `json:"chartSha256"`
+	ValuesSHA256          string `json:"valuesSha256"`
+	DriverImage           string `json:"driverImage"`
 }
 
 // ScenarioResult is one retained exact scenario outcome.
@@ -97,6 +116,7 @@ type ScenarioResult struct {
 	Succeeded    bool   `json:"succeeded"`
 	EvidenceFile string `json:"evidenceFile"`
 	EvidenceSHA  string `json:"evidenceSha256"`
+	ProofSHA256  string `json:"proofSha256,omitempty"`
 	// Proof retains the validated, scenario-specific semantic evidence in the
 	// final qualification document. A file digest alone proves bytes, not that
 	// those bytes establish the production invariant named by the scenario.
@@ -121,6 +141,7 @@ type Evidence struct {
 	FinalInventory   e2ecleanup.Inventory `json:"finalInventory"`
 	Succeeded        bool                 `json:"succeeded"`
 	ArtifactDigests  e2eplan.Artifacts    `json:"artifactDigests"`
+	Predecessor      *Predecessor         `json:"predecessor,omitempty"`
 }
 
 // Backend is the only mutating boundary. Implementations must durably record
@@ -200,7 +221,7 @@ func executeWithQualificationGate(ctx context.Context, request Request, execute 
 	if scenarioErr != nil {
 		return Evidence{}, fmt.Errorf("run exact real E2E scenarios: %w", scenarioErr)
 	}
-	if err := ValidateScenarioResultsForProfile(plan.Profile, scenarios); err != nil {
+	if err := ValidateScenarioResultsForRun(plan.Profile, plan.RunID, scenarios); err != nil {
 		return Evidence{}, err
 	}
 	final, cleanupErr := backend.Cleanup(ctx, request, inventory)
@@ -222,6 +243,7 @@ func executeWithQualificationGate(ctx context.Context, request Request, execute 
 		CommercialType: plan.NodePool.CommercialType, StartedAt: started.Format(time.RFC3339Nano),
 		CompletedAt: now().UTC().Format(time.RFC3339Nano), Scenarios: slices.Clone(scenarios),
 		Cleanup: cleanupPlan, FinalInventory: final, Succeeded: true, ArtifactDigests: plan.Artifacts,
+		Predecessor: clonePredecessor(request.Predecessor),
 	}
 	return evidence, validateEvidenceForProfile(evidence)
 }
@@ -250,15 +272,31 @@ func (request Request) Validate() error {
 			return fmt.Errorf("%s must be a clean absolute non-root path", name)
 		}
 	}
-	if (request.PreviousChart == "") != (request.PreviousValues == "") {
-		return fmt.Errorf("previous chart and values must both be set or both be absent")
+	previousPathsPresent := request.PreviousChart != "" || request.PreviousValues != "" || request.PreviousManifest != ""
+	if (request.PreviousChart == "") != (request.PreviousValues == "") ||
+		(request.PreviousChart == "") != (request.PreviousManifest == "") ||
+		previousPathsPresent != (request.Predecessor != nil) {
+		return fmt.Errorf("previous chart, values, manifest, and predecessor identity must all be set or all be absent")
 	}
-	if request.Plan.Profile == e2eplan.ProfileReleaseCandidate && request.PreviousChart == "" {
-		return fmt.Errorf("release-candidate qualification requires the previous public chart and values for N-1 upgrade evidence")
+	if request.Plan.Profile == e2eplan.ProfileReleaseCandidate && request.Predecessor == nil {
+		return fmt.Errorf("release-candidate qualification requires the exact previous public artifacts and identity for N-1 upgrade evidence")
 	}
-	for name, value := range map[string]string{"previous chart": request.PreviousChart, "previous values": request.PreviousValues} {
+	for name, value := range map[string]string{
+		"previous chart": request.PreviousChart, "previous values": request.PreviousValues,
+		"previous manifest": request.PreviousManifest,
+	} {
 		if value != "" && (value == string(filepath.Separator) || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsAny(value, "\x00\r\n")) {
 			return fmt.Errorf("%s must be a clean absolute non-root path when set", name)
+		}
+	}
+	if request.Predecessor != nil {
+		if err := request.Predecessor.Validate(); err != nil {
+			return fmt.Errorf("previous public artifact identity: %w", err)
+		}
+		for _, image := range request.Plan.Artifacts.Images {
+			if image.Name == "driver" && image.Reference == request.Predecessor.DriverImage {
+				return fmt.Errorf("previous and candidate driver images must be distinct")
+			}
 		}
 	}
 	if !immutableImageReference(request.WorkloadImage) {
@@ -269,6 +307,39 @@ func (request Request) Validate() error {
 		return fmt.Errorf("scenario deadline must be between 30m and 4h")
 	}
 	return nil
+}
+
+// Validate checks the closed public predecessor identity without performing a
+// network or filesystem read. Live preflight separately hashes the two local
+// files and the upgrade scenario compares the observed N-1 driver image.
+func (predecessor Predecessor) Validate() error {
+	if predecessor.Kind != "release" && predecessor.Kind != "release-candidate" {
+		return fmt.Errorf("kind must be release or release-candidate")
+	}
+	if predecessor.Version == "" || len(predecessor.Version) > 64 ||
+		strings.ContainsAny(predecessor.Version, "\x00\r\n\t /") ||
+		predecessor.ReleaseTag != "v"+predecessor.Version {
+		return fmt.Errorf("version and release tag identity is invalid")
+	}
+	const publicPrefix = "https://github.com/urlab-ai/scaleway-file-storage-subdir-csi/"
+	if !strings.HasPrefix(predecessor.PublicReference, publicPrefix) ||
+		len(predecessor.PublicReference) > 512 || strings.ContainsAny(predecessor.PublicReference, "\x00\r\n\t ") {
+		return fmt.Errorf("public reference must be an exact project GitHub URL")
+	}
+	if !validDigest(predecessor.CompatibilityIdentity) ||
+		!validDigest(predecessor.ChartSHA256) || !validDigest(predecessor.ValuesSHA256) ||
+		!immutableImageReference(predecessor.DriverImage) {
+		return fmt.Errorf("manifest, chart, values, or driver identity is invalid")
+	}
+	return nil
+}
+
+func clonePredecessor(predecessor *Predecessor) *Predecessor {
+	if predecessor == nil {
+		return nil
+	}
+	clone := *predecessor
+	return &clone
 }
 
 func immutableImageReference(value string) bool {
@@ -322,11 +393,27 @@ func (evidence Evidence) validate(profile string) error {
 	if err != nil || completed.Before(started) {
 		return fmt.Errorf("real E2E evidence time range is invalid")
 	}
-	if err := ValidateScenarioResultsForProfile(profile, evidence.Scenarios); err != nil {
+	if err := ValidateScenarioResultsForRun(profile, evidence.RunID, evidence.Scenarios); err != nil {
 		return err
 	}
 	if err := validateArtifactDigests(evidence.ArtifactDigests); err != nil {
 		return fmt.Errorf("validate real E2E artifact identities: %w", err)
+	}
+	if err := ValidateCandidateScenarioImages(profile, evidence.Scenarios, evidence.ArtifactDigests.Images); err != nil {
+		return err
+	}
+	if profile == e2eplan.ProfileReleaseCandidate {
+		if evidence.Predecessor == nil {
+			return fmt.Errorf("real E2E evidence omits the exact public predecessor")
+		}
+		if err := evidence.Predecessor.Validate(); err != nil {
+			return fmt.Errorf("validate real E2E predecessor identity: %w", err)
+		}
+		if err := ValidatePredecessorScenario(evidence.Scenarios, *evidence.Predecessor); err != nil {
+			return err
+		}
+	} else if evidence.Predecessor != nil {
+		return fmt.Errorf("base smoke evidence must not claim an N-1 predecessor")
 	}
 	if err := validateSuccessfulInventory(evidence.FinalInventory, profile); err != nil {
 		return fmt.Errorf("validate successful real E2E inventory: %w", err)
@@ -358,8 +445,12 @@ func validateArtifactDigests(artifacts e2eplan.Artifacts) error {
 		!validDigest(artifacts.CandidateDigest) || !validDigest(artifacts.ChartDigest) {
 		return fmt.Errorf("artifact commit or manifest digest is invalid")
 	}
+	return validateArtifactImages(artifacts.Images)
+}
+
+func validateArtifactImages(images []e2eplan.ImageDigest) error {
 	wantNames := []string{"csi-node-driver-registrar", "driver", "external-attacher", "external-provisioner", "livenessprobe"}
-	images := slices.Clone(artifacts.Images)
+	images = slices.Clone(images)
 	slices.SortFunc(images, func(left, right e2eplan.ImageDigest) int { return strings.Compare(left.Name, right.Name) })
 	if len(images) != len(wantNames) {
 		return fmt.Errorf("artifact image set must contain exactly five identities")
@@ -372,6 +463,70 @@ func validateArtifactDigests(artifacts e2eplan.Artifacts) error {
 	return nil
 }
 
+// ValidateCandidateScenarioImages binds the images observed in the live
+// controller and node workloads to the exact five-image candidate selected by
+// the approved plan. Immutable references alone are insufficient: a different
+// immutable candidate must never be promoted using this run's evidence.
+func ValidateCandidateScenarioImages(profile string, scenarios []ScenarioResult, expected []e2eplan.ImageDigest) error {
+	if err := validateArtifactImages(expected); err != nil {
+		return fmt.Errorf("validate planned candidate images: %w", err)
+	}
+	expected = sortedArtifactImages(expected)
+	var observed []e2eplan.ImageDigest
+	var candidateDriver string
+	artifactFound := false
+	upgradeFound := false
+	for _, scenario := range scenarios {
+		switch scenario.Name {
+		case "artifact-and-install-preflight":
+			var proof ArtifactInstallProof
+			if err := strictjson.Decode(scenario.Proof, &proof); err != nil {
+				return fmt.Errorf("decode artifact install proof for image binding: %w", err)
+			}
+			if err := proof.Validate(); err != nil {
+				return err
+			}
+			observed = sortedArtifactImages(proof.Images)
+			artifactFound = true
+		case "n-minus-one-upgrade":
+			var proof NMinusOneUpgradeProof
+			if err := strictjson.Decode(scenario.Proof, &proof); err != nil {
+				return fmt.Errorf("decode N-1 proof for candidate image binding: %w", err)
+			}
+			candidateDriver = proof.CandidateDriverImage
+			upgradeFound = true
+		}
+	}
+	if !artifactFound || !slices.Equal(observed, expected) {
+		return fmt.Errorf("live artifact installation differs from the exact planned image set")
+	}
+	if profile == e2eplan.ProfileReleaseCandidate {
+		if !upgradeFound || candidateDriver != artifactImageReference(expected, "driver") {
+			return fmt.Errorf("N-1 upgrade candidate driver differs from the exact planned driver image")
+		}
+	} else if profile != e2eplan.ProfileBase {
+		return fmt.Errorf("candidate image binding profile %q is unsupported", profile)
+	}
+	return nil
+}
+
+func sortedArtifactImages(images []e2eplan.ImageDigest) []e2eplan.ImageDigest {
+	result := slices.Clone(images)
+	slices.SortFunc(result, func(left, right e2eplan.ImageDigest) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+	return result
+}
+
+func artifactImageReference(images []e2eplan.ImageDigest, name string) string {
+	for _, image := range images {
+		if image.Name == name {
+			return image.Reference
+		}
+	}
+	return ""
+}
+
 func validateSuccessfulInventory(inventory e2ecleanup.Inventory, profile string) error {
 	if inventory.Phase != e2ecleanup.PhaseComplete || inventory.Profile != profile {
 		return fmt.Errorf("successful evidence requires a complete matching-profile inventory")
@@ -379,31 +534,11 @@ func validateSuccessfulInventory(inventory e2ecleanup.Inventory, profile string)
 	counts := map[string]int{}
 	for _, resource := range inventory.Resources {
 		counts[resource.Kind]++
-		if resource.CreatedByRun {
-			if resource.State != e2ecleanup.ResourceStateAbsent {
-				return fmt.Errorf("run-owned %s %q is not conclusively absent", resource.Kind, resource.ID)
-			}
-			continue
-		}
-		if profile == e2eplan.ProfileBase {
-			return fmt.Errorf("base smoke evidence may contain only run-owned resources")
-		}
-		if resource.Kind != e2ecleanup.ResourceKindCluster || resource.State != e2ecleanup.ResourceStatePresent {
-			return fmt.Errorf("only one conclusively present reused cluster may survive real E2E cleanup")
+		if !resource.CreatedByRun || resource.State != e2ecleanup.ResourceStateAbsent {
+			return fmt.Errorf("successful v1 evidence requires every exact resource to be run-owned and conclusively absent")
 		}
 	}
-	clusterCreatedByRun := false
-	for _, resource := range inventory.Resources {
-		if resource.Kind == e2ecleanup.ResourceKindCluster {
-			clusterCreatedByRun = resource.CreatedByRun
-			break
-		}
-	}
-	wantPrivateNetworks := 0
-	if clusterCreatedByRun {
-		wantPrivateNetworks = 1
-	}
-	if counts[e2ecleanup.ResourceKindPrivateNetwork] != wantPrivateNetworks || counts[e2ecleanup.ResourceKindCluster] != 1 || counts[e2ecleanup.ResourceKindNodePool] != 1 || counts[e2ecleanup.ResourceKindParent] != 2 {
+	if counts[e2ecleanup.ResourceKindPrivateNetwork] != 1 || counts[e2ecleanup.ResourceKindCluster] != 1 || counts[e2ecleanup.ResourceKindNodePool] != 1 || counts[e2ecleanup.ResourceKindParent] != 2 {
 		return fmt.Errorf("real E2E inventory does not contain the exact network, cluster, node pool, and two parents required by cluster ownership")
 	}
 	if profile == e2eplan.ProfileBase {
@@ -412,8 +547,8 @@ func validateSuccessfulInventory(inventory e2ecleanup.Inventory, profile string)
 		}
 		return nil
 	}
-	wantResources := 6 + wantPrivateNetworks
-	wantKinds := 5 + wantPrivateNetworks
+	wantResources := 7
+	wantKinds := 6
 	if profile != e2eplan.ProfileReleaseCandidate || inventory.SchemaVersion != e2ecleanup.SchemaVersionV2 ||
 		len(inventory.Resources) != wantResources || counts[e2ecleanup.ResourceKindInstance] != 1 ||
 		counts[e2ecleanup.ResourceKindInstanceRootVolume] != 1 || len(counts) != wantKinds {
@@ -499,6 +634,19 @@ func ValidateScenarioResultsForProfile(profile string, scenarios []ScenarioResul
 	}
 }
 
+// ValidateScenarioResultsForRun adds the final run binding and proof-digest
+// checks that phase-local validation cannot perform before proof files are
+// attached.
+func ValidateScenarioResultsForRun(profile, runID string, scenarios []ScenarioResult) error {
+	if err := ValidateScenarioResultsForProfile(profile, scenarios); err != nil {
+		return err
+	}
+	if profile == e2eplan.ProfileReleaseCandidate {
+		return ValidateAvailableScenarioProofsForRun(scenarios, runID)
+	}
+	return nil
+}
+
 func validateScenarioSet(scenarios []ScenarioResult, required []string) error {
 	if err := ValidateScenarioSubset(scenarios); err != nil {
 		return err
@@ -506,13 +654,9 @@ func validateScenarioSet(scenarios []ScenarioResult, required []string) error {
 	if len(scenarios) != len(required) {
 		return fmt.Errorf("real E2E scenario count is %d, want %d", len(scenarios), len(required))
 	}
-	ordered := slices.Clone(scenarios)
-	slices.SortFunc(ordered, func(left, right ScenarioResult) int { return strings.Compare(left.Name, right.Name) })
-	want := slices.Clone(required)
-	slices.Sort(want)
-	for index, scenario := range ordered {
-		if scenario.Name != want[index] {
-			return fmt.Errorf("real E2E scenario %q is outside the required profile set", scenario.Name)
+	for index, scenario := range scenarios {
+		if scenario.Name != required[index] {
+			return fmt.Errorf("real E2E scenario %d is %q, want %q in the closed execution order", index+1, scenario.Name, required[index])
 		}
 	}
 	return nil

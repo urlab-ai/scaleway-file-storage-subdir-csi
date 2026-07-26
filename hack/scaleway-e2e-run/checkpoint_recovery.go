@@ -20,6 +20,7 @@ import (
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/releasequalification"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/recovery"
@@ -65,11 +66,15 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	inventory e2ecleanup.Inventory,
 	evidenceDirectory string,
 ) ([]e2erunner.ScenarioResult, error) {
+	journal := newCheckpointRecoveryJournal(plan)
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("arm durable checkpoint recovery: %w", err)
+	}
 	shortRun := plan.RunID[:8]
-	workloadNamespace := "e2e-recovery-" + shortRun
-	workloadClaim := "checkpoint-data-" + shortRun
-	workloadDeployment := "checkpoint-workload-" + shortRun
-	marker := "checkpoint-" + shortRun
+	workloadNamespace := journal.WorkloadNamespace
+	workloadClaim := journal.WorkloadClaim
+	workloadDeployment := journal.WorkloadDeployment
+	marker := journal.Marker
 	poolID := resourceID(inventory, e2ecleanup.ResourceKindNodePool, 0)
 	clusterID := resourceID(inventory, e2ecleanup.ResourceKindCluster, 0)
 	parentIDs := []string{
@@ -91,6 +96,11 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	if err != nil {
 		return nil, err
 	}
+	journal.Phase = checkpointPhaseWorkloadReady
+	journal.PersistentVolume = persistentVolumeName
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("retain checkpoint workload identity: %w", err)
+	}
 
 	valuesPath := filepath.Join(evidenceDirectory, "checkpoint-release-values-"+plan.RunID+".yaml")
 	currentValues, err := backend.runHostCommand(ctx, nil, "helm", "get", "values", request.HelmRelease, "--namespace", request.DriverNamespace, "--output", "yaml")
@@ -100,12 +110,25 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	if err := replaceDurableFile(valuesPath, currentValues, 0o600); err != nil {
 		return nil, fmt.Errorf("retain exact pre-recovery Helm values: %w", err)
 	}
+	valuesSHA256, err := releasequalification.DigestFile(valuesPath)
+	if err != nil {
+		return nil, fmt.Errorf("digest exact pre-recovery Helm values: %w", err)
+	}
 
 	checkpointRequestID, err := randomUUIDv4()
 	if err != nil {
 		return nil, err
 	}
 	archivePath := filepath.Join(evidenceDirectory, "checkpoint-"+checkpointRequestID+".tar")
+	journal.Phase = checkpointPhasePreparing
+	journal.ValuesPath = valuesPath
+	journal.ValuesSHA256 = valuesSHA256
+	journal.CheckpointRequestID = checkpointRequestID
+	journal.ArchivePath = archivePath
+	journal.OldInstanceIDs = slices.Clone(oldNodes.InstanceIDs)
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("retain preparing checkpoint recovery state: %w", err)
+	}
 	prepareBytes, err := backend.runAdmin(ctx, request, "checkpoint", "prepare",
 		"--namespace="+request.DriverNamespace, "--release="+request.HelmRelease,
 		"--request-id="+checkpointRequestID, "--output-file="+archivePath, "--timeout=30m")
@@ -121,6 +144,18 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 		prepared.Receipt.ArchiveSHA256 == "" || prepared.Receipt.ArchiveBytes == 0 || prepared.Receipt.ArchiveFormat != "checkpoint-tar-v1" {
 		return nil, fmt.Errorf("checkpoint prepare receipt is incomplete")
 	}
+	journal.Phase = checkpointPhasePrepared
+	journal.ValuesPath = valuesPath
+	journal.ValuesSHA256 = valuesSHA256
+	journal.CheckpointRequestID = checkpointRequestID
+	journal.ArchivePath = archivePath
+	journal.ArchiveSHA256 = prepared.Receipt.ArchiveSHA256
+	journal.ArchiveBytes = prepared.Receipt.ArchiveBytes
+	journal.ManifestSHA256 = prepared.Receipt.ManifestSHA256
+	journal.OldInstanceIDs = slices.Clone(oldNodes.InstanceIDs)
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("retain prepared checkpoint recovery state: %w", err)
+	}
 	if err := backend.waitForControllerUnready(ctx, request); err != nil {
 		return nil, err
 	}
@@ -131,6 +166,10 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 
 	if _, err := backend.kubectl(ctx, request, nil, "delete", "namespace/"+request.DriverNamespace, "--wait=true", "--timeout=20m"); err != nil {
 		return nil, fmt.Errorf("delete exact driver namespace for checkpoint recovery: %w", err)
+	}
+	journal.Phase = checkpointPhaseNamespaceDeleted
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("retain deleted-namespace checkpoint recovery state: %w", err)
 	}
 	if err := backend.scalePoolAndWait(ctx, plan, clusterID, poolID, 0, oldNodes.InstanceIDs); err != nil {
 		return nil, err
@@ -270,6 +309,10 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	if err := backend.installFullRecoveredRelease(ctx, request, valuesPath); err != nil {
 		return nil, err
 	}
+	journal.Phase = checkpointPhaseControllerRestored
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("retain restored checkpoint controller state: %w", err)
+	}
 	if err := backend.waitForCheckpointWorkloadMarker(ctx, request, workloadNamespace, workloadDeployment, marker); err != nil {
 		return nil, err
 	}
@@ -282,6 +325,9 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	}
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "delete", "secret/sfs-subdir-checkpoint", "--wait=true", "--timeout=5m"); err != nil {
 		return nil, err
+	}
+	if err := backend.removeCheckpointRecoveryJournal(plan); err != nil {
+		return nil, fmt.Errorf("complete durable checkpoint recovery: %w", err)
 	}
 
 	checkpointProof := e2erunner.CheckpointRestoreProof{
@@ -447,14 +493,14 @@ func (backend *scalewayBackend) createCheckpointWorkload(ctx context.Context, re
 kind: Namespace
 metadata:
   name: %s
-  labels: {sfs-subdir-e2e-run: %q}
+  labels: {app.kubernetes.io/instance: %q, sfs-subdir-e2e-run: %q}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: %s
   namespace: %s
-  labels: {sfs-subdir-e2e-run: %q, sfs-subdir-e2e-scenario: checkpoint}
+  labels: {app.kubernetes.io/instance: %q, sfs-subdir-e2e-run: %q, sfs-subdir-e2e-scenario: checkpoint}
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: sfs-subdir-rwx
@@ -465,13 +511,13 @@ kind: Deployment
 metadata:
   name: %s
   namespace: %s
-  labels: {sfs-subdir-e2e-run: %q, sfs-subdir-e2e-scenario: checkpoint}
+  labels: {app.kubernetes.io/instance: %q, sfs-subdir-e2e-run: %q, sfs-subdir-e2e-scenario: checkpoint}
 spec:
   replicas: 1
   selector: {matchLabels: {sfs-subdir-e2e-workload: %s}}
   template:
     metadata:
-      labels: {sfs-subdir-e2e-run: %q, sfs-subdir-e2e-scenario: checkpoint, sfs-subdir-e2e-workload: %s}
+      labels: {app.kubernetes.io/instance: %q, sfs-subdir-e2e-run: %q, sfs-subdir-e2e-scenario: checkpoint, sfs-subdir-e2e-workload: %s}
     spec:
       containers:
         - name: workload
@@ -481,8 +527,10 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim: {claimName: %s}
-`, namespace, plan.RunID, claim, namespace, plan.RunID, deployment, namespace, plan.RunID, deployment,
-		plan.RunID, deployment, request.WorkloadImage, marker, marker, claim)
+`, namespace, request.HelmRelease, plan.RunID,
+		claim, namespace, request.HelmRelease, plan.RunID,
+		deployment, namespace, request.HelmRelease, plan.RunID, deployment,
+		request.HelmRelease, plan.RunID, deployment, request.WorkloadImage, marker, marker, claim)
 	if _, err := backend.kubectl(ctx, request, strings.NewReader(manifest), "apply", "-f", "-"); err != nil {
 		return err
 	}
@@ -594,10 +642,17 @@ func (backend *scalewayBackend) createRecoveryNamespaceAndSecrets(ctx context.Co
 				"name": request.DriverNamespace, "labels": map[string]string{
 					"sfs-subdir-e2e-run": plan.RunID, "pod-security.kubernetes.io/enforce": "privileged",
 					"pod-security.kubernetes.io/audit": "privileged", "pod-security.kubernetes.io/warn": "privileged",
+					"app.kubernetes.io/instance": request.HelmRelease,
 				},
 			}},
-			map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": "scaleway-sfs-subdir-csi-identity", "namespace": request.DriverNamespace}, "type": "Opaque", "stringData": map[string]string{"installationID": plan.RunID}},
-			map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": "scaleway-sfs-subdir-csi-credentials", "namespace": request.DriverNamespace}, "type": "Opaque", "stringData": map[string]string{"SCW_ACCESS_KEY": accessKey, "SCW_SECRET_KEY": secretKey}},
+			map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{
+				"name": "scaleway-sfs-subdir-csi-identity", "namespace": request.DriverNamespace,
+				"labels": map[string]string{"app.kubernetes.io/instance": request.HelmRelease, "sfs-subdir-e2e-run": plan.RunID},
+			}, "type": "Opaque", "stringData": map[string]string{"installationID": plan.RunID}},
+			map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{
+				"name": "scaleway-sfs-subdir-csi-credentials", "namespace": request.DriverNamespace,
+				"labels": map[string]string{"app.kubernetes.io/instance": request.HelmRelease, "sfs-subdir-e2e-run": plan.RunID},
+			}, "type": "Opaque", "stringData": map[string]string{"SCW_ACCESS_KEY": accessKey, "SCW_SECRET_KEY": secretKey}},
 		},
 	})
 	if err != nil {
@@ -1011,22 +1066,8 @@ func (backend *scalewayBackend) waitForAllocationStates(ctx context.Context, req
 }
 
 func (backend *scalewayBackend) cleanupCheckpointWorkload(ctx context.Context, request e2erunner.Request, namespace, pvName string) error {
-	if _, err := backend.kubectl(ctx, request, nil, "delete", "namespace/"+namespace, "--wait=true", "--timeout=20m"); err != nil {
-		return err
-	}
-	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-	defer cancel()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		encoded, err := backend.kubectl(waitCtx, request, nil, "get", "pv/"+pvName, "--ignore-not-found", "-o", "name")
-		if err == nil && strings.TrimSpace(string(encoded)) == "" {
-			return nil
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("wait for checkpoint workload PV cleanup: %w", waitCtx.Err())
-		case <-ticker.C:
-		}
-	}
+	return backend.cleanupCheckpointNamespace(ctx, request, checkpointRecoveryJournal{
+		WorkloadNamespace: namespace,
+		PersistentVolume:  pvName,
+	})
 }

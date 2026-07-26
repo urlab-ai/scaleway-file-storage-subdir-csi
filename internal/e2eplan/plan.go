@@ -24,9 +24,7 @@ const (
 	// ProfileReleaseCandidate adds the disposable destructive recovery profile.
 	ProfileReleaseCandidate = "release-candidate"
 	// ClusterCreate creates a run-owned ephemeral Kapsule cluster.
-	ClusterCreate = "create"
-	// ClusterReuse uses one explicitly identified pre-existing test cluster.
-	ClusterReuse                = "reuse"
+	ClusterCreate               = "create"
 	fileStorageMinimumSizeBytes = uint64(25_000_000_000)
 	fileStorageMaximumSizeBytes = uint64(50_000_000_000_000)
 	fileStorageGrowthStepBytes  = uint64(100_000_000_000)
@@ -67,7 +65,9 @@ type Request struct {
 	Artifacts              Artifacts       `json:"artifacts"`
 }
 
-// ClusterRequest states whether the cluster is run-owned or explicitly reused.
+// ClusterRequest requires a run-owned ephemeral cluster. ExistingID remains in
+// the closed v1 schema so older request files fail with an actionable error
+// instead of an unknown-field error.
 type ClusterRequest struct {
 	Disposition string `json:"disposition"`
 	ExistingID  string `json:"existingId,omitempty"`
@@ -144,7 +144,7 @@ type Plan struct {
 	LiveProductAndQuotaPreflightRequired bool           `json:"liveProductAndQuotaPreflightRequired"`
 }
 
-// ClusterPlan records ownership so cleanup can never delete a reused cluster.
+// ClusterPlan records the run-owned cluster cleanup authority.
 type ClusterPlan struct {
 	Disposition     string `json:"disposition"`
 	ExistingID      string `json:"existingId,omitempty"`
@@ -153,8 +153,7 @@ type ClusterPlan struct {
 }
 
 // NodePoolPlan records that the E2E node pool is always newly created for the
-// run, including when the enclosing test cluster is reused. This prevents the
-// suite from mutating or retaining a pre-existing pool.
+// run.
 type NodePoolPlan struct {
 	Count           uint32 `json:"count"`
 	CommercialType  string `json:"commercialType"`
@@ -300,19 +299,8 @@ func (request Request) Validate() error {
 	if request.EvidenceDirectory == "" || request.EvidenceDirectory == string(filepath.Separator) || !filepath.IsAbs(request.EvidenceDirectory) || filepath.Clean(request.EvidenceDirectory) != request.EvidenceDirectory || strings.ContainsAny(request.EvidenceDirectory, "\x00\r\n") {
 		return fmt.Errorf("evidence directory must be a clean absolute non-root path")
 	}
-	if request.Cluster.Disposition != ClusterCreate && request.Cluster.Disposition != ClusterReuse {
-		return fmt.Errorf("cluster disposition must be create or reuse")
-	}
-	if request.Cluster.Disposition == ClusterCreate && request.Cluster.ExistingID != "" {
-		return fmt.Errorf("a run-created cluster must not claim an existing ID")
-	}
-	if request.Cluster.Disposition == ClusterReuse {
-		if err := volume.ValidateInstallationID(request.Cluster.ExistingID); err != nil {
-			return fmt.Errorf("reused cluster exact ID: %w", err)
-		}
-	}
-	if request.Profile == ProfileBase && request.Cluster.Disposition != ClusterCreate {
-		return fmt.Errorf("base smoke requires a run-owned ephemeral cluster")
+	if request.Cluster.Disposition != ClusterCreate || request.Cluster.ExistingID != "" {
+		return fmt.Errorf("v1 real E2E requires a run-owned ephemeral cluster and forbids an existing cluster ID")
 	}
 	if request.Profile == ProfileBase && request.NodePool.Count != 2 {
 		return fmt.Errorf("base smoke requires exactly two fresh nodes")

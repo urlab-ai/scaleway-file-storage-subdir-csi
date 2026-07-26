@@ -2,7 +2,9 @@ package e2erunner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,23 @@ func TestValidateScenarioSubsetRejectsDuplicateAndPath(t *testing.T) {
 		t.Fatal("ValidateScenarioSubset(path traversal) error = nil")
 	}
 }
+
+func TestReleaseScenarioSetRequiresClosedExecutionOrder(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	scenarios := make([]ScenarioResult, 0, len(RequiredScenarios))
+	for _, name := range RequiredScenarios {
+		scenarios = append(scenarios, ScenarioResult{
+			Name: name, Succeeded: true, EvidenceFile: name + ".json", EvidenceSHA: digest,
+		})
+	}
+	if err := validateScenarioSet(scenarios, RequiredScenarios); err != nil {
+		t.Fatalf("validateScenarioSet() error = %v", err)
+	}
+	scenarios[0], scenarios[1] = scenarios[1], scenarios[0]
+	if err := validateScenarioSet(scenarios, RequiredScenarios); err == nil {
+		t.Fatal("validateScenarioSet(out of order) error = nil")
+	}
+}
 func (backend *fakeBackend) RunScenarios(_ context.Context, _ Request, plan e2eplan.Plan, _ e2ecleanup.Inventory) ([]ScenarioResult, error) {
 	backend.scenarios++
 	required := RequiredScenarios
@@ -58,7 +77,12 @@ func (backend *fakeBackend) RunScenarios(_ context.Context, _ Request, plan e2ep
 	}
 	result := make([]ScenarioResult, 0, len(required))
 	for _, name := range required {
-		result = append(result, ScenarioResult{Name: name, Succeeded: true, EvidenceFile: name + ".json", EvidenceSHA: "sha256:" + strings.Repeat("a", 64)})
+		scenario := ScenarioResult{Name: name, Succeeded: true, EvidenceFile: name + ".json", EvidenceSHA: "sha256:" + strings.Repeat("a", 64)}
+		if name == "artifact-and-install-preflight" {
+			proof := validArtifactInstallProof(plan.Artifacts.Images)
+			scenario.Proof, _ = json.Marshal(proof)
+		}
+		result = append(result, scenario)
 	}
 	return result, nil
 }
@@ -93,6 +117,8 @@ func TestExecuteAppliesQualificationGateBeforeLiveCalls(t *testing.T) {
 	request.Plan.Parents.SizeBytes = 100_000_000_000
 	request.PreviousChart = "/tmp/previous-chart.tgz"
 	request.PreviousValues = "/tmp/previous-values.yaml"
+	request.PreviousManifest = "/tmp/previous-candidate.json"
+	request.Predecessor = testPredecessor()
 	backend := &fakeBackend{inventory: testInventory(request)}
 	gateErr := errors.New("qualification gate blocked")
 	clock := func() time.Time { return time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) }
@@ -138,13 +164,26 @@ func TestReleaseCandidateRequestRequiresPreviousPublicArtifacts(t *testing.T) {
 	request := testRequest()
 	request.Plan.Profile = e2eplan.ProfileReleaseCandidate
 	request.Plan.Parents.SizeBytes = 100_000_000_000
-	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "previous public chart") {
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "previous public artifacts") {
 		t.Fatalf("Validate(without N-1 artifacts) error = %v", err)
 	}
 	request.PreviousChart = "/tmp/previous-chart.tgz"
 	request.PreviousValues = "/tmp/previous-values.yaml"
+	request.PreviousManifest = "/tmp/previous-candidate.json"
+	request.Predecessor = testPredecessor()
 	if err := request.Validate(); err != nil {
 		t.Fatalf("Validate(with N-1 artifacts) error = %v", err)
+	}
+}
+
+func testPredecessor() *Predecessor {
+	return &Predecessor{
+		Kind: "release-candidate", Version: "0.1.0-rc.14", ReleaseTag: "v0.1.0-rc.14",
+		PublicReference:       "https://github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkgs/container/scaleway-file-storage-subdir-csi",
+		CompatibilityIdentity: "sha256:" + strings.Repeat("b", 64),
+		ChartSHA256:           "sha256:" + strings.Repeat("c", 64),
+		ValuesSHA256:          "sha256:" + strings.Repeat("d", 64),
+		DriverImage:           "registry.example/driver@sha256:" + strings.Repeat("e", 64),
 	}
 }
 
@@ -201,8 +240,8 @@ func TestSuccessfulInventoryRequiresExactProfileResources(t *testing.T) {
 		}
 		reused.Resources = append(reused.Resources, resource)
 	}
-	if err := validateSuccessfulInventory(reused, e2eplan.ProfileReleaseCandidate); err != nil {
-		t.Fatalf("validateSuccessfulInventory(reused RC) error = %v", err)
+	if err := validateSuccessfulInventory(reused, e2eplan.ProfileReleaseCandidate); err == nil {
+		t.Fatal("validateSuccessfulInventory(reused RC) error = nil")
 	}
 
 	partial := complete
@@ -220,6 +259,55 @@ func TestArtifactDigestsRequireClosedImmutableSet(t *testing.T) {
 	request.Plan.Artifacts.Images = request.Plan.Artifacts.Images[:4]
 	if err := validateArtifactDigests(request.Plan.Artifacts); err == nil {
 		t.Fatal("validateArtifactDigests(missing image) error = nil")
+	}
+}
+
+func TestCandidateScenarioImagesMustEqualPlannedCandidate(t *testing.T) {
+	request := testRequest()
+	proof := validArtifactInstallProof(request.Plan.Artifacts.Images)
+	scenarios := []ScenarioResult{scenarioResultWithProof("artifact-and-install-preflight", proof)}
+	if err := ValidateCandidateScenarioImages(e2eplan.ProfileBase, scenarios, request.Plan.Artifacts.Images); err != nil {
+		t.Fatalf("ValidateCandidateScenarioImages() error = %v", err)
+	}
+	upgrade := NMinusOneUpgradeProof{CandidateDriverImage: artifactImageReference(request.Plan.Artifacts.Images, "driver")}
+	releaseScenarios := append(slices.Clone(scenarios), scenarioResultWithProof("n-minus-one-upgrade", upgrade))
+	if err := ValidateCandidateScenarioImages(e2eplan.ProfileReleaseCandidate, releaseScenarios, request.Plan.Artifacts.Images); err != nil {
+		t.Fatalf("ValidateCandidateScenarioImages(RC) error = %v", err)
+	}
+	upgrade.CandidateDriverImage = "registry.example/other-driver@sha256:" + strings.Repeat("e", 64)
+	releaseScenarios[1] = scenarioResultWithProof("n-minus-one-upgrade", upgrade)
+	if err := ValidateCandidateScenarioImages(e2eplan.ProfileReleaseCandidate, releaseScenarios, request.Plan.Artifacts.Images); err == nil {
+		t.Fatal("N-1 proof for another candidate driver was accepted")
+	}
+	proof.Images = slices.Clone(proof.Images)
+	proof.Images[0].Reference = "registry.example/replaced@sha256:" + strings.Repeat("f", 64)
+	scenarios[0] = scenarioResultWithProof("artifact-and-install-preflight", proof)
+	if err := ValidateCandidateScenarioImages(e2eplan.ProfileBase, scenarios, request.Plan.Artifacts.Images); err == nil {
+		t.Fatal("another immutable deployed image set was accepted")
+	}
+}
+
+func validArtifactInstallProof(images []e2eplan.ImageDigest) ArtifactInstallProof {
+	return ArtifactInstallProof{
+		SchemaVersion: SchemaVersionV1, Scenario: "artifact-and-install-preflight",
+		RunID: proofRunID, ObservedAt: "2026-07-21T18:00:00Z",
+		DriverName: "sfs-subdir.csi.urlab.ai", StorageClassName: "sfs-subdir-rwx",
+		LeaseUID: proofRunID, ControllerPodUID: proofFirstNodeID[9:],
+		SchedulableLinuxNodes: 2, ReadyNodePluginPods: 2, RegisteredCSINodes: 2,
+		NamespacePrivileged: true, LeaseHolderExact: true, HolderEvidenceComplete: true,
+		AllImagesImmutable: true, Images: slices.Clone(images), ProductionSecurityContexts: true,
+		ControllerCannotMutatePods: true, StorageClassNonDefault: true, NodeConfigurationGenerationSet: true,
+	}
+}
+
+func scenarioResultWithProof(name string, proof any) ScenarioResult {
+	encoded, err := json.Marshal(proof)
+	if err != nil {
+		panic(err)
+	}
+	return ScenarioResult{
+		Name: name, Succeeded: true, EvidenceFile: name + ".json",
+		EvidenceSHA: "sha256:" + strings.Repeat("a", 64), Proof: encoded,
 	}
 }
 

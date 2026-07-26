@@ -444,7 +444,7 @@ case "$*" in
   "get namespace driver-system") exit 1 ;;
   "create namespace driver-system") exit 0 ;;
   "label namespace driver-system "*) exit 0 ;;
-  *"create secret generic scaleway-sfs-subdir-csi-credentials --from-env-file=/dev/stdin --dry-run=client -o yaml")
+  *"create secret generic scaleway-sfs-subdir-csi-credentials --from-env-file=/dev/stdin "*"--dry-run=client -o yaml")
     streamed=$(cat)
     expected='SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE
 SCW_SECRET_KEY=test-secret-fixture'
@@ -530,6 +530,50 @@ func TestChildToolEnvironmentOmitsScalewayCredentials(t *testing.T) {
 	}
 	if !retained {
 		t.Fatal("environment filtering removed an unrelated entry")
+	}
+}
+
+func TestScenarioRunnerUnsetsCredentialsBeforePathResolution(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	temporary := t.TempDir()
+	leak := filepath.Join(temporary, "dirname-environment-leak")
+	writeExecutable(t, temporary, "dirname", `#!/bin/sh
+if [ "${SCW_ACCESS_KEY+x}" = x ] || [ "${SCW_SECRET_KEY+x}" = x ]; then
+  : >"$DIRNAME_ENVIRONMENT_LEAK"
+fi
+exec /usr/bin/dirname "$@"
+`)
+	command := exec.Command(script, "intentional-invalid-mode")
+	command.Env = append(environmentWithoutScalewayCredentials(),
+		"SCW_ACCESS_KEY=SCWTESTACCESSFIXTURE", // gitleaks:allow -- non-secret test fixture.
+		"SCW_SECRET_KEY=test-secret-fixture",  // gitleaks:allow -- non-secret test fixture.
+		"DIRNAME_ENVIRONMENT_LEAK="+leak,
+		"PATH="+temporary+":/usr/bin:/bin")
+	if err := command.Run(); err == nil {
+		t.Fatal("scenario runner unexpectedly accepted an invalid mode")
+	}
+	if _, err := os.Stat(leak); !os.IsNotExist(err) {
+		t.Fatalf("dirname inherited provider credentials: %v", err)
+	}
+}
+
+func TestCredentialFreeCommandExecutesAdminWithoutProviderAuthority(t *testing.T) {
+	t.Setenv("SCW_ACCESS_KEY", "SCWTESTACCESSFIXTURE") // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("SCW_SECRET_KEY", "test-secret-fixture")  // gitleaks:allow -- non-secret test fixture.
+	t.Setenv("KUBECONFIG", "/tmp/ambient-wrong-cluster")
+	tool := writeExecutable(t, t.TempDir(), "csi-admin", `#!/bin/sh
+set -eu
+[ "$1" = version ]
+[ -z "${SCW_ACCESS_KEY+x}" ]
+[ -z "${SCW_SECRET_KEY+x}" ]
+[ -z "${KUBECONFIG+x}" ]
+`)
+	if err := runCredentialFreeCommand(context.Background(), tool, "version"); err != nil {
+		t.Fatalf("runCredentialFreeCommand() error = %v", err)
 	}
 }
 

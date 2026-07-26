@@ -149,11 +149,15 @@ go run ./hack/scaleway-e2e-plan --input=/absolute/path/request.json
 ```
 
 The request is closed-schema. It includes the exact Project, `fr-par`, UUID run
-ID, run-containing DNS prefix, absolute evidence directory, cluster
-create/reuse choice, one run-owned Private Network for a created cluster, fresh
-two-or-three-node run-owned pool, two parents,
+ID, run-containing DNS prefix, absolute evidence directory, one ephemeral
+run-owned cluster and Private Network, a fresh two-or-three-node run-owned pool,
+two parents,
 reviewed aggregate hourly cost, Git/chart identity, and immutable driver and
-sidecar digests. It also carries a canonical provider review no older than 24
+sidecar digests. A release-candidate request additionally pins the exact public
+N-1 predecessor manifest, chart, values, compatibility identity, public
+release/tag URL, and immutable driver digest; live preflight rehashes and
+cross-checks them before any provider mutation. It also carries a canonical
+provider review no older than 24
 hours: documented GA product status and source, remaining File Storage quota
 and source, and the pricing source used for the aggregate cost. The legacy
 `publicBetaAccepted` field must be `false`. Live regional access, candidate
@@ -166,6 +170,9 @@ authorized and that immediate approval is still required. Live product, quota,
 availability, attach-limit, commercial-type, artifact, and price review remains
 mandatory immediately before execution; API-backed facts are read live and the
 documented product/quota/pricing evidence must be no older than 24 hours.
+The executor's own dry-run emits one canonical execution-review envelope that
+contains both this plan and, for a release candidate, the exact N/N-1
+predecessor. Review that envelope immediately before approving execution.
 
 After reviewing the canonical plan, obtain a new explicit approval naming the
 exact Project, region, run ID, resources, estimated hourly cost, destructive
@@ -190,6 +197,8 @@ The executor streams the controller Secret, removes the keys from unrelated
 child-process environments, and retains no plaintext credential artifact. The
 volatile source must be removed after execution; destroying the disposable
 cluster removes the controller Secret.
+Before any provider mutation it also executes the checksum-verified packaged
+`csi-admin version` with provider credentials and ambient kubeconfig removed.
 
 For a `base` request, this command executes only the fixed non-qualifying smoke:
 ten logical PVCs, cross-node RWX, isolation and archive, controller replacement,
@@ -204,6 +213,19 @@ checked-in matrix currently clears that interlock and includes a 20-minute
 checksum correctness soak over ten cross-node PVCs with one controller and one
 node-plugin replacement; it still requires the immediate cloud approval below.
 `--cleanup-only` remains supported for a retained previously approved run.
+Qualification transitions that temporarily remove the driver namespace or stop
+the controller Instance are protected by credential-free, fsynced, exact-ID
+recovery journals. Cleanup resumes those transitions before normal safe
+uninstall; any mismatched run label, identity, digest, attachment, or provider
+read fails closed and retains the journal for operator recovery. A retained
+fault-injector Pod is resumed only after its exact Pod UID, cgroup, entrypoint,
+and host PID are revalidated. If the journal proves its exact provider Instance
+is already stopped or absent, cleanup removes only that injector API object
+without attempting an impossible remote signal.
+The same cleanup pass detaches any interrupted run-owned disposable-Instance
+attachment before safe uninstall, verifies checkpoint values/archive and
+candidate artifacts again before replay, and converges an interrupted N/N-1
+transition to one Ready candidate generation before removing workloads.
 
 Dry-run is the default and never loads credentials. The live form creates only
 the request's tagged resources, creates and journals a run-owned Private
@@ -245,17 +267,16 @@ go run ./hack/scaleway-e2e-cleanup \
   --dry-run
 ```
 
-The inventory must include the cluster, its run-owned Private Network when the
-cluster was created by the run, the newly created node pool, both parents, and
+The inventory must include the run-created cluster and Private Network, the
+newly created node pool, both parents, and
 the release-candidate disposable Instance when applicable. Every created
 resource carries the exact run prefix/tag and every resource has an exact ID,
 Project, region, creation provenance, and fresh closed state. The verifier
 blocks the entire deletion list for stale or unknown provider evidence or any
 incomplete Kubernetes, unmount, detach, controller-stop, or Helm-uninstall
-barrier. Cleanup deletes a run-owned cluster before its exact run-owned Private
-Network. A reused cluster and its pre-existing network are retained; neither is
-a deletion candidate. Even an unblocked review grants no authority. The
-credentialed cleanup command
+barrier. Cleanup deletes the run-owned cluster before its exact run-owned
+Private Network. Even an unblocked review grants no authority. The credentialed
+cleanup command
 repeats live reads, but still requires a new explicit approval immediately
 before mutation.
 

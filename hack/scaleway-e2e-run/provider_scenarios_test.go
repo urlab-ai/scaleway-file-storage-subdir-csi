@@ -129,4 +129,44 @@ func TestNMinusOneUpgradeLeavesSecondParentFreshForBootstrapRestart(t *testing.T
 	if !strings.Contains(body, `upgrade_parents="[{\"id\":\"$parent_a\"`) {
 		t.Fatal("N-1 upgrade does not retain the first-parent-only topology")
 	}
+	armed := strings.Index(body, "arm_n_minus_one_recovery")
+	firstMutation := strings.Index(body, "apply_upgrade_storage_class")
+	proofCommit := strings.Index(body, `mv "$upgrade_prepared.tmp" "$upgrade_prepared"`)
+	disarmed := strings.Index(body, "disarm_n_minus_one_recovery")
+	if armed < 0 || firstMutation < 0 || proofCommit < 0 || disarmed < 0 ||
+		armed >= firstMutation || disarmed <= proofCommit {
+		t.Fatal("N-1 transition is not durably armed before mutation and disarmed only after completed proof")
+	}
+
+	cleanupStart := strings.Index(contents, "cleanup_cluster() {")
+	cleanupEnd := strings.Index(contents[cleanupStart:], "\nvalidate_bootstrap_abort_evidence() {")
+	if cleanupStart < 0 || cleanupEnd < 0 {
+		t.Fatal("cleanup function boundary is missing")
+	}
+	cleanup := contents[cleanupStart : cleanupStart+cleanupEnd]
+	recoverTransition := strings.Index(cleanup, "recover_n_minus_one_transition")
+	removeWorkloads := strings.Index(cleanup, "remove_test_workloads")
+	if recoverTransition < 0 || removeWorkloads < 0 || recoverTransition >= removeWorkloads {
+		t.Fatal("cleanup does not converge an interrupted N-1 transition before workload removal")
+	}
+}
+
+func TestCleanupRecoversDisposableAttachmentsBeforeKubernetesUninstall(t *testing.T) {
+	encoded, err := os.ReadFile("backend.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "func (backend *scalewayBackend) Cleanup(")
+	if start < 0 {
+		t.Fatal("Cleanup function is missing")
+	}
+	body := contents[start:]
+	recoverAttachments := strings.Index(body, "recoverDisposableInstanceAttachments")
+	recoverCheckpoint := strings.Index(body, "recoverInterruptedCheckpoint")
+	runCleanup := strings.Index(body, `runScenarioCommand(ctx, "cleanup"`)
+	if recoverAttachments < 0 || recoverCheckpoint < 0 || runCleanup < 0 ||
+		recoverAttachments >= recoverCheckpoint || recoverAttachments >= runCleanup {
+		t.Fatal("cleanup does not detach the exact disposable Instance before Kubernetes recovery and safe uninstall")
+	}
 }

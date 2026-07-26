@@ -120,46 +120,18 @@ func newRegionalScalewayClientFromEnvironment(plan e2eplan.Plan) (*scw.Client, e
 }
 
 func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan) error {
-	candidateBytes, err := os.ReadFile(request.CandidateManifest)
+	candidate, err := validateLocalCandidateArtifacts(ctx, request, plan)
 	if err != nil {
-		return fmt.Errorf("read candidate manifest: %w", err)
+		return err
 	}
-	candidate, err := releasequalification.DecodeCandidate(candidateBytes)
-	if err != nil {
-		return fmt.Errorf("decode candidate manifest: %w", err)
-	}
-	candidateDirectory := filepath.Dir(request.CandidateManifest)
-	if filepath.Dir(request.ChartPackage) != candidateDirectory || filepath.Dir(request.ReleaseValues) != candidateDirectory || filepath.Dir(request.AdminBinary) != candidateDirectory ||
-		filepath.Base(request.ChartPackage) != candidate.ChartFile || filepath.Base(request.ReleaseValues) != candidate.ValuesFile {
-		return fmt.Errorf("candidate chart, values, admin binary, and manifest must come from one exact artifact directory")
-	}
-	if err := releasequalification.VerifyCandidateArtifacts(candidateDirectory, candidate, filepath.Base(request.AdminBinary)); err != nil {
-		return fmt.Errorf("verify candidate artifacts: %w", err)
-	}
-	candidateDigest, err := releasequalification.CandidateManifestDigest(candidateBytes)
-	if err != nil {
-		return fmt.Errorf("digest candidate manifest: %w", err)
-	}
-	if candidateDigest != plan.Artifacts.CandidateDigest {
-		return fmt.Errorf("candidate manifest differs from the planned digest")
-	}
-	adminInfo, err := os.Lstat(request.AdminBinary)
-	if err != nil || !adminInfo.Mode().IsRegular() || adminInfo.Mode()&0o111 == 0 {
-		return fmt.Errorf("candidate csi-admin is unavailable, non-regular, or non-executable")
-	}
-	if candidate.GitCommit != plan.Artifacts.GitCommit || candidate.ChartSHA256 != plan.Artifacts.ChartDigest || !sameArtifactImages(candidate.Images, plan.Artifacts.Images) {
-		return fmt.Errorf("closed E2E plan names another candidate")
+	if err := validateLocalPredecessorArtifacts(request, candidate); err != nil {
+		return err
 	}
 	if !slices.Contains(candidate.QualifiedCommercialTypes, plan.NodePool.CommercialType) {
 		return fmt.Errorf("planned commercial type %q is absent from the candidate allowlist", plan.NodePool.CommercialType)
 	}
 	if err := validateProviderReviewFresh(plan.ProviderReview, time.Now().UTC()); err != nil {
 		return err
-	}
-	for _, command := range []string{"kubectl", "helm", "jq", "scw"} {
-		if _, err := exec.LookPath(command); err != nil {
-			return fmt.Errorf("required scenario command %q is unavailable", command)
-		}
 	}
 	region := scw.Region(plan.Region)
 	versions, err := backend.kubernetes.ListVersions(&k8sapi.ListVersionsRequest{Region: region}, scw.WithContext(ctx))
@@ -227,6 +199,121 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 	return nil
 }
 
+func validateLocalCandidateArtifacts(
+	ctx context.Context,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+) (releasequalification.CandidateManifest, error) {
+	candidateBytes, err := readExactArtifactManifest(request.CandidateManifest)
+	if err != nil {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("read candidate manifest: %w", err)
+	}
+	candidate, err := releasequalification.DecodeCandidate(candidateBytes)
+	if err != nil {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("decode candidate manifest: %w", err)
+	}
+	candidateDirectory := filepath.Dir(request.CandidateManifest)
+	if filepath.Dir(request.ChartPackage) != candidateDirectory || filepath.Dir(request.ReleaseValues) != candidateDirectory || filepath.Dir(request.AdminBinary) != candidateDirectory ||
+		filepath.Base(request.ChartPackage) != candidate.ChartFile || filepath.Base(request.ReleaseValues) != candidate.ValuesFile {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("candidate chart, values, admin binary, and manifest must come from one exact artifact directory")
+	}
+	if err := releasequalification.VerifyCandidateArtifacts(candidateDirectory, candidate, filepath.Base(request.AdminBinary)); err != nil {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("verify candidate artifacts: %w", err)
+	}
+	candidateDigest, err := releasequalification.CandidateManifestDigest(candidateBytes)
+	if err != nil {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("digest candidate manifest: %w", err)
+	}
+	if candidateDigest != plan.Artifacts.CandidateDigest {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("candidate manifest differs from the planned digest")
+	}
+	adminInfo, err := os.Lstat(request.AdminBinary)
+	if err != nil || !adminInfo.Mode().IsRegular() || adminInfo.Mode()&0o111 == 0 {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("candidate csi-admin is unavailable, non-regular, or non-executable")
+	}
+	if candidate.GitCommit != plan.Artifacts.GitCommit || candidate.ChartSHA256 != plan.Artifacts.ChartDigest || !sameArtifactImages(candidate.Images, plan.Artifacts.Images) {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("closed E2E plan names another candidate")
+	}
+	if err := runCredentialFreeCommand(ctx, request.AdminBinary, "version"); err != nil {
+		return releasequalification.CandidateManifest{}, fmt.Errorf("execute exact candidate csi-admin before provider mutation: %w", err)
+	}
+	for _, command := range []string{"kubectl", "helm", "jq", "scw"} {
+		if _, err := exec.LookPath(command); err != nil {
+			return releasequalification.CandidateManifest{}, fmt.Errorf("required scenario command %q is unavailable", command)
+		}
+	}
+	return candidate, nil
+}
+
+func validateLocalPredecessorArtifacts(request e2erunner.Request, candidate releasequalification.CandidateManifest) error {
+	if request.Predecessor != nil {
+		previousBytes, previousErr := readExactArtifactManifest(request.PreviousManifest)
+		if previousErr != nil {
+			return fmt.Errorf("read exact public predecessor manifest: %w", previousErr)
+		}
+		previous, previousErr := releasequalification.DecodeCandidate(previousBytes)
+		if previousErr != nil {
+			return fmt.Errorf("decode exact public predecessor manifest: %w", previousErr)
+		}
+		compatibilityIdentity, previousErr := releasequalification.CandidateManifestDigest(previousBytes)
+		if previousErr != nil {
+			return fmt.Errorf("digest exact public predecessor manifest: %w", previousErr)
+		}
+		chartDigest, chartErr := releasequalification.DigestFile(request.PreviousChart)
+		valuesDigest, valuesErr := releasequalification.DigestFile(request.PreviousValues)
+		if chartErr != nil || valuesErr != nil {
+			return fmt.Errorf("hash exact public predecessor artifacts: %w", errors.Join(chartErr, valuesErr))
+		}
+		if chartDigest != request.Predecessor.ChartSHA256 || valuesDigest != request.Predecessor.ValuesSHA256 {
+			return fmt.Errorf("local predecessor chart or values differs from the closed public identity")
+		}
+		previousDirectory := filepath.Dir(request.PreviousManifest)
+		if filepath.Dir(request.PreviousChart) != previousDirectory ||
+			filepath.Dir(request.PreviousValues) != previousDirectory ||
+			filepath.Base(request.PreviousChart) != previous.ChartFile ||
+			filepath.Base(request.PreviousValues) != previous.ValuesFile ||
+			previous.ReleaseTag != request.Predecessor.ReleaseTag ||
+			previous.Version != request.Predecessor.Version ||
+			previous.ChartSHA256 != request.Predecessor.ChartSHA256 ||
+			previous.ValuesSHA256 != request.Predecessor.ValuesSHA256 ||
+			previous.DriverImage != request.Predecessor.DriverImage ||
+			previous.DriverName != candidate.DriverName ||
+			compatibilityIdentity != request.Predecessor.CompatibilityIdentity {
+			return fmt.Errorf("public predecessor manifest differs from the closed compatibility identity")
+		}
+		if request.Predecessor.DriverImage == candidate.DriverImage {
+			return fmt.Errorf("public predecessor and candidate use the same driver image")
+		}
+	}
+	return nil
+}
+
+func readExactArtifactManifest(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("artifact manifest must be an exact regular file")
+	}
+	return os.ReadFile(path)
+}
+
+func runCredentialFreeCommand(ctx context.Context, name string, arguments ...string) error {
+	command := exec.CommandContext(ctx, name, arguments...)
+	command.Env = environmentWithoutScalewayCredentials()
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if len(message) > 2048 {
+			message = message[:2048]
+		}
+		return fmt.Errorf("run %s: %w: %s", filepath.Base(name), err, message)
+	}
+	return nil
+}
+
 // creatableClusterTypeAvailability follows the provider's closed stock
 // contract: scarce means limited availability and still permits creation,
 // while shortage and any future or missing value fail closed.
@@ -263,69 +350,61 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 		return inventory, err
 	}
 	region := scw.Region(plan.Region)
-	if plan.Cluster.CreatedByRun {
-		privateNetworkName := plan.ResourcePrefix + "-network"
-		if err := backend.beginProviderCreate(&inventory, e2ecleanup.ResourceKindPrivateNetwork, privateNetworkName); err != nil {
-			return inventory, err
-		}
-		privateNetwork, err := backend.vpc.CreatePrivateNetwork(&vpcapi.CreatePrivateNetworkRequest{
-			Region: region, Name: privateNetworkName, ProjectID: plan.ProjectID,
-			Tags: []string{plan.OwnershipTag}, Subnets: []scw.IPNet{}, DefaultRoutePropagationEnabled: false,
-		}, scw.WithContext(ctx))
-		if err != nil {
-			return inventory, fmt.Errorf("create Kapsule Private Network: %w", err)
-		}
-		if privateNetwork == nil || privateNetwork.ID == "" {
-			return inventory, fmt.Errorf("create Kapsule Private Network returned an empty response")
-		}
-		if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindPrivateNetwork, privateNetwork.ID, privateNetwork.Name, true, privateNetwork.Tags)); err != nil {
-			return inventory, err
-		}
-		if privateNetwork.ProjectID != plan.ProjectID || privateNetwork.Region.String() != plan.Region || privateNetwork.Name != privateNetworkName || privateNetwork.VpcID == "" || !slices.Contains(privateNetwork.Tags, plan.OwnershipTag) {
-			return inventory, fmt.Errorf("created Private Network differs from the exact run-owned scope")
-		}
+	if !plan.Cluster.CreatedByRun {
+		return inventory, fmt.Errorf("v1 real E2E refuses a cluster not owned by the exact run")
+	}
+	privateNetworkName := plan.ResourcePrefix + "-network"
+	if err := backend.beginProviderCreate(&inventory, e2ecleanup.ResourceKindPrivateNetwork, privateNetworkName); err != nil {
+		return inventory, err
+	}
+	privateNetwork, err := backend.vpc.CreatePrivateNetwork(&vpcapi.CreatePrivateNetworkRequest{
+		Region: region, Name: privateNetworkName, ProjectID: plan.ProjectID,
+		Tags: []string{plan.OwnershipTag}, Subnets: []scw.IPNet{}, DefaultRoutePropagationEnabled: false,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return inventory, fmt.Errorf("create Kapsule Private Network: %w", err)
+	}
+	if privateNetwork == nil || privateNetwork.ID == "" {
+		return inventory, fmt.Errorf("create Kapsule Private Network returned an empty response")
+	}
+	if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindPrivateNetwork, privateNetwork.ID, privateNetwork.Name, true, privateNetwork.Tags)); err != nil {
+		return inventory, err
+	}
+	if privateNetwork.ProjectID != plan.ProjectID || privateNetwork.Region.String() != plan.Region || privateNetwork.Name != privateNetworkName || privateNetwork.VpcID == "" || !slices.Contains(privateNetwork.Tags, plan.OwnershipTag) {
+		return inventory, fmt.Errorf("created Private Network differs from the exact run-owned scope")
+	}
 
-		if err := backend.beginProviderCreate(&inventory, e2ecleanup.ResourceKindCluster, plan.ResourcePrefix); err != nil {
-			return inventory, err
-		}
-		project := plan.ProjectID
-		cluster, err := backend.kubernetes.CreateCluster(&k8sapi.CreateClusterRequest{
-			Region: region, ProjectID: &project, Type: request.KapsuleType,
-			Name: plan.ResourcePrefix, Description: "Disposable SFS subdirectory CSI qualification " + plan.RunID,
-			Tags: []string{plan.OwnershipTag, requiredFileStorageClusterTag}, Version: request.KapsuleVersion, Cni: k8sapi.CNI("cilium"),
-			Pools: []*k8sapi.CreateClusterRequestPoolConfig{}, FeatureGates: []string{}, AdmissionPlugins: []string{}, ApiserverCertSans: []string{},
-			PrivateNetworkID: &privateNetwork.ID,
-		}, scw.WithContext(ctx))
-		if err != nil {
-			return inventory, err
-		}
-		if cluster == nil {
-			return inventory, fmt.Errorf("create Kapsule cluster returned an empty response")
-		}
-		if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindCluster, cluster.ID, cluster.Name, true, cluster.Tags)); err != nil {
-			return inventory, err
-		}
-		if cluster.PrivateNetworkID == nil || *cluster.PrivateNetworkID != privateNetwork.ID {
-			return inventory, fmt.Errorf("created Kapsule cluster differs from the exact run-owned Private Network")
-		}
-		readyCluster, err := backend.kubernetes.WaitForCluster(&k8sapi.WaitForClusterRequest{Region: region, ClusterID: cluster.ID}, scw.WithContext(ctx))
-		if err != nil {
-			return inventory, err
-		}
-		if readyCluster == nil || readyCluster.ID != cluster.ID || readyCluster.ProjectID != plan.ProjectID || readyCluster.Region.String() != plan.Region ||
-			readyCluster.PrivateNetworkID == nil || *readyCluster.PrivateNetworkID != privateNetwork.ID ||
-			!slices.Contains(readyCluster.Tags, plan.OwnershipTag) || !slices.Contains(readyCluster.Tags, requiredFileStorageClusterTag) {
-			return inventory, fmt.Errorf("created Kapsule cluster does not expose the exact network, run, and File Storage identity")
-		}
-	} else {
-		cluster, err := backend.kubernetes.GetCluster(&k8sapi.GetClusterRequest{Region: region, ClusterID: plan.Cluster.ExistingID}, scw.WithContext(ctx))
-		if err != nil || cluster == nil || cluster.ProjectID != plan.ProjectID || cluster.Region.String() != plan.Region || !slices.Contains(cluster.Tags, requiredFileStorageClusterTag) {
-			return inventory, fmt.Errorf("validate reused exact cluster: %w", err)
-		}
-		inventory.Resources = append(inventory.Resources, backend.resource(e2ecleanup.ResourceKindCluster, cluster.ID, cluster.Name, false, cluster.Tags))
-		if err := backend.writeInventory(inventory); err != nil {
-			return inventory, err
-		}
+	if err := backend.beginProviderCreate(&inventory, e2ecleanup.ResourceKindCluster, plan.ResourcePrefix); err != nil {
+		return inventory, err
+	}
+	project := plan.ProjectID
+	cluster, err := backend.kubernetes.CreateCluster(&k8sapi.CreateClusterRequest{
+		Region: region, ProjectID: &project, Type: request.KapsuleType,
+		Name: plan.ResourcePrefix, Description: "Disposable SFS subdirectory CSI qualification " + plan.RunID,
+		Tags: []string{plan.OwnershipTag, requiredFileStorageClusterTag}, Version: request.KapsuleVersion, Cni: k8sapi.CNI("cilium"),
+		Pools: []*k8sapi.CreateClusterRequestPoolConfig{}, FeatureGates: []string{}, AdmissionPlugins: []string{}, ApiserverCertSans: []string{},
+		PrivateNetworkID: &privateNetwork.ID,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return inventory, err
+	}
+	if cluster == nil {
+		return inventory, fmt.Errorf("create Kapsule cluster returned an empty response")
+	}
+	if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindCluster, cluster.ID, cluster.Name, true, cluster.Tags)); err != nil {
+		return inventory, err
+	}
+	if cluster.PrivateNetworkID == nil || *cluster.PrivateNetworkID != privateNetwork.ID {
+		return inventory, fmt.Errorf("created Kapsule cluster differs from the exact run-owned Private Network")
+	}
+	readyCluster, err := backend.kubernetes.WaitForCluster(&k8sapi.WaitForClusterRequest{Region: region, ClusterID: cluster.ID}, scw.WithContext(ctx))
+	if err != nil {
+		return inventory, err
+	}
+	if readyCluster == nil || readyCluster.ID != cluster.ID || readyCluster.ProjectID != plan.ProjectID || readyCluster.Region.String() != plan.Region ||
+		readyCluster.PrivateNetworkID == nil || *readyCluster.PrivateNetworkID != privateNetwork.ID ||
+		!slices.Contains(readyCluster.Tags, plan.OwnershipTag) || !slices.Contains(readyCluster.Tags, requiredFileStorageClusterTag) {
+		return inventory, fmt.Errorf("created Kapsule cluster does not expose the exact network, run, and File Storage identity")
 	}
 	clusterID := resourceID(inventory, e2ecleanup.ResourceKindCluster, 0)
 	poolName := plan.ResourcePrefix + "-nodes"
@@ -426,7 +505,19 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 		"--parent-a=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 0), "--parent-b=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
 		"--evidence-dir=" + evidenceDirectory}
 	if request.PreviousChart != "" {
-		arguments = append(arguments, "--previous-chart="+request.PreviousChart, "--previous-values="+request.PreviousValues)
+		predecessor := request.Predecessor
+		arguments = append(arguments,
+			"--previous-chart="+request.PreviousChart,
+			"--previous-values="+request.PreviousValues,
+			"--predecessor-kind="+predecessor.Kind,
+			"--predecessor-version="+predecessor.Version,
+			"--predecessor-release-tag="+predecessor.ReleaseTag,
+			"--predecessor-public-reference="+predecessor.PublicReference,
+			"--predecessor-compatibility-identity="+predecessor.CompatibilityIdentity,
+			"--predecessor-chart-sha256="+predecessor.ChartSHA256,
+			"--predecessor-values-sha256="+predecessor.ValuesSHA256,
+			"--predecessor-driver-image="+predecessor.DriverImage,
+		)
 	}
 	if plan.Profile == e2eplan.ProfileBase {
 		smoke, err := backend.runScenarioPhase(ctx, evidenceDirectory, "run-smoke", arguments)
@@ -441,17 +532,29 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 		if err := e2erunner.ValidateSmokeScenarioResults(results); err != nil {
 			return nil, err
 		}
+		if err := e2erunner.ValidateCandidateScenarioImages(plan.Profile, results, plan.Artifacts.Images); err != nil {
+			return nil, err
+		}
 		return results, nil
 	}
 	pre, err := backend.runScenarioPhase(ctx, evidenceDirectory, "run-pre", arguments)
 	if err != nil {
 		return nil, err
 	}
-	destructive, err := backend.runDestructiveControllerAndNodeScenarios(ctx, request, plan, inventory, evidenceDirectory)
-	if err != nil {
+	if request.Predecessor == nil {
+		return nil, fmt.Errorf("release qualification lost its closed predecessor identity")
+	}
+	if err := e2erunner.ValidatePredecessorScenario(pre, *request.Predecessor); err != nil {
+		return nil, err
+	}
+	if err := e2erunner.ValidateCandidateScenarioImages(plan.Profile, pre, plan.Artifacts.Images); err != nil {
 		return nil, err
 	}
 	provider, err := backend.runProviderScenarios(ctx, request, plan, inventory, evidenceDirectory)
+	if err != nil {
+		return nil, err
+	}
+	destructive, err := backend.runDestructiveControllerAndNodeScenarios(ctx, request, plan, inventory, evidenceDirectory)
 	if err != nil {
 		return nil, err
 	}
@@ -467,8 +570,8 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 	if err != nil {
 		return nil, err
 	}
-	results := append(pre, destructive...)
-	results = append(results, provider...)
+	results := append(pre, provider...)
+	results = append(results, destructive...)
 	results = append(results, mid...)
 	results = append(results, recovery...)
 	results = append(results, post...)
@@ -516,15 +619,22 @@ func (backend *scalewayBackend) runScenarioPhase(ctx context.Context, evidenceDi
 				return nil, fmt.Errorf("read scenario proof %q: %w", result.EvidenceFile, err)
 			}
 			result.Proof = bytes.TrimSpace(proof)
+			result.ProofSHA256, err = e2erunner.CompactScenarioProofDigest(result.Proof)
+			if err != nil {
+				return nil, fmt.Errorf("digest scenario proof %q: %w", result.EvidenceFile, err)
+			}
 		}
 	}
-	if err := e2erunner.ValidateAvailableScenarioProofs(results); err != nil {
+	if err := e2erunner.ValidateAvailableScenarioProofsForRun(results, backend.plan.RunID); err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
 func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.Request, inventory e2ecleanup.Inventory) (e2ecleanup.Inventory, error) {
+	if _, err := validateLocalCandidateArtifacts(ctx, request, backend.plan); err != nil {
+		return inventory, fmt.Errorf("revalidate exact candidate before cleanup recovery: %w", err)
+	}
 	var err error
 	if inventory.Phase == e2ecleanup.PhaseProvisioning {
 		inventory, err = backend.confirmStableProvisioningDiscovery(ctx, inventory)
@@ -537,9 +647,21 @@ func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.R
 	if err := backend.writeInventory(inventory); err != nil {
 		return inventory, err
 	}
+	if err := backend.recoverDisposableInstanceAttachments(ctx, request, inventory); err != nil {
+		return inventory, err
+	}
 	evidenceDirectory := filepath.Dir(backend.plan.CleanupInventoryPath)
 	preconditionsPath := filepath.Join(evidenceDirectory, "cleanup-preconditions.json")
 	if _, err := os.Stat(backend.kubeconfig); err == nil {
+		if err := backend.recoverInterruptedCheckpoint(ctx, request, backend.plan, inventory); err != nil {
+			return inventory, err
+		}
+		if err := backend.recoverRetainedControllerFreeze(ctx, request, backend.plan, inventory); err != nil {
+			return inventory, err
+		}
+		if err := backend.recoverInterruptedControllerFailure(ctx, request, backend.plan, inventory); err != nil {
+			return inventory, err
+		}
 		validator, executableErr := os.Executable()
 		if executableErr != nil {
 			return inventory, fmt.Errorf("locate uninstall evidence validator: %w", executableErr)
@@ -551,7 +673,8 @@ func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.R
 		}
 		if err := backend.runScenarioCommand(ctx, "cleanup", "--kubeconfig="+backend.kubeconfig,
 			"--namespace="+request.DriverNamespace, "--release="+request.HelmRelease,
-			"--admin="+request.AdminBinary,
+			"--admin="+request.AdminBinary, "--chart="+request.ChartPackage, "--values="+request.ReleaseValues,
+			"--project-id="+backend.plan.ProjectID,
 			"--profile="+backend.plan.Profile, "--region="+backend.plan.Region,
 			fmt.Sprintf("--cluster-created-by-run=%t", backend.plan.Cluster.CreatedByRun),
 			"--run-id="+backend.plan.RunID,

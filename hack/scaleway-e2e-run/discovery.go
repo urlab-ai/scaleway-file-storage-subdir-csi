@@ -206,20 +206,6 @@ func (backend *scalewayBackend) discoverPrivateNetwork(ctx context.Context) (*e2
 
 func (backend *scalewayBackend) discoverCluster(ctx context.Context, privateNetworkID string) (*e2ecleanup.Resource, error) {
 	region := scw.Region(backend.plan.Region)
-	if backend.plan.Cluster.Disposition == e2eplan.ClusterReuse {
-		cluster, err := backend.kubernetes.GetCluster(&k8sapi.GetClusterRequest{Region: region, ClusterID: backend.plan.Cluster.ExistingID}, scw.WithContext(ctx))
-		if err != nil {
-			return nil, fmt.Errorf("read reused exact cluster: %w", err)
-		}
-		if cluster == nil {
-			return nil, fmt.Errorf("read reused exact cluster returned an empty response")
-		}
-		if cluster.ProjectID != backend.plan.ProjectID || cluster.Region.String() != backend.plan.Region || !slices.Contains(cluster.Tags, requiredFileStorageClusterTag) {
-			return nil, fmt.Errorf("reused exact cluster differs from the closed scope")
-		}
-		resource := backend.resource(e2ecleanup.ResourceKindCluster, cluster.ID, cluster.Name, false, cluster.Tags)
-		return &resource, nil
-	}
 	name := backend.plan.ResourcePrefix
 	response, err := backend.kubernetes.ListClusters(&k8sapi.ListClustersRequest{Region: region, ProjectID: &backend.plan.ProjectID, Name: &name}, scw.WithAllPages(), scw.WithContext(ctx))
 	if err != nil {

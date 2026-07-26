@@ -59,11 +59,18 @@ single-node-writer conflict, and a 100-PVC/20-minute soak with 5,714 writes,
 5,640 reads, and zero checksum failures. Its external signal race observed the
 valid parent claim only after Scaleway had already completed the attachment, so
 it correctly admitted no crash-window evidence and removed all seven run-owned
-cloud resources. RC23 replaces that timing-sensitive cloud race with a real
-fresh-parent addition plus complete post-claim controller restart. The exact
-after-attach/before-claim state remains a deterministic recovery gate.
-Publication remains blocked until the exact RC23 artifacts have concrete
-Linux, kind, CSI, Helm, Kapsule, and final-cleanup evidence.
+cloud resources. RC24 later passed artifact/install, real `virtiofs`,
+single-node-writer conflict, the 100-PVC multiplex proof, a 20-minute soak with
+5,651 writes, 5,573 reads and zero checksum failures, plugin restarts, and the
+normal drain path. It was not promoted: Scaleway `poweroff` alone let the
+controller perform a graceful Lease handoff, so the harness correctly rejected
+the intended abrupt-failure proof. Cleanup removed all seven exact run-owned
+resources and independent reads confirmed their absence. The next candidate
+uses a credential-free, qualification-only process freeze immediately before
+the provider stop, with exact Pod UID, cgroup, entrypoint, and PID checks. The
+exact after-attach/before-claim state remains a deterministic recovery gate.
+Publication remains blocked until the next exact candidate has concrete Linux,
+kind, CSI, Helm, Kapsule, and final-cleanup evidence.
 `POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
 run because it is the lowest-priced currently documented type with two File
 Storage slots. It is not supported or advertised until retained real-provider
@@ -227,5 +234,14 @@ it refuse before credentials or provider mutation. That implementation
 interlock is currently clear; this authorizes a controlled qualification run,
 not release promotion. The run includes the exact 100-PVC multiplex check and
 a 20-minute checksum correctness soak across controller and node-plugin
-restarts. `--cleanup-only` remains
-available for an already approved retained run.
+restarts. It always creates a dedicated ephemeral cluster and Private Network;
+cluster reuse is deliberately unsupported so destructive qualification cannot
+select a foreign node. The exact public N-1 manifest, chart, values,
+compatibility identity, and immutable image are cross-checked before provider
+mutation. Credential-free recovery journals make interrupted controller-stop
+and checkpoint transitions resumable by `--cleanup-only` without broadening
+cleanup authority. The live artifact proof also binds the five images observed
+in controller/node workloads to the five candidate digests. Interrupted
+disposable-Instance attachments and N/N-1 mixed-generation transitions are
+recovered before safe uninstall. `--cleanup-only` remains available for an
+already approved retained run.

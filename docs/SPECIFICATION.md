@@ -301,13 +301,28 @@ owner claim remains a mandatory deterministic recovery test. Real Kapsule
 qualification instead adds the fresh second parent through Helm, proves its
 immutable claim and cleared journal, restarts the complete controller
 Deployment after bootstrap, and proves the claim, mount, attachment, and
-journal remain correct. This preserves the safety guarantee without a flaky
-cloud signal race or a privileged `hostPID` injector.
+journal remain correct. This preserves the bootstrap safety guarantee without
+a flaky cloud signal race or a privileged `hostPID` injector in that
+sub-second bootstrap path.
 
-`v0.1.0-rc.23` is the next full qualification candidate and continues to use
-RC14 as its exact public predecessor. No candidate is a production support
-claim until RC23 passes every Linux, kind, CSI, Helm, real Kapsule, and
-final-cleanup qualification gate.
+RC24 passed artifact and install admission, real `virtiofs`,
+`SINGLE_NODE_WRITER`, the 100-PVC multiplex proof, a 20-minute soak with 5,651
+writes, 5,573 reads, zero checksum failures, controller and node-plugin
+restarts, and the normal drain path. Its hard-failure step then demonstrated
+that a provider `poweroff` request alone is not an abrupt-process guarantee:
+the controller could execute its normal Lease handoff before the Instance
+reached the stopped state. The harness correctly rejected the missing
+fail-closed evidence, and no controller-hard-failure result was admitted.
+Exact cleanup removed the run-owned Private Network, cluster, node pool, two
+parents, disposable Instance, and root SBS volume; independent exact-ID reads
+confirmed all seven resources absent. RC24 is superseded and must not be
+promoted.
+
+The next candidate keeps RC14 as its exact public predecessor and makes the
+hard-failure injection deterministic by freezing only the exact controller
+process before the provider stop. No candidate is a production support claim
+until every Linux, kind, CSI, Helm, real Kapsule, and final-cleanup
+qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
 retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
 commercial type for the first controlled run because it is the lowest-priced
@@ -6650,16 +6665,20 @@ cloud. It must run once against the exact frozen commit, chart, values,
 `csi-admin`, driver image digest, and rendered sidecar digests. Its closed real
 Kapsule matrix must:
 
-1. create or reuse one dedicated Kapsule cluster in `fr-par`, create one fresh
-   run-owned two-node pool and two fresh run-owned 100 GB parents, and record
+1. create one dedicated run-owned ephemeral Kapsule cluster in `fr-par`, one
+   run-owned Private Network, one fresh run-owned two-node pool, and two fresh
+   run-owned 100 GB parents, and record
    product status, quota, region, commercial Instance type, live
    `MaxFileSystems`, planned cost, and exact cleanup command;
 2. validate the exact candidate artifacts, positive Project-scoped
    `FileStorageReadOnly` plus `InstancesFullAccess` access, the cluster File
    Storage tag, privileged namespace, production security contexts, immutable
-   images, singleton controller Lease, compatible controller candidates, Ready
-   node plugins, CSINode registrations, fixed disjoint host paths, and absence
-   of Scaleway credentials from node containers;
+   images, and exact equality between the five image references observed in the
+   controller/node workloads and the five immutable references retained by the
+   candidate plan. It also validates the singleton controller Lease, compatible
+   controller candidates, Ready node plugins, CSINode registrations, fixed
+   disjoint host paths, and absence of Scaleway credentials from node
+   containers;
 3. prove a real controller `virtiofs` mount, `statfs`, immutable parent claim,
    archive rename compatibility, restart recovery, and one real
    archive/delete lifecycle that leaves an adjacent sibling sentinel unchanged;
@@ -6687,19 +6706,29 @@ Kapsule matrix must:
 8. attach both parents to the exact standalone run-owned disposable Instance
    outside the Kubernetes node inventory, prove the controller fails closed
    before partial provisioning, detach those exact attachments, prove both
-   provider surfaces report absence, and verify provisioning resumes;
+   provider surfaces report absence, and verify provisioning resumes. If the
+   runner disappears during this transition, `--cleanup-only` must idempotently
+   detach those same two run-owned parent/Instance pairs and prove regional
+   absence before ordinary Kubernetes safe uninstall;
 9. grow one run-owned parent by one 100 GB product step, wait for a fresh
    authoritative `available` observation, restart the controller to force a
    fresh provider inventory, and prove a new allocation can use the observed
    grown capacity. Transient, ambiguous, timeout, and unavailable provider
    reads are covered deterministically below rather than induced unsafely in
    the cloud;
-10. drain and uncordon a workload node, restart a node plugin, then hard-stop
-    the exact controller node while workloads on another node continue I/O.
-    Prove the successor remains non-serving until exact provider fencing and
-    one immutable approval, record recovery time and operator steps, replace
-    the stopped run-owned node, and revalidate commercial type, live attach
-    limit, node configuration generation, registration, mount, and data;
+10. drain and uncordon a workload node, restart a node plugin, then inject an
+    actual abrupt controller failure while workloads on another node continue
+    I/O. Immediately before hard-stopping the exact controller Instance, a
+    short-lived, credential-free test Pod on that disposable node must identify
+    exactly one controller process from both the controller Pod UID in its
+    cgroup and the immutable full driver entrypoint, revalidate that identity
+    immediately before signaling, send `SIGSTOP`, and prove the process entered
+    the stopped state. The provider stop follows immediately, so the controller
+    cannot execute its graceful Lease release path. Prove the successor remains
+    non-serving until exact provider fencing and one immutable approval, record
+    the process-freeze result, recovery time, and operator steps, replace the
+    stopped run-owned node, and revalidate commercial type, live attach limit,
+    node configuration generation, registration, mount, and data;
 11. upgrade from the most recent public compatible chart candidate or release
     to the candidate under test while existing PVCs are mounted. Stagger the
     node rollout, require create/publish to fail closed while generations
@@ -6728,10 +6757,50 @@ Kapsule matrix must:
     exact Helm release, remove the retained kubeconfig, and delete every
     run-owned cloud resource by exact retained ID.
 
+The numbered matrix defines required coverage; the harness retains one explicit
+execution order and rejects every other ordering. The N/N-1 proof is necessarily
+a bootstrap gate: the exact predecessor must be installed before the candidate
+can be installed, so its artifact/install/upgrade observations are collected as
+one closed initial gate and its structured proof is admitted immediately after
+candidate artifact validation. The remaining scenarios then execute in the
+order listed by the closed result schema. This representation must not hide,
+defer, or manufacture the predecessor proof after later candidate-only tests.
+
 Every harness-created object that a later exact selector observes must carry
 both the unique run label and the Helm release identity used by that selector.
 The harness must fail closed on absent or ambiguous objects; it must not weaken
 the selector to compensate for a missing identity label.
+
+The item 10 fault injector is qualification-only and does not change the
+release chart or driver security context. It may use `hostPID` and a privileged
+container only on the disposable qualification node because managed Kapsule
+runtime confinement rejects cross-container signals from a narrower profile.
+It must disable service-account token automount, mount no host path, receive no
+Kubernetes or Scaleway credential, use the immutable qualification workload
+image, and be removed immediately after the exact Instance reaches the stopped
+state. If the provider stop fails while the Instance may still be live, the
+harness must revalidate the same cgroup, Pod UID, entrypoint, and PID before
+sending `SIGCONT`. If that recovery is ambiguous, it must retain the exact
+credential-free injector for operator recovery and fail the run; it must never
+signal a replacement or merely name-matching process. A proof that omits the
+confirmed process-freeze step is invalid.
+
+Before signaling, the injector Pod durably exposes the exact controller Pod UID,
+cgroup UID, and canonical host PID as run-scoped recovery identity. Cleanup
+must inspect and either safely resume that exact live process, remove the exact
+injector after conclusive provider fencing, or retain it when state is
+ambiguous, before any broad run-label cleanup can remove it. The hard-failure
+scenario also fsyncs a credential-free exact-ID recovery journal before the
+freeze and advances it after provider stop. A journaled Instance that may still
+be live cannot be treated as recovered when the exact injector is absent,
+expired, or unusable; cleanup retains the journal and fails closed. Before any
+detach, cleanup must re-read the exact Kapsule cluster/pool/node/provider-ID
+relationship. A missing Kapsule node permits automatic continuation only after
+the exact old Instance is conclusively absent and the regional attachment view
+also reports absence. An interrupted cleanup may then fence and replace only
+the journaled run-owned Instance and Kapsule node and admit only an approval
+bound to the original Lease evidence. Missing, foreign, or ambiguous identity
+leaves the journal and resources intact for operator recovery.
 
 The soak is a correctness and recovery test, not a throughput benchmark. Its
 20-minute minimum is measured after every sampled writer and reader is Ready.
@@ -6746,6 +6815,15 @@ startup refusal naming both configuration generations together with a
 non-Bound new PVC and a non-Ready new publish Pod is authoritative fail-closed
 evidence. The test must not depend on CSI sidecar Event timing while the driver
 socket is deliberately unavailable.
+
+Immediately before the first N/N-1 mutation, the harness fsyncs one
+credential-free run-scoped transition marker. If the runner stops while Helm or
+the node DaemonSet is in a mixed-generation state, `--cleanup-only` validates
+that exact marker and the already digest-verified candidate chart and values,
+converges the release to the candidate's normal `RollingUpdate` strategy,
+requires one matching controller/node generation and Ready rollouts, and only
+then removes test workloads. The marker is removed only after normal candidate
+convergence has been proved. No general upgrade state machine is required.
 
 The following exhaustive permutations remain mandatory release gates, but run
 deterministically on the same frozen source through fake Kubernetes/Scaleway
@@ -6832,25 +6910,24 @@ operator review is not a substitute for live API checks: the executor still prov
 regional File Storage access, the candidate commercial allowlist, current
 Instance-type availability, and live `MaxFileSystems` sufficient for every
 planned parent before mutation.
-It chooses
-either a new ephemeral cluster or one exact reused cluster ID, but it always
-creates a fresh run-owned node pool of two or three nodes. Reusing or modifying
-a pre-existing node pool is forbidden. Both profiles plan exactly two
-run-owned parents. The base profile requires the current product-minimum 25 GB
-size for each parent. The release-candidate profile requires 100 GB increments
-from 100 GB through 49.9 TB so one 100 GB growth step remains below the 50 TB
+It always creates a new run-owned ephemeral cluster and a fresh run-owned node
+pool of two or three nodes. Reusing a cluster or modifying any pre-existing
+node pool is forbidden in v1. This deliberately small constraint ensures that
+drain, process-failure, pool replacement, checkpoint, and cleanup scenarios can
+never select or mutate a foreign node. Both profiles plan exactly two run-owned
+parents. The base profile requires the current product-minimum 25 GB size for
+each parent. The release-candidate profile requires 100 GB increments from
+100 GB through 49.9 TB so one 100 GB growth step remains below the 50 TB
 per-filesystem maximum; it additionally plans exactly one standalone run-owned
 disposable Instance of the same explicitly selected commercial type, reused
 serially across its recovery scenarios so it cannot disappear from cost or
 cleanup accounting. It also plans that Instance's one provider-created root
 Block Storage volume as a distinct billable resource with its own exact-ID
 cleanup entry.
-Creating a cluster also plans exactly one run-owned Private Network in the same
-Project and region. The executor creates and journals that network before the
-cluster, passes its exact ID as the cluster's immutable `private_network_id`,
-and verifies the cluster reports the same ID. A reused cluster keeps its
-existing network; the run neither journals nor mutates that pre-existing
-network.
+Every run plans exactly one run-owned Private Network in the same Project and
+region. The executor creates and journals that network before the cluster,
+passes its exact ID as the cluster's immutable `private_network_id`, and
+verifies the cluster reports the same ID.
 
 `hack/scaleway-e2e-plan` is the repository's closed-schema, bounded-input
 preflight renderer. Its canonical output always has `dryRun = true`,
@@ -6858,6 +6935,9 @@ preflight renderer. Its canonical output always has `dryRun = true`,
 credentials, live-discovery, or execution backend; its output is review
 evidence and never authorization. `hack/scaleway-e2e-run` is the separate live
 executor. Dry-run is its default and does not construct a credentialed client.
+Its canonical execution-review envelope contains the complete plan and, for
+release qualification, the exact N/N-1 predecessor identity; two requests that
+name different predecessors cannot produce identical approval output.
 Execution requires both `--execute` and an exact `--confirm-run-id` matching the
 closed request immediately after the reviewed Project, region, resources,
 hourly cost, destructive operations, and cleanup command are printed. It then
@@ -6869,7 +6949,14 @@ Before constructing a provider backend it also requires
 `SCW_DEFAULT_PROJECT_ID` to equal the planned Project and a non-empty
 `SCW_DEFAULT_ORGANIZATION_ID` for the provider CLI's read-only scope. These
 values and credentials remain process-only and are not part of retained
-evidence.
+evidence. Before the first provider mutation, local preflight revalidates the
+candidate manifest, chart, values, checksum manifest, and packaged
+`csi-admin`, executes that exact binary's `version` command with Scaleway
+credentials and ambient kubeconfig removed, and verifies every required
+scenario command is available. The scenario shell captures and unexports its
+two Scaleway credential variables using shell builtins before invoking even
+path-resolution tools; only its narrowly scoped `scw` calls and streamed
+controller Secret receive them.
 
 The executor has two non-interchangeable evidence paths. The base profile may
 execute only the fixed smoke matrix defined in section 12.6 and emits explicitly
@@ -6883,10 +6970,19 @@ mutation, and no scenario log, base evidence, or zero exit status can be
 encoded as release qualification. A scenario leaves that list only after its
 structured evidence proves its complete normative invariant. N/N-1 requires a
 distinct compatible public predecessor and is never reported as successful
-when no previous chart was supplied. For qualification of the first stable
-release, the most recent public release candidate may be that predecessor when
-its exact chart, values, driver digest, and compatibility identity are retained
-and explicitly labelled as a candidate rather than a prior production release.
+when no previous chart was supplied. The closed request identifies whether that
+predecessor is a release or release candidate and retains its exact semantic
+version, public project release/tag URL, compatibility identity, immutable
+driver image, chart digest, values digest, and digest-bound candidate-manifest
+path.
+Live preflight rehashes the exact chart and values beside that manifest,
+validates every field against the manifest, and rejects the candidate when the
+observed predecessor Pod image differs from the declared immutable digest.
+The structured N/N-1 proof repeats this predecessor identity and is bound to
+the current run, candidate-manifest digest, and compact proof digest. For
+qualification of the first stable release, the most recent public release
+candidate may be that predecessor when it is explicitly labelled as a
+candidate rather than a prior production release.
 
 Before the first provider mutation the executor fsyncs a provisioning-phase
 inventory. Provisioning is sequential. Immediately before each provider
@@ -6923,9 +7019,9 @@ subsequently removed. A root volume missing from a ready schema-v2
 release-candidate inventory is a cleanup and qualification failure.
 
 The retained cleanup inventory is a closed exact-ID creation ledger. A ready
-scenario run contains exactly one cluster, one newly created node pool, and two
-created parents; a run-created cluster also requires its one created Private
-Network, and the release-candidate profile additionally contains its one
+scenario run contains exactly one run-created cluster, one run-created Private
+Network, one newly created node pool, and two created parents; the
+release-candidate profile additionally contains its one
 disposable Instance and its one root Block Storage volume. A provisioning
 failure may leave any valid prefix of that planned set. Cleanup and complete
 phases retain exactly the resources that were created
@@ -6938,9 +7034,8 @@ not stability. These reads may recover a committed intent, but repeated absence
 does not clear an unresolved provider `Create` without an authoritative
 provider conclusion. One empty list can never turn an ambiguous provider
 Create into `complete`. A timeout, changing result, or unresolved intent retains
-the provisioning ledger and requires `--cleanup-only` retry. The cluster entry records
-whether it was created or reused; every other entry must be run-created. Each
-entry records exact ID, name, Project,
+the provisioning ledger and requires `--cleanup-only` retry. Every entry must
+be run-created and records exact ID, name, Project,
 region, tags, creation provenance, and the closed observed state `present`,
 `absent`, or `unknown`. Created entries must match the complete run prefix and
 ownership tag. A conclusive exact-ID provider lookup is required for `absent`;
@@ -6956,10 +7051,9 @@ stop, mount absence, attachment absence, or post-prepare Helm uninstall barrier
 is incomplete. When unblocked it identifies only exact run-owned IDs, ordered
 as disposable Instance, its root volume after an authoritative `available`
 observation with zero references, node pool, parents, a run-owned cluster,
-then that cluster's run-owned Private Network. It never selects a reused
-cluster or its pre-existing network. Conclusively absent resources are
-idempotent success evidence. That review command deliberately has no deletion
-backend.
+then that cluster's run-owned Private Network. Conclusively absent resources
+are idempotent success evidence. That review command deliberately has no
+deletion backend.
 `hack/scaleway-e2e-run --cleanup-only` is the distinct credentialed executor;
 after a new immediate approval it repeats discovery, exact-ID reads and every
 Kubernetes/unmount/detach barrier before each ordered deletion. It requires the
@@ -6975,15 +7069,33 @@ qualification evidence. Presence of the
 runner does not constitute release evidence: the exact candidate still needs a
 successful retained Kapsule run and a final complete inventory.
 
+Qualification-only transitions that temporarily make ordinary safe uninstall
+impossible must be restartable by `--cleanup-only`. Before creating the
+external checkpoint workload, checkpoint preparation, driver-namespace
+deletion, and restored-controller admission, the executor fsyncs a
+credential-free run-scoped recovery journal. The journal contains only exact
+Kubernetes names, retained artifact paths and digests, checkpoint identity, and
+run-owned Instance IDs. The retained Helm values have their own digest, and a
+prepared archive retains and rechecks both its byte length and digest.
+`--cleanup-only` repeats the complete local candidate-artifact verification
+before recreating any Secret or invoking Helm. Before namespace deletion
+cleanup resumes the exact checkpoint when necessary and removes only the exact
+run-labelled workload. After namespace deletion it fences the journaled old
+pool, restores the exact completed checkpoint, admits recovery only with the
+checkpoint-bound approval, reinstalls the exact release, and then returns to
+normal safe uninstall. Any missing, symlinked, replaced, mismatched, or
+unreadable artifact, label, identity, attachment, or provider read fails closed
+and leaves the journal intact. No recovery journal may contain a credential or
+expand authority beyond the closed request and retained inventory.
+
 If the first install scenario fails before producing any successful scenario
 entry and the exact Helm release is either `failed` or conclusively absent
 because the pre-Helm installation gate failed, cleanup may use the narrower
-bootstrap-abort path instead of claiming a safe uninstall, but only when the
-cluster itself was created by that exact run. Reused clusters always require
-the normal safe-uninstall or operator recovery path. The fallback must prove the
-dedicated namespace has the exact run label; no workload Pod, PVC, namespace
-PV, driver VolumeAttachment, driver CSINode registration, or durable driver
-record exists; and both exact run-owned parents have zero provider attachments.
+bootstrap-abort path instead of claiming a safe uninstall. The fallback must
+prove the dedicated namespace has the exact run label; no workload Pod, PVC,
+namespace PV, driver VolumeAttachment, driver CSINode registration, or durable
+driver record exists; and both exact run-owned parents have zero provider
+attachments.
 The parent check must agree on both the filtered attachment list and each exact
 filesystem's reported attachment count. Workload/PVC absence is captured before
 normal cleanup removes anything, so the fallback cannot manufacture absence.
@@ -7020,8 +7132,9 @@ Cleanup must:
   allocation blocks cleanup; then run and verify
   `csi-admin uninstall prepare` before deleting Helm-managed RBAC, controller,
   or node resources;
-- never delete reused or pre-existing clusters, Private Networks, or
-  filesystems unless they were created by the same run ID;
+- never delete a pre-existing cluster, Private Network, filesystem, node pool,
+  Instance, or Block Storage volume; every v1 cleanup target must have been
+  created by the same run ID;
 - print an audit summary before deletion;
 - be idempotent and runnable separately after failed tests.
 
@@ -7121,8 +7234,7 @@ Successful production qualification requires the `release-candidate` profile
 and its complete historical inventory: one cluster entry, one run-owned node
 pool, two run-owned parents, one run-owned disposable Instance, and that
 Instance's one run-owned root Block Storage volume. Every run-owned resource is
-conclusively `absent`; only an explicitly reused cluster may remain
-conclusively `present`. Partial ledgers remain valid cleanup evidence for failed
+conclusively `absent`. Partial ledgers remain valid cleanup evidence for failed
 provisioning, but can never be encoded as a successful release run.
 
 ## 13. Documentation Requirements

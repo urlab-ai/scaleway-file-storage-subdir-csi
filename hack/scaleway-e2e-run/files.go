@@ -59,6 +59,17 @@ func fileSHA256(path string) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+func removeDurableFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
+}
+
 func writeExactFile(path string, content []byte, mode os.FileMode) (returnErr error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
