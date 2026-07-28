@@ -56,10 +56,16 @@ scale test, and a 20-minute checksum soak with zero checksum failures. It was
 not promoted because provider `poweroff` allowed a normal Lease handoff instead
 of the required abrupt-failure proof. Safe uninstall and exact cleanup
 completed, and independent reads confirmed the Private Network, cluster, node
-pool, two parents, disposable Instance, and root SBS volume absent. The next
-candidate continues to use RC14 as its exact public predecessor, uses
-`stop_in_place` after the exact-process freeze, and bounds retries to explicit
-provider availability failures. None is a qualified production release until
+pool, two parents, disposable Instance, and root SBS volume absent. RC28 then
+passed the core 100-PVC/soak, bootstrap, provider, resize, and drain paths, but
+failed closed because guest shutdown resumed the frozen process and Kapsule
+left the stopped node in `deleting`. The corrected qualification path first
+applies a run-owned egress-deny NetworkPolicy to only the existing controller
+Pod, proves its Lease has stopped renewing, journals that node's exact root SBS
+volume, and then performs the freeze and `stop_in_place`. If Kapsule
+replacement leaves that exact stopped run-owned node deleting, the harness
+revalidates and removes only its exact Instance and detached journaled root
+volume. None is a qualified production release until
 that exact candidate passes every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and

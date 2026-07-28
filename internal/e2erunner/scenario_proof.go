@@ -162,15 +162,23 @@ type ControllerFailureProof struct {
 	NewNodeName                     string   `json:"newNodeName"`
 	OldNodeID                       string   `json:"oldNodeId"`
 	NewNodeID                       string   `json:"newNodeId"`
+	OldRootVolumeID                 string   `json:"oldRootVolumeId"`
 	ParentFilesystemIDs             []string `json:"parentFilesystemIds"`
 	ApprovalSecretUID               string   `json:"approvalSecretUid"`
 	ApprovalRequestID               string   `json:"approvalRequestId"`
 	OperatorSteps                   []string `json:"operatorSteps"`
 	RecoverySeconds                 int64    `json:"recoverySeconds"`
 	OldHolderMatched                bool     `json:"oldHolderMatched"`
+	OldControllerEgressFenced       bool     `json:"oldControllerEgressFenced"`
 	OldControllerProcessFrozen      bool     `json:"oldControllerProcessFrozen"`
 	OldInstanceReachedStopped       bool     `json:"oldInstanceReachedStopped"`
+	OldInstanceAndRootDeleted       bool     `json:"oldInstanceAndRootDeleted"`
 	SuccessorBlockedBeforeApproval  bool     `json:"successorBlockedBeforeApproval"`
+	BlockedLeaseRenewTime           string   `json:"blockedLeaseRenewTime"`
+	BlockedLeaseResourceVersion     string   `json:"blockedLeaseResourceVersion"`
+	BlockedLeaseDurationSeconds     int32    `json:"blockedLeaseDurationSeconds"`
+	SuccessorBlockedSeconds         int64    `json:"successorBlockedSeconds"`
+	BlockedDriverRestartCount       int32    `json:"blockedDriverRestartCount"`
 	ServerAttachmentsAbsent         bool     `json:"serverAttachmentsAbsent"`
 	RegionalAttachmentsAbsent       bool     `json:"regionalAttachmentsAbsent"`
 	ApprovalConsumed                bool     `json:"approvalConsumed"`
@@ -180,6 +188,26 @@ type ControllerFailureProof struct {
 	LeaseUIDPreserved               bool     `json:"leaseUidPreserved"`
 	ControllerAvailable             bool     `json:"controllerAvailable"`
 	ApprovalSecretDeletedAfterAudit bool     `json:"approvalSecretDeletedAfterAudit"`
+}
+
+// ControllerRestartSmokeProof records a normal controller Pod replacement in
+// the deliberately non-qualifying base profile. It must never be accepted as
+// evidence for the abrupt Instance-failure and fencing contract.
+type ControllerRestartSmokeProof struct {
+	SchemaVersion       string `json:"schemaVersion"`
+	Scenario            string `json:"scenario"`
+	RunID               string `json:"runId"`
+	ObservedAt          string `json:"observedAt"`
+	LeaseUID            string `json:"leaseUid"`
+	OldPodUID           string `json:"oldPodUid"`
+	NewPodUID           string `json:"newPodUid"`
+	NewPVCName          string `json:"newPvcName"`
+	OldHolderMatched    bool   `json:"oldHolderMatched"`
+	NewHolderAcquired   bool   `json:"newHolderAcquired"`
+	ExistingVolumeRead  bool   `json:"existingVolumeRead"`
+	NewPVCBound         bool   `json:"newPvcBound"`
+	LeaseUIDPreserved   bool   `json:"leaseUidPreserved"`
+	ControllerAvailable bool   `json:"controllerAvailable"`
 }
 
 // NodeDrainProof records workload rescheduling followed by a node-plugin
@@ -535,6 +563,17 @@ func ValidateAvailableScenarioProofs(scenarios []ScenarioResult) error {
 			}
 		case "controller-hard-failure":
 			var proof ControllerFailureProof
+			if len(scenario.Proof) == 0 {
+				return fmt.Errorf("scenario %q has no semantic proof", scenario.Name)
+			}
+			if err := strictjson.Decode(scenario.Proof, &proof); err != nil {
+				return fmt.Errorf("decode scenario %q proof: %w", scenario.Name, err)
+			}
+			if err := proof.Validate(); err != nil {
+				return fmt.Errorf("validate scenario %q proof: %w", scenario.Name, err)
+			}
+		case "controller-restart-smoke":
+			var proof ControllerRestartSmokeProof
 			if len(scenario.Proof) == 0 {
 				return fmt.Errorf("scenario %q has no semantic proof", scenario.Name)
 			}
@@ -1092,6 +1131,7 @@ func (proof SafeUninstallProof) Validate() error {
 }
 
 var controllerFailureOperatorSteps = []string{
+	"fence-exact-controller-api-egress",
 	"freeze-exact-controller-process",
 	"stop-in-place-old-controller-instance",
 	"cordon-old-kubernetes-node",
@@ -1099,6 +1139,7 @@ var controllerFailureOperatorSteps = []string{
 	"verify-successor-blocked-by-uncleared-lease",
 	"detach-exact-parents-and-verify-dual-absence",
 	"replace-stopped-kapsule-node",
+	"delete-exact-stopped-instance-and-root-volume",
 	"create-immutable-abnormal-takeover-approval",
 	"verify-approval-consumption-and-controller-recovery",
 	"delete-consumed-approval-secret",
@@ -1123,13 +1164,18 @@ func (proof ControllerFailureProof) Validate() error {
 		!validKubernetesName(proof.NewPVCName) {
 		return fmt.Errorf("controller replacement identities are invalid")
 	}
-	if _, err := scaleway.ParseNodeID(proof.OldNodeID); err != nil {
+	oldTarget, err := scaleway.ParseNodeID(proof.OldNodeID)
+	if err != nil {
 		return fmt.Errorf("old controller node ID: %w", err)
 	}
 	if _, err := scaleway.ParseNodeID(proof.NewNodeID); err != nil {
 		return fmt.Errorf("new controller node ID: %w", err)
 	}
-	if proof.OldNodeID == proof.NewNodeID || len(proof.ParentFilesystemIDs) != 2 {
+	if err := volume.ValidateOperationID(proof.OldRootVolumeID); err != nil {
+		return fmt.Errorf("old controller root volume ID: %w", err)
+	}
+	if proof.OldNodeID == proof.NewNodeID || proof.OldRootVolumeID == oldTarget.ServerID ||
+		len(proof.ParentFilesystemIDs) != 2 {
 		return fmt.Errorf("controller failure provider scope is incomplete")
 	}
 	seenParents := make(map[string]struct{}, len(proof.ParentFilesystemIDs))
@@ -1140,16 +1186,52 @@ func (proof ControllerFailureProof) Validate() error {
 		if _, duplicate := seenParents[parentID]; duplicate {
 			return fmt.Errorf("controller failure repeats parent %q", parentID)
 		}
+		if parentID == proof.OldRootVolumeID {
+			return fmt.Errorf("controller failure root volume repeats parent %q", parentID)
+		}
 		seenParents[parentID] = struct{}{}
 	}
 	if !slices.Equal(proof.OperatorSteps, controllerFailureOperatorSteps) || proof.RecoverySeconds <= 0 || proof.RecoverySeconds > 3600 {
 		return fmt.Errorf("controller failure operator audit is incomplete")
 	}
-	if !proof.OldHolderMatched || !proof.OldControllerProcessFrozen || !proof.OldInstanceReachedStopped || !proof.SuccessorBlockedBeforeApproval ||
+	if _, err := time.Parse(time.RFC3339Nano, proof.BlockedLeaseRenewTime); err != nil ||
+		proof.BlockedLeaseResourceVersion == "" ||
+		strings.TrimSpace(proof.BlockedLeaseResourceVersion) != proof.BlockedLeaseResourceVersion ||
+		len(proof.BlockedLeaseResourceVersion) > 256 ||
+		proof.BlockedLeaseDurationSeconds <= 0 || proof.BlockedLeaseDurationSeconds > 300 ||
+		proof.SuccessorBlockedSeconds < int64(proof.BlockedLeaseDurationSeconds)+10 ||
+		proof.SuccessorBlockedSeconds > 600 || proof.BlockedDriverRestartCount < 0 {
+		return fmt.Errorf("controller failure stable blocked-Lease evidence is invalid")
+	}
+	if !proof.OldHolderMatched || !proof.OldControllerEgressFenced || !proof.OldControllerProcessFrozen ||
+		!proof.OldInstanceReachedStopped || !proof.OldInstanceAndRootDeleted || !proof.SuccessorBlockedBeforeApproval ||
 		!proof.ServerAttachmentsAbsent || !proof.RegionalAttachmentsAbsent || !proof.ApprovalConsumed ||
 		!proof.ExistingVolumeReadWrite || !proof.NewPVCBound || !proof.LeaseUIDPreserved ||
 		!proof.ControllerAvailable || !proof.ApprovalSecretDeletedAfterAudit {
 		return fmt.Errorf("controller hard-failure proof is incomplete")
+	}
+	return nil
+}
+
+// Validate verifies a normal controller replacement without admitting it as
+// abrupt-failure qualification evidence.
+func (proof ControllerRestartSmokeProof) Validate() error {
+	if err := validateProofEnvelope(proof.SchemaVersion, proof.Scenario, "controller-restart-smoke", proof.RunID, proof.ObservedAt); err != nil {
+		return err
+	}
+	for label, value := range map[string]string{
+		"Lease UID": proof.LeaseUID, "old Pod UID": proof.OldPodUID, "new Pod UID": proof.NewPodUID,
+	} {
+		if err := volume.ValidateOperationID(value); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+	}
+	if proof.OldPodUID == proof.NewPodUID || !validKubernetesName(proof.NewPVCName) {
+		return fmt.Errorf("controller restart smoke identities are invalid")
+	}
+	if !proof.OldHolderMatched || !proof.NewHolderAcquired || !proof.ExistingVolumeRead ||
+		!proof.NewPVCBound || !proof.LeaseUIDPreserved || !proof.ControllerAvailable {
+		return fmt.Errorf("controller restart smoke proof is incomplete")
 	}
 	return nil
 }

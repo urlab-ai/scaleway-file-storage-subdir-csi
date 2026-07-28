@@ -1590,9 +1590,9 @@ scenario_scale() {
   bootstrap_restart_add_parent
 }
 
-scenario_controller_failure() {
+scenario_controller_restart_smoke() {
   deployment=$(one_name deployment controller)
-  proof="$evidence_dir/controller-hard-failure.json"
+  proof="$evidence_dir/controller-restart-smoke.json"
   lease_before=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
   lease_uid=$(printf '%s' "$lease_before" | "$JQ" -er '.metadata.uid')
   old_uid=$(k -n "$namespace" get pod -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o jsonpath='{.items[0].metadata.uid}')
@@ -1624,7 +1624,7 @@ scenario_controller_failure() {
   [ "$available" = 1 ]
   "$JQ" -n -c --arg run "$run_id" --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg lease "$lease_uid" --arg old "$old_uid" --arg new "$new_uid" --arg claim "$new_claim" '
-      {schemaVersion:"1",scenario:"controller-hard-failure",runId:$run,observedAt:$observed,
+      {schemaVersion:"1",scenario:"controller-restart-smoke",runId:$run,observedAt:$observed,
        leaseUid:$lease,oldPodUid:$old,newPodUid:$new,oldHolderMatched:true,newHolderAcquired:true,
        existingVolumeRead:true,newPvcName:$claim,newPvcBound:true,leaseUidPreserved:true,controllerAvailable:true}
     ' >"$proof.tmp"
@@ -2345,7 +2345,7 @@ if [ "$mode" = run-smoke ]; then
   run_scenario virtiofs-mount-api scenario_virtiofs
   run_scenario rwx-cross-node scenario_rwx
   run_scenario ten-pvc-isolation-and-archive scenario_ten_pvc_isolation_and_archive
-  run_scenario controller-hard-failure scenario_controller_failure
+  run_scenario controller-restart-smoke scenario_controller_restart_smoke
 elif [ "$mode" = run-pre ]; then
   run_scenario artifact-and-install-preflight scenario_artifact_and_install
   # The real N-1 upgrade necessarily installs the predecessor before the

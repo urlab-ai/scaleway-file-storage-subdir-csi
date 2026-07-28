@@ -48,7 +48,7 @@ var SmokeScenarios = []string{
 	"virtiofs-mount-api",
 	"rwx-cross-node",
 	"ten-pvc-isolation-and-archive",
-	"controller-hard-failure",
+	"controller-restart-smoke",
 	"provider-attachment-inventory",
 }
 

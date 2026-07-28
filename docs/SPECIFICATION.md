@@ -360,6 +360,25 @@ next exact candidate uses `stop_in_place`, requires the SDK to observe
 `stopped in place`, and retries only explicitly transient errors inside bounded
 provider observation loops.
 
+RC28 passed candidate artifact/install admission, the complete N/N-1 path,
+real `virtiofs`, `SINGLE_NODE_WRITER`, exactly 100 bound PVCs, and a 20-minute
+checksum soak with 5,799 writes, 5,736 reads, and zero checksum failures across
+controller and node-plugin restarts. It also passed fresh-parent bootstrap,
+controller restart, foreign-attachment fencing, parent growth, and normal node
+drain. Its hard-failure harness then exposed two qualification-only defects.
+The guest shutdown behind `stop_in_place` resumed the `SIGSTOP`ed process long
+enough for it to write a graceful Lease release, and Kapsule created a Ready
+replacement but left the stopped Instance and its node indefinitely in
+`deleting`. The CSI correctly remained fail-closed and no hard-failure proof
+was admitted. The corrected harness first denies egress from only the exact old
+controller Pod with a run-owned standard NetworkPolicy, proves the Lease stops
+renewing while its holder remains unchanged, and only then freezes the process.
+It also journals the exact Kapsule root SBS volume before the failure. After
+the Kapsule replacement request and exact File Storage detach proof, it may
+delete only the revalidated stopped, run-owned, deleting-node Instance and then
+its exact detached root volume. These qualification actions never affect the
+release chart or CSI runtime.
+
 No candidate is a production support claim until every Linux, kind, CSI, Helm,
 real Kapsule, and final-cleanup qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
@@ -6757,20 +6776,43 @@ Kapsule matrix must:
    the cloud;
 10. drain and uncordon a workload node, restart a node plugin, then inject an
     actual abrupt controller failure while workloads on another node continue
-    I/O. Immediately before stopping the exact controller Instance in place, a
-    short-lived, credential-free test Pod on that disposable node must identify
+    I/O. Immediately before stopping the exact controller Instance in place,
+    apply one run-owned standard NetworkPolicy to a unique ad-hoc label on only
+    the already-created controller Pod; the replacement Pod template must not
+    carry that label. Require ten continuous seconds with an unchanged
+    `renewTime` and `resourceVersion`, the exact old holder, and no
+    graceful-release marker before signaling. Before applying that fence, a
+    short-lived, credential-free test Pod on that disposable node must prepare
     exactly one controller process from both the controller Pod UID in its
-    cgroup and the immutable full driver entrypoint, revalidate that identity
-    immediately before signaling, send `SIGSTOP`, and prove the process entered
-    the stopped state. The provider `stop_in_place` action follows immediately
-    and must return the exact `stopped in place` state, so the controller cannot
-    execute its graceful Lease release path. A provider `poweroff` is not an
-    admissible abrupt-failure proof because it may allow a guest shutdown and a
-    graceful Lease handoff. Prove the successor remains
-    non-serving until exact provider fencing and one immutable approval, record
+    cgroup and the immutable full driver entrypoint. Immediately after the
+    fence is proven, it must revalidate that retained identity, send `SIGSTOP`,
+    and prove the process entered the stopped state. The provider
+    `stop_in_place` action
+    follows immediately and must return the exact `stopped in place` state.
+    The egress fence prevents a guest-shutdown `SIGCONT` from converting this
+    abrupt failure into a graceful Lease release and is removed only after
+    provider fencing. A provider `poweroff` without both the API egress fence
+    and exact-process freeze is not admissible. Prove one exact successor Pod
+    remains non-serving with the same uncleared holder, Lease UID, and
+    `renewTime` for a complete `leaseDuration` plus ten seconds; repeat the
+    exact identity and Lease check immediately before creating the immutable
+    approval. Then prove the successor remains
+    non-serving until exact provider fencing and that one approval, record
     the process-freeze result, recovery time, and operator steps, replace the
     stopped run-owned node, and revalidate commercial type, live attach limit,
-    node configuration generation, registration, mount, and data;
+    node configuration generation, registration, mount, and data. Before the
+    failure, journal the exact sole index-`0` SBS root volume proven by the
+    Block API to reference that run-owned Kapsule Instance. If Kapsule leaves
+    the stopped node in `deleting`, the harness may, only after both parents
+    are conclusively detached, revalidate the exact cluster/pool/node/server
+    tags and stopped state, delete that exact Instance, wait for the journaled
+    root volume to become reference-free, and delete that exact root volume;
+    the structured proof retains that root-volume ID, the stable Lease
+    `resourceVersion`, `renewTime`, `leaseDurationSeconds`, stable driver
+    restart count, and measured blocked duration. The base-profile controller
+    Pod replacement remains a distinct non-qualifying
+    `controller-restart-smoke` scenario and is never accepted as
+    `controller-hard-failure` evidence;
 11. upgrade from the most recent public compatible chart candidate or release
     to the candidate under test while existing PVCs are mounted. Stagger the
     node rollout, require create/publish to fail closed while generations
@@ -6840,15 +6882,24 @@ must inspect and either safely resume that exact live process, remove the exact
 injector after conclusive provider fencing, or retain it when state is
 ambiguous, before any broad run-label cleanup can remove it. The hard-failure
 scenario also fsyncs a credential-free exact-ID recovery journal before the
-freeze and advances it after provider stop. A journaled Instance that may still
-be live cannot be treated as recovered when the exact injector is absent,
-expired, or unusable; cleanup retains the journal and fails closed. Before any
+freeze. Its initial `armed` phase proves that no signal could yet have been
+sent. After the injector's exact PID identity is retained and immediately
+before `SIGSTOP`, the harness fsyncs `freeze-ready`; an ambiguous write keeps
+the injector. That journal includes the deterministic NetworkPolicy identity
+and exact provider-proven root volume ID, and advances again after provider
+stop. Cleanup removes the exact policy before resuming a still-live frozen
+process, fsyncs the phase back to `armed`, and only then removes the injector.
+A `freeze-ready` journaled Instance that may still be live cannot be treated as
+recovered when the exact injector is absent, expired, or unusable; cleanup
+retains the journal and fails closed. An `armed` journal with no injector is a
+conclusive pre-signal interruption and may remove its unused journal. Before any
 detach, cleanup must re-read the exact Kapsule cluster/pool/node/provider-ID
 relationship. A missing Kapsule node permits automatic continuation only after
 the exact old Instance is conclusively absent and the regional attachment view
 also reports absence. An interrupted cleanup may then fence and replace only
-the journaled run-owned Instance and Kapsule node and admit only an approval
-bound to the original Lease evidence. Missing, foreign, or ambiguous identity
+the journaled run-owned Instance and Kapsule node, remove only the exact
+detached journaled root volume, and admit only an approval bound to the
+original Lease evidence. Missing, foreign, attached, or ambiguous identity
 leaves the journal and resources intact for operator recovery.
 
 The soak is a correctness and recovery test, not a throughput benchmark. Its

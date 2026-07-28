@@ -37,12 +37,26 @@ type kubernetesPod struct {
 		NodeName string `json:"nodeName"`
 	} `json:"spec"`
 	Status struct {
-		Phase      string `json:"phase"`
-		Conditions []struct {
+		Phase             string                      `json:"phase"`
+		ContainerStatuses []kubernetesContainerStatus `json:"containerStatuses"`
+		Conditions        []struct {
 			Type   string `json:"type"`
 			Status string `json:"status"`
 		} `json:"conditions"`
 	} `json:"status"`
+}
+
+type kubernetesContainerStatus struct {
+	Name         string                   `json:"name"`
+	Ready        bool                     `json:"ready"`
+	RestartCount int32                    `json:"restartCount"`
+	State        kubernetesContainerState `json:"state"`
+}
+
+type kubernetesContainerState struct {
+	Running *struct {
+		StartedAt string `json:"startedAt"`
+	} `json:"running"`
 }
 
 type kubernetesPodList struct {
@@ -51,11 +65,14 @@ type kubernetesPodList struct {
 
 type kubernetesLease struct {
 	Metadata struct {
-		UID         string            `json:"uid"`
-		Annotations map[string]string `json:"annotations"`
+		UID             string            `json:"uid"`
+		ResourceVersion string            `json:"resourceVersion"`
+		Annotations     map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
-		HolderIdentity string `json:"holderIdentity"`
+		HolderIdentity       string `json:"holderIdentity"`
+		LeaseDurationSeconds int32  `json:"leaseDurationSeconds"`
+		RenewTime            string `json:"renewTime"`
 	} `json:"spec"`
 }
 
@@ -278,6 +295,10 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 		return proof, replacement, err
 	}
 	recoveryJournal := newControllerRecoveryJournal(plan, clusterID, poolID, controller, lease, oldKapsuleNode, oldTarget)
+	recoveryJournal.OldRootVolumeID, err = backend.captureControllerNodeRootVolume(ctx, plan, recoveryJournal, false)
+	if err != nil {
+		return proof, replacement, fmt.Errorf("capture controller Kapsule root volume: %w", err)
+	}
 	if err := recoveryJournal.validateForRequest(request, plan, inventory); err != nil {
 		return proof, replacement, err
 	}
@@ -304,15 +325,24 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 	if err := backend.applyMarkerPod(ctx, request, plan, failurePod, failureClaim, survivor, "controller-hard-failure"); err != nil {
 		return proof, replacement, err
 	}
+	networkFence := newControllerNetworkFence(plan, controller)
+	networkFencePresent := false
 	faultInjectorName := "e2e-controller-fault-" + shortRun
-	freeze, err := backend.freezeControllerProcess(ctx, request, plan, controller, faultInjectorName)
-	if err != nil {
-		return proof, replacement, err
-	}
+	var freeze controllerProcessFreeze
+	processFrozen := false
 	instanceStopped := false
-	faultInjectorPresent := true
+	faultInjectorPresent := false
 	defer func() {
-		if !instanceStopped {
+		if networkFencePresent {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			fenceErr := backend.deleteControllerNetworkFence(cleanupCtx, request, networkFence)
+			cancel()
+			returnErr = errors.Join(returnErr, fenceErr)
+			if fenceErr == nil {
+				networkFencePresent = false
+			}
+		}
+		if processFrozen && !instanceStopped {
 			resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resumeErr := backend.continueControllerProcess(resumeCtx, request, freeze)
 			cancel()
@@ -326,6 +356,17 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 				))
 				return
 			}
+			recoveryJournal.Phase = controllerRecoveryPhaseArmed
+			if journalErr := backend.writeControllerRecoveryJournal(plan, recoveryJournal); journalErr != nil {
+				// Retain the injector so cleanup can repeat the exact safe
+				// recovery while the durable phase remains freeze-ready.
+				faultInjectorPresent = false
+				returnErr = errors.Join(returnErr, fmt.Errorf(
+					"fault injector Pod %q retained because safe-abort journaling failed: %w",
+					freeze.InjectorPodName, journalErr,
+				))
+				return
+			}
 		}
 		if faultInjectorPresent {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -334,6 +375,27 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 			returnErr = errors.Join(returnErr, deleteErr)
 		}
 	}()
+	freeze, err = backend.freezeControllerProcess(ctx, request, plan, controller, faultInjectorName, func(controllerProcessFreeze) error {
+		appliedFence, err := backend.applyControllerNetworkFence(ctx, request, plan, controller)
+		if err != nil {
+			return err
+		}
+		networkFence = appliedFence
+		networkFencePresent = true
+		recoveryJournal.Phase = controllerRecoveryPhaseFreezeReady
+		recoveryJournal.LeaseResourceVersion = appliedFence.FencedLease.Metadata.ResourceVersion
+		recoveryJournal.LeaseRenewTime = appliedFence.FencedLease.Spec.RenewTime
+		recoveryJournal.LeaseDurationSeconds = appliedFence.FencedLease.Spec.LeaseDurationSeconds
+		return backend.writeControllerRecoveryJournal(plan, recoveryJournal)
+	}, func() error {
+		recoveryJournal.Phase = controllerRecoveryPhaseArmed
+		return backend.writeControllerRecoveryJournal(plan, recoveryJournal)
+	})
+	if err != nil {
+		return proof, replacement, err
+	}
+	processFrozen = true
+	faultInjectorPresent = true
 	if err := backend.instance.ServerActionAndWait(&instanceapi.ServerActionAndWaitRequest{
 		Zone: scw.Zone(oldTarget.Zone), ServerID: oldTarget.ServerID, Action: controllerFailureServerAction,
 	}, scw.WithContext(ctx)); err != nil {
@@ -348,6 +410,10 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 		return proof, replacement, err
 	}
 	faultInjectorPresent = false
+	if err := backend.deleteControllerNetworkFence(ctx, request, networkFence); err != nil {
+		return proof, replacement, err
+	}
+	networkFencePresent = false
 	if _, err := backend.kubectl(ctx, request, nil, "cordon", controller.Spec.NodeName); err != nil {
 		return proof, replacement, err
 	}
@@ -361,12 +427,11 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 	if newController.Spec.NodeName == controller.Spec.NodeName || podReady(newController) {
 		return proof, replacement, fmt.Errorf("successor controller was not fail-closed on a distinct node")
 	}
-	blockedLease, err := backend.readControllerLease(ctx, request)
+	blockedLease, successorBlockedSeconds, blockedDriverRestartCount, err := backend.waitForBlockedController(
+		ctx, request, newController, networkFence.FencedLease,
+	)
 	if err != nil {
-		return proof, replacement, fmt.Errorf("successor changed the uncleared Lease before approval: %w", err)
-	}
-	if blockedLease.Spec.HolderIdentity != controller.Metadata.UID || blockedLease.Metadata.UID != lease.Metadata.UID {
-		return proof, replacement, fmt.Errorf("successor changed the uncleared Lease before approval")
+		return proof, replacement, err
 	}
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "exec", failurePod, "--", "sh", "-c", "printf recovered-"+shortRun+" > /data/controller-hard-failure; sync; test \"$(cat /data/controller-hard-failure)\" = recovered-"+shortRun); err != nil {
 		return proof, replacement, fmt.Errorf("survivor workload I/O during controller failure: %w", err)
@@ -386,7 +451,12 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 	}, scw.WithContext(ctx)); err != nil {
 		return proof, replacement, fmt.Errorf("replace exact stopped Kapsule node: %w", err)
 	}
-	if err := backend.waitInstanceAbsent(ctx, scw.Zone(oldTarget.Zone), oldTarget.ServerID); err != nil {
+	if err := backend.retireStoppedKapsuleInstance(ctx, plan, recoveryJournal); err != nil {
+		return proof, replacement, err
+	}
+	if err := backend.assertControllerStillBlocked(
+		ctx, request, newController, blockedLease, blockedDriverRestartCount,
+	); err != nil {
 		return proof, replacement, err
 	}
 	approvalRequestID, err := randomUUIDv4()
@@ -456,19 +526,28 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), LeaseUID: lease.Metadata.UID,
 		OldPodUID: controller.Metadata.UID, NewPodUID: recoveredController.Metadata.UID,
 		OldNodeName: controller.Spec.NodeName, NewNodeName: recoveredController.Spec.NodeName,
-		OldNodeID: oldNodeID, NewNodeID: newNodeID, ParentFilesystemIDs: parentIDs,
+		OldNodeID: oldNodeID, NewNodeID: newNodeID,
+		OldRootVolumeID: recoveryJournal.OldRootVolumeID, ParentFilesystemIDs: parentIDs,
 		ApprovalSecretUID: approvalUID, ApprovalRequestID: approvalRequestID,
 		OperatorSteps: []string{
-			"freeze-exact-controller-process", "stop-in-place-old-controller-instance",
+			"fence-exact-controller-api-egress", "freeze-exact-controller-process",
+			"stop-in-place-old-controller-instance",
 			"cordon-old-kubernetes-node", "force-delete-old-controller-pod",
 			"verify-successor-blocked-by-uncleared-lease", "detach-exact-parents-and-verify-dual-absence",
-			"replace-stopped-kapsule-node",
+			"replace-stopped-kapsule-node", "delete-exact-stopped-instance-and-root-volume",
 			"create-immutable-abnormal-takeover-approval", "verify-approval-consumption-and-controller-recovery",
 			"delete-consumed-approval-secret",
 		},
 		RecoverySeconds: controllerRecoverySeconds, OldHolderMatched: true,
-		OldControllerProcessFrozen: true, OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
-		ServerAttachmentsAbsent: true, RegionalAttachmentsAbsent: true, ApprovalConsumed: true,
+		OldControllerEgressFenced: true, OldControllerProcessFrozen: true,
+		OldInstanceReachedStopped: true, OldInstanceAndRootDeleted: true,
+		SuccessorBlockedBeforeApproval: true,
+		BlockedLeaseRenewTime:          blockedLease.Spec.RenewTime,
+		BlockedLeaseResourceVersion:    blockedLease.Metadata.ResourceVersion,
+		BlockedLeaseDurationSeconds:    blockedLease.Spec.LeaseDurationSeconds,
+		SuccessorBlockedSeconds:        successorBlockedSeconds,
+		BlockedDriverRestartCount:      blockedDriverRestartCount,
+		ServerAttachmentsAbsent:        true, RegionalAttachmentsAbsent: true, ApprovalConsumed: true,
 		ExistingVolumeReadWrite: true, NewPVCName: newClaim, NewPVCBound: true,
 		LeaseUIDPreserved: true, ControllerAvailable: true, ApprovalSecretDeletedAfterAudit: true,
 	}
@@ -738,7 +817,8 @@ func (backend *scalewayBackend) readControllerLease(ctx context.Context, request
 	if err := json.Unmarshal(encoded, &lease); err != nil {
 		return kubernetesLease{}, err
 	}
-	if lease.Metadata.UID == "" || lease.Spec.HolderIdentity == "" || lease.Metadata.Annotations == nil {
+	if lease.Metadata.UID == "" || lease.Metadata.ResourceVersion == "" ||
+		lease.Spec.HolderIdentity == "" || lease.Metadata.Annotations == nil {
 		return kubernetesLease{}, fmt.Errorf("controller Lease evidence is incomplete")
 	}
 	return lease, nil

@@ -88,6 +88,7 @@ func TestControllerFreezeRecoveryActionRequiresExactProviderFence(t *testing.T) 
 func TestControllerFreezeRecoveryActionNeverDropsLiveJournalWithoutInjector(t *testing.T) {
 	journal := controllerRecoveryJournal{
 		OldControllerPodUID: "55555555-5555-4555-8555-555555555555",
+		Phase:               controllerRecoveryPhaseFreezeReady,
 	}
 	if _, err := controllerFreezeRecoveryActionFor(nil, &journal, false); err == nil {
 		t.Fatal("live journal without retained injector was accepted")
@@ -99,6 +100,11 @@ func TestControllerFreezeRecoveryActionNeverDropsLiveJournalWithoutInjector(t *t
 	action, err = controllerFreezeRecoveryActionFor(nil, nil, false)
 	if err != nil || action != controllerFreezeNoop {
 		t.Fatalf("empty recovery action = %q, %v; want noop", action, err)
+	}
+	journal.Phase = controllerRecoveryPhaseArmed
+	action, err = controllerFreezeRecoveryActionFor(nil, &journal, false)
+	if err != nil || action != controllerFreezeNoop {
+		t.Fatalf("pre-freeze journal without injector action = %q, %v; want noop", action, err)
 	}
 }
 

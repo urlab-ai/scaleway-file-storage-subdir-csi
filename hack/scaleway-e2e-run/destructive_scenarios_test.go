@@ -8,6 +8,7 @@ import (
 
 	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
@@ -28,8 +29,9 @@ func TestControllerHardFailureUsesStopInPlace(t *testing.T) {
 		OldPodUID:   "22222222-2222-4222-8222-222222222222",
 		NewPodUID:   "33333333-3333-4333-8333-333333333333",
 		OldNodeName: "old-node", NewNodeName: "new-node",
-		OldNodeID: "fr-par-1/44444444-4444-4444-8444-444444444444",
-		NewNodeID: "fr-par-1/55555555-5555-4555-8555-555555555555",
+		OldNodeID:       "fr-par-1/44444444-4444-4444-8444-444444444444",
+		NewNodeID:       "fr-par-1/55555555-5555-4555-8555-555555555555",
+		OldRootVolumeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		ParentFilesystemIDs: []string{
 			"66666666-6666-4666-8666-666666666666",
 			"77777777-7777-4777-8777-777777777777",
@@ -37,24 +39,110 @@ func TestControllerHardFailureUsesStopInPlace(t *testing.T) {
 		ApprovalSecretUID: "88888888-8888-4888-8888-888888888888",
 		ApprovalRequestID: "99999999-9999-4999-8999-999999999999",
 		OperatorSteps: []string{
-			"freeze-exact-controller-process", "stop-in-place-old-controller-instance",
+			"fence-exact-controller-api-egress", "freeze-exact-controller-process",
+			"stop-in-place-old-controller-instance",
 			"cordon-old-kubernetes-node", "force-delete-old-controller-pod",
 			"verify-successor-blocked-by-uncleared-lease",
 			"detach-exact-parents-and-verify-dual-absence",
-			"replace-stopped-kapsule-node",
+			"replace-stopped-kapsule-node", "delete-exact-stopped-instance-and-root-volume",
 			"create-immutable-abnormal-takeover-approval",
 			"verify-approval-consumption-and-controller-recovery",
 			"delete-consumed-approval-secret",
 		},
-		RecoverySeconds: 1, OldHolderMatched: true, OldControllerProcessFrozen: true,
-		OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
-		ServerAttachmentsAbsent: true, RegionalAttachmentsAbsent: true,
+		RecoverySeconds: 1, OldHolderMatched: true, OldControllerEgressFenced: true,
+		OldControllerProcessFrozen: true, OldInstanceReachedStopped: true,
+		OldInstanceAndRootDeleted: true, SuccessorBlockedBeforeApproval: true,
+		BlockedLeaseRenewTime: "2026-07-28T12:00:00Z", BlockedLeaseResourceVersion: "12345",
+		BlockedLeaseDurationSeconds: 30,
+		SuccessorBlockedSeconds:     40,
+		ServerAttachmentsAbsent:     true, RegionalAttachmentsAbsent: true,
 		ApprovalConsumed: true, ExistingVolumeReadWrite: true,
 		NewPVCName: "replacement-claim", NewPVCBound: true, LeaseUIDPreserved: true,
 		ControllerAvailable: true, ApprovalSecretDeletedAfterAudit: true,
 	}
 	if err := proof.Validate(); err != nil {
 		t.Fatalf("stop-in-place controller proof must be admissible: %v", err)
+	}
+}
+
+func TestBlockedControllerDriverStateRequiresStableRunningNonReadyDriver(t *testing.T) {
+	running := &struct {
+		StartedAt string `json:"startedAt"`
+	}{StartedAt: "2026-07-28T12:00:00Z"}
+	tests := []struct {
+		name      string
+		pod       kubernetesPod
+		wantCount int32
+		wantRun   bool
+		wantErr   bool
+	}{
+		{name: "pending"},
+		{name: "running non-ready", pod: kubernetesPod{
+			Status: struct {
+				Phase             string                      `json:"phase"`
+				ContainerStatuses []kubernetesContainerStatus `json:"containerStatuses"`
+				Conditions        []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubernetesContainerStatus{{
+					Name: "driver", RestartCount: 2,
+					State: kubernetesContainerState{Running: running},
+				}},
+			},
+		}, wantCount: 2, wantRun: true},
+		{name: "ready driver", pod: kubernetesPod{
+			Status: struct {
+				Phase             string                      `json:"phase"`
+				ContainerStatuses []kubernetesContainerStatus `json:"containerStatuses"`
+				Conditions        []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubernetesContainerStatus{{
+					Name: "driver", Ready: true,
+					State: kubernetesContainerState{Running: running},
+				}},
+			},
+		}, wantErr: true},
+		{name: "terminal", pod: func() kubernetesPod {
+			var pod kubernetesPod
+			pod.Status.Phase = "Failed"
+			return pod
+		}(), wantErr: true},
+		{name: "missing driver", pod: func() kubernetesPod {
+			var pod kubernetesPod
+			pod.Status.Phase = "Running"
+			return pod
+		}(), wantErr: true},
+		{name: "duplicate driver", pod: kubernetesPod{
+			Status: struct {
+				Phase             string                      `json:"phase"`
+				ContainerStatuses []kubernetesContainerStatus `json:"containerStatuses"`
+				Conditions        []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubernetesContainerStatus{
+					{Name: "driver", State: kubernetesContainerState{Running: running}},
+					{Name: "driver", State: kubernetesContainerState{Running: running}},
+				},
+			},
+		}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			count, running, err := blockedControllerDriverState(test.pod)
+			if (err != nil) != test.wantErr || count != test.wantCount || running != test.wantRun {
+				t.Fatalf("blockedControllerDriverState() = (%d, %t, %v)", count, running, err)
+			}
+		})
 	}
 }
 
@@ -150,6 +238,29 @@ func TestControllerFaultInjectorIsNarrowAndCredentialFree(t *testing.T) {
 		if strings.Contains(manifest, forbidden) {
 			t.Fatalf("fault injector manifest contains forbidden authority %q:\n%s", forbidden, manifest)
 		}
+	}
+}
+
+func TestControllerNetworkFenceSelectsOnlyExactPodLabelAndDeniesEgress(t *testing.T) {
+	request := e2erunner.Request{DriverNamespace: "driver-system", HelmRelease: "driver-release"}
+	plan := e2eplan.Plan{RunID: "00000000-0000-4000-8000-000000000000"}
+	var controller kubernetesPod
+	controller.Metadata.Name = "controller-pod"
+	controller.Metadata.UID = "11111111-1111-4111-8111-111111111111"
+	fence := newControllerNetworkFence(plan, controller)
+	manifest := controllerNetworkFenceManifest(request, plan, fence)
+	var policy networkingv1.NetworkPolicy
+	if err := k8syaml.NewYAMLToJSONDecoder(strings.NewReader(manifest)).Decode(&policy); err != nil {
+		t.Fatalf("decode controller NetworkPolicy: %v\n%s", err, manifest)
+	}
+	if policy.Name != fence.PolicyName || policy.Namespace != request.DriverNamespace ||
+		policy.Labels["app.kubernetes.io/instance"] != request.HelmRelease ||
+		policy.Labels["sfs-subdir-e2e-run"] != plan.RunID ||
+		len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress ||
+		len(policy.Spec.Egress) != 0 || len(policy.Spec.Ingress) != 0 ||
+		len(policy.Spec.PodSelector.MatchLabels) != 1 ||
+		policy.Spec.PodSelector.MatchLabels[controllerFenceLabel] != plan.RunID[:8] {
+		t.Fatalf("controller egress fence is not exact and deny-all: %#v", policy)
 	}
 }
 

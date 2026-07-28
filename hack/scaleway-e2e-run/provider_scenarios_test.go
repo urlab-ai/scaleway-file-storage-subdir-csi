@@ -97,7 +97,7 @@ func TestBootstrapRestartScenarioProvesFreshParentBeforeAndAfterControllerRestar
 	}
 
 	scaleStart := end + 1
-	scaleEnd := strings.Index(contents[scaleStart:], "\nscenario_controller_failure() {")
+	scaleEnd := strings.Index(contents[scaleStart:], "\nscenario_controller_restart_smoke() {")
 	if scaleEnd < 0 {
 		t.Fatal("scale scenario boundary is missing")
 	}

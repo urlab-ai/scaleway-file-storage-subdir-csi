@@ -214,11 +214,16 @@ func TestControllerFailureProofRequiresLeaseBoundReplacement(t *testing.T) {
 		SchemaVersion: SchemaVersionV1, Scenario: "controller-hard-failure", RunID: proofRunID, ObservedAt: "2026-07-21T18:00:00Z",
 		LeaseUID: proofRunID, OldPodUID: proofFirstNodeID[9:], NewPodUID: proofSecondNodeID[9:],
 		OldNodeName: "node-a", NewNodeName: "node-b", OldNodeID: proofFirstNodeID, NewNodeID: proofSecondNodeID,
+		OldRootVolumeID:     "88888888-8888-4888-8888-888888888888",
 		ParentFilesystemIDs: []string{"44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"},
 		ApprovalSecretUID:   "66666666-6666-4666-8666-666666666666", ApprovalRequestID: "77777777-7777-4777-8777-777777777777",
 		OperatorSteps: slices.Clone(controllerFailureOperatorSteps), RecoverySeconds: 120,
-		OldHolderMatched: true, OldControllerProcessFrozen: true, OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
-		ServerAttachmentsAbsent: true, RegionalAttachmentsAbsent: true, ApprovalConsumed: true, ExistingVolumeReadWrite: true,
+		OldHolderMatched: true, OldControllerEgressFenced: true, OldControllerProcessFrozen: true,
+		OldInstanceReachedStopped: true, OldInstanceAndRootDeleted: true, SuccessorBlockedBeforeApproval: true,
+		BlockedLeaseRenewTime: "2026-07-21T18:00:00Z", BlockedLeaseResourceVersion: "12345",
+		BlockedLeaseDurationSeconds: 30,
+		SuccessorBlockedSeconds:     40,
+		ServerAttachmentsAbsent:     true, RegionalAttachmentsAbsent: true, ApprovalConsumed: true, ExistingVolumeReadWrite: true,
 		NewPVCName: "replacement-claim", NewPVCBound: true, LeaseUIDPreserved: true, ControllerAvailable: true,
 		ApprovalSecretDeletedAfterAudit: true,
 	}
@@ -230,9 +235,39 @@ func TestControllerFailureProofRequiresLeaseBoundReplacement(t *testing.T) {
 		t.Fatal("Validate(unfrozen controller process) error = nil")
 	}
 	proof.OldControllerProcessFrozen = true
+	proof.SuccessorBlockedSeconds = 39
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(short blocked interval) error = nil")
+	}
+	proof.SuccessorBlockedSeconds = 40
 	proof.LeaseUIDPreserved = false
 	if err := proof.Validate(); err == nil {
 		t.Fatal("Validate(changed Lease) error = nil")
+	}
+}
+
+func TestControllerRestartSmokeProofCannotMasqueradeAsHardFailure(t *testing.T) {
+	proof := ControllerRestartSmokeProof{
+		SchemaVersion: SchemaVersionV1, Scenario: "controller-restart-smoke",
+		RunID: proofRunID, ObservedAt: "2026-07-21T18:00:00Z",
+		LeaseUID: proofRunID, OldPodUID: proofFirstNodeID[9:], NewPodUID: proofSecondNodeID[9:],
+		NewPVCName: "replacement-claim", OldHolderMatched: true, NewHolderAcquired: true,
+		ExistingVolumeRead: true, NewPVCBound: true, LeaseUIDPreserved: true, ControllerAvailable: true,
+	}
+	encoded, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAvailableScenarioProofs([]ScenarioResult{{Name: proof.Scenario, Proof: encoded}}); err != nil {
+		t.Fatalf("ValidateAvailableScenarioProofs(smoke restart) error = %v", err)
+	}
+	proof.Scenario = "controller-hard-failure"
+	encoded, err = json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAvailableScenarioProofs([]ScenarioResult{{Name: proof.Scenario, Proof: encoded}}); err == nil {
+		t.Fatal("normal controller restart was accepted as hard-failure evidence")
 	}
 }
 

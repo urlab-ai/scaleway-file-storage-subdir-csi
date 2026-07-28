@@ -69,6 +69,16 @@ func TestReleaseScenarioSetRequiresClosedExecutionOrder(t *testing.T) {
 		t.Fatal("validateScenarioSet(out of order) error = nil")
 	}
 }
+
+func TestSmokeScenariosUseDistinctControllerRestartEvidence(t *testing.T) {
+	if !slices.Contains(SmokeScenarios, "controller-restart-smoke") {
+		t.Fatal("base smoke matrix has no normal controller-restart evidence")
+	}
+	if slices.Contains(SmokeScenarios, "controller-hard-failure") {
+		t.Fatal("base smoke matrix misrepresents a normal restart as a hard failure")
+	}
+}
+
 func (backend *fakeBackend) RunScenarios(_ context.Context, _ Request, plan e2eplan.Plan, _ e2ecleanup.Inventory) ([]ScenarioResult, error) {
 	backend.scenarios++
 	required := RequiredScenarios

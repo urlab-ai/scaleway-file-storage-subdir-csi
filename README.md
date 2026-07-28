@@ -79,10 +79,17 @@ passed artifact/install, N/N-1, real `virtiofs`, `SINGLE_NODE_WRITER`, the
 100-PVC scale test, and a 20-minute soak with zero checksum failures. It was not
 promoted because provider `poweroff` allowed a normal Lease handoff instead of
 proving the intended abrupt controller failure. Exact cleanup and independent
-reads confirmed all seven run-owned cloud resources absent. The next candidate
-uses the provider `stop_in_place` action after the credential-free exact-process
-freeze and retries only explicitly transient provider observations inside
-bounded waits. The
+reads confirmed all seven run-owned cloud resources absent. RC28 then used
+`stop_in_place` after the exact-process freeze and passed the same core gates
+plus fresh-parent bootstrap, provider attachment/detach, parent growth, and
+normal drain. Its deliberately abrupt controller-node test found that guest
+shutdown could resume the frozen process long enough to write a graceful Lease
+release, while Kapsule left the stopped node in `deleting`. This was a
+fail-closed qualification-harness defect, not an admitted CSI runtime failure.
+The corrected path isolates only the exact old controller Pod from Kubernetes
+API egress before `SIGSTOP`, proves its Lease has stopped renewing, and
+journals/deletes only the exact stopped Kapsule Instance root volume when
+managed deletion remains stuck. The
 exact after-attach/before-claim state remains a deterministic recovery gate.
 Promotion remains blocked until the next exact candidate has concrete Linux,
 kind, CSI, Helm, Kapsule, and final-cleanup evidence.

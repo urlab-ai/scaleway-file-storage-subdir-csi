@@ -164,6 +164,8 @@ func (backend *scalewayBackend) freezeControllerProcess(
 	plan e2eplan.Plan,
 	controller kubernetesPod,
 	injectorPodName string,
+	beforeStop func(controllerProcessFreeze) error,
+	afterSafeAbort func() error,
 ) (freeze controllerProcessFreeze, returnErr error) {
 	manifest := controllerFaultInjectorManifest(request, plan, controller, injectorPodName)
 	if _, err := backend.kubectl(ctx, request, strings.NewReader(manifest), "apply", "-f", "-"); err != nil {
@@ -217,6 +219,18 @@ func (backend *scalewayBackend) freezeControllerProcess(
 	if retained != freeze {
 		return freeze, fmt.Errorf("retained controller process identity changed before stop")
 	}
+	if beforeStop != nil {
+		if err := beforeStop(freeze); err != nil {
+			// The durable write may have committed despite returning an fsync
+			// error. Retain the exact injector so cleanup can issue an
+			// idempotent SIGCONT and resolve either journal generation.
+			injectorPresent = false
+			return freeze, fmt.Errorf(
+				"fault injector Pod %q retained because durable freeze arming is ambiguous: %w",
+				injectorPodName, err,
+			)
+		}
+	}
 	if _, err := backend.kubectl(ctx, request, nil,
 		"--request-timeout=15s", "-n", request.DriverNamespace,
 		"exec", injectorPodName, "--", "sh", "-ec", stopControllerProcessScript,
@@ -235,6 +249,13 @@ func (backend *scalewayBackend) freezeControllerProcess(
 			// the stopped state.
 			injectorPresent = false
 			resumeErr = fmt.Errorf("fault injector Pod %q retained for exact-process recovery: %w", injectorPodName, resumeErr)
+		} else if afterSafeAbort != nil {
+			if abortErr := afterSafeAbort(); abortErr != nil {
+				// The process is live again, but retaining the injector keeps
+				// cleanup resumable while the durable phase remains uncertain.
+				injectorPresent = false
+				resumeErr = fmt.Errorf("fault injector Pod %q retained because safe-abort journaling failed: %w", injectorPodName, abortErr)
+			}
 		}
 		return freeze, errors.Join(fmt.Errorf("freeze exact controller process: %w", err), resumeErr)
 	}
@@ -332,6 +353,11 @@ func (backend *scalewayBackend) recoverRetainedControllerFreeze(
 		_, err := controllerFreezeRecoveryActionFor(nil, journal, instanceStopped)
 		return err
 	}
+	if journal != nil && journal.FencePolicyName != "" {
+		if err := backend.deleteControllerNetworkFence(ctx, request, journal.networkFence()); err != nil {
+			return fmt.Errorf("remove retained controller egress fence before process recovery: %w", err)
+		}
+	}
 
 	var freeze *controllerProcessFreeze
 	retainedFreeze, err := backend.readRetainedControllerFreeze(ctx, request, plan)
@@ -360,6 +386,15 @@ func (backend *scalewayBackend) recoverRetainedControllerFreeze(
 		if err := backend.continueControllerProcess(ctx, request, *freeze); err != nil {
 			return fmt.Errorf("retain fault injector %q because exact-process recovery is ambiguous: %w", freeze.InjectorPodName, err)
 		}
+		if journal != nil {
+			resumed := *journal
+			resumed.Phase = controllerRecoveryPhaseArmed
+			if err := backend.writeControllerRecoveryJournal(plan, resumed); err != nil {
+				// The exact process is live, but the injector remains the
+				// resumable identity until the safe phase is durable.
+				return fmt.Errorf("retain fault injector %q because safe-resume journaling failed: %w", freeze.InjectorPodName, err)
+			}
+		}
 		return backend.deleteControllerFaultInjector(ctx, request, freeze.InjectorPodName, false)
 	default:
 		return fmt.Errorf("unsupported controller freeze recovery action %q", action)
@@ -375,11 +410,12 @@ const (
 )
 
 // controllerFreezeRecoveryActionFor keeps the process signal and provider
-// fencing identities coupled. A journaled live Instance always requires the
-// exact retained injector: silently dropping the journal would strand the
-// controller process in SIGSTOP. A stopped provider Instance permits deleting
-// the injector only when its controller Pod UID is exactly the journaled
-// holder.
+// fencing identities coupled. Before the freeze-ready phase no signal can have
+// been sent, so an absent injector is safely a no-op. At and after freeze-ready,
+// a live Instance requires the exact retained injector: silently dropping that
+// journal could strand the controller process in SIGSTOP. A stopped provider
+// Instance permits deleting the injector only when its controller Pod UID is
+// exactly the journaled holder.
 func controllerFreezeRecoveryActionFor(
 	freeze *controllerProcessFreeze,
 	journal *controllerRecoveryJournal,
@@ -393,6 +429,9 @@ func controllerFreezeRecoveryActionFor(
 	}
 	if freeze == nil {
 		if instanceStopped {
+			return controllerFreezeNoop, nil
+		}
+		if journal.Phase == controllerRecoveryPhaseArmed {
 			return controllerFreezeNoop, nil
 		}
 		return "", fmt.Errorf("journaled controller Instance may still be live but the exact fault injector is absent")

@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	controllerRecoverySchemaVersion = "1"
-	controllerRecoveryPhaseArmed    = "armed"
-	controllerRecoveryPhaseStopped  = "stopped"
+	controllerRecoverySchemaVersion    = "1"
+	controllerRecoveryPhaseArmed       = "armed"
+	controllerRecoveryPhaseFreezeReady = "freeze-ready"
+	controllerRecoveryPhaseStopped     = "stopped"
 )
 
 // controllerRecoveryJournal is the minimum durable state needed to make
@@ -35,21 +36,27 @@ const (
 // committed. It contains no credential and grants authority only over exact
 // run-owned IDs already present in the cleanup inventory.
 type controllerRecoveryJournal struct {
-	SchemaVersion       string `json:"schemaVersion"`
-	RunID               string `json:"runId"`
-	Phase               string `json:"phase"`
-	ClusterID           string `json:"clusterId"`
-	PoolID              string `json:"poolId"`
-	OldKapsuleNodeID    string `json:"oldKapsuleNodeId"`
-	OldControllerPod    string `json:"oldControllerPod"`
-	OldControllerPodUID string `json:"oldControllerPodUid"`
-	OldNodeName         string `json:"oldNodeName"`
-	OldCSINodeID        string `json:"oldCsiNodeId"`
-	OldServerID         string `json:"oldServerId"`
-	OldZone             string `json:"oldZone"`
-	LeaseUID            string `json:"leaseUid"`
-	InstallationID      string `json:"installationId"`
-	ActiveClusterUID    string `json:"activeClusterUid"`
+	SchemaVersion        string `json:"schemaVersion"`
+	RunID                string `json:"runId"`
+	Phase                string `json:"phase"`
+	ClusterID            string `json:"clusterId"`
+	PoolID               string `json:"poolId"`
+	OldKapsuleNodeID     string `json:"oldKapsuleNodeId"`
+	OldControllerPod     string `json:"oldControllerPod"`
+	OldControllerPodUID  string `json:"oldControllerPodUid"`
+	OldNodeName          string `json:"oldNodeName"`
+	OldCSINodeID         string `json:"oldCsiNodeId"`
+	OldServerID          string `json:"oldServerId"`
+	OldRootVolumeID      string `json:"oldRootVolumeId,omitempty"`
+	OldZone              string `json:"oldZone"`
+	LeaseUID             string `json:"leaseUid"`
+	LeaseResourceVersion string `json:"leaseResourceVersion,omitempty"`
+	LeaseRenewTime       string `json:"leaseRenewTime,omitempty"`
+	LeaseDurationSeconds int32  `json:"leaseDurationSeconds,omitempty"`
+	InstallationID       string `json:"installationId"`
+	ActiveClusterUID     string `json:"activeClusterUid"`
+	FencePolicyName      string `json:"fencePolicyName,omitempty"`
+	FenceLabelValue      string `json:"fenceLabelValue,omitempty"`
 }
 
 func (journal controllerRecoveryJournal) validateForRequest(
@@ -58,7 +65,9 @@ func (journal controllerRecoveryJournal) validateForRequest(
 	inventory e2ecleanup.Inventory,
 ) error {
 	if journal.SchemaVersion != controllerRecoverySchemaVersion || journal.RunID != plan.RunID ||
-		(journal.Phase != controllerRecoveryPhaseArmed && journal.Phase != controllerRecoveryPhaseStopped) {
+		(journal.Phase != controllerRecoveryPhaseArmed &&
+			journal.Phase != controllerRecoveryPhaseFreezeReady &&
+			journal.Phase != controllerRecoveryPhaseStopped) {
 		return fmt.Errorf("controller recovery journal envelope is invalid")
 	}
 	for name, id := range map[string]string{
@@ -69,6 +78,44 @@ func (journal controllerRecoveryJournal) validateForRequest(
 		if err := volume.ValidateOperationID(id); err != nil {
 			return fmt.Errorf("controller recovery %s identity: %w", name, err)
 		}
+	}
+	if journal.OldRootVolumeID != "" {
+		if err := volume.ValidateOperationID(journal.OldRootVolumeID); err != nil {
+			return fmt.Errorf("controller recovery root volume identity: %w", err)
+		}
+	}
+	if (journal.FencePolicyName == "") != (journal.FenceLabelValue == "") {
+		return fmt.Errorf("controller recovery network fence identity is partial")
+	}
+	leaseFenceFields := 0
+	if journal.LeaseResourceVersion != "" {
+		leaseFenceFields++
+	}
+	if journal.LeaseRenewTime != "" {
+		leaseFenceFields++
+	}
+	if journal.LeaseDurationSeconds != 0 {
+		leaseFenceFields++
+	}
+	if leaseFenceFields != 0 && leaseFenceFields != 3 {
+		return fmt.Errorf("controller recovery Lease fence identity is partial")
+	}
+	if leaseFenceFields == 3 {
+		if strings.TrimSpace(journal.LeaseResourceVersion) != journal.LeaseResourceVersion ||
+			len(journal.LeaseResourceVersion) > 256 {
+			return fmt.Errorf("controller recovery Lease resource version is invalid")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, journal.LeaseRenewTime); err != nil {
+			return fmt.Errorf("controller recovery Lease renew time is invalid: %w", err)
+		}
+		if journal.LeaseDurationSeconds <= 0 || journal.LeaseDurationSeconds > 300 {
+			return fmt.Errorf("controller recovery Lease duration is invalid")
+		}
+	}
+	if journal.FencePolicyName != "" &&
+		(journal.FencePolicyName != "e2e-controller-fence-"+plan.RunID[:8] ||
+			journal.FenceLabelValue != plan.RunID[:8]) {
+		return fmt.Errorf("controller recovery network fence identity differs from the exact run")
 	}
 	if journal.ClusterID != resourceID(inventory, e2ecleanup.ResourceKindCluster, 0) ||
 		journal.PoolID != resourceID(inventory, e2ecleanup.ResourceKindNodePool, 0) ||
@@ -128,6 +175,8 @@ func newControllerRecoveryJournal(
 		OldServerID: oldTarget.ServerID, OldZone: oldTarget.Zone, LeaseUID: lease.Metadata.UID,
 		InstallationID:   lease.Metadata.Annotations["holderInstallationID"],
 		ActiveClusterUID: lease.Metadata.Annotations["holderActiveClusterUID"],
+		FencePolicyName:  "e2e-controller-fence-" + plan.RunID[:8],
+		FenceLabelValue:  plan.RunID[:8],
 	}
 }
 
@@ -138,6 +187,32 @@ func (journal controllerRecoveryJournal) holderAnnotations() map[string]string {
 		"holderZone": journal.OldZone, "holderInstallationID": journal.InstallationID,
 		"holderActiveClusterUID": journal.ActiveClusterUID,
 	}
+}
+
+func (journal controllerRecoveryJournal) networkFence() controllerNetworkFence {
+	return controllerNetworkFence{
+		PolicyName: journal.FencePolicyName, LabelValue: journal.FenceLabelValue,
+		ControllerPod: journal.OldControllerPod, ControllerPodUID: journal.OldControllerPodUID,
+	}
+}
+
+func (journal controllerRecoveryJournal) leaseFenceEvidence() (kubernetesLease, bool, error) {
+	if journal.LeaseResourceVersion == "" && journal.LeaseRenewTime == "" &&
+		journal.LeaseDurationSeconds == 0 {
+		return kubernetesLease{}, false, nil
+	}
+	if journal.LeaseResourceVersion == "" || journal.LeaseRenewTime == "" ||
+		journal.LeaseDurationSeconds <= 0 {
+		return kubernetesLease{}, false, fmt.Errorf("controller recovery Lease fence evidence is partial")
+	}
+	var lease kubernetesLease
+	lease.Metadata.UID = journal.LeaseUID
+	lease.Metadata.ResourceVersion = journal.LeaseResourceVersion
+	lease.Metadata.Annotations = map[string]string{"holderPodUID": journal.OldControllerPodUID}
+	lease.Spec.HolderIdentity = journal.OldControllerPodUID
+	lease.Spec.RenewTime = journal.LeaseRenewTime
+	lease.Spec.LeaseDurationSeconds = journal.LeaseDurationSeconds
+	return lease, true, nil
 }
 
 // recoverInterruptedControllerFailure is deliberately called before the
@@ -183,6 +258,15 @@ func (backend *scalewayBackend) recoverInterruptedControllerFailure(
 			return fmt.Errorf("journaled Kapsule node is absent while its stopped Instance still exists; refuse an unproven detach")
 		}
 	}
+	if nodePresent && journal.OldRootVolumeID == "" {
+		journal.OldRootVolumeID, err = backend.captureControllerNodeRootVolume(ctx, plan, journal, true)
+		if err != nil {
+			return fmt.Errorf("capture interrupted controller root volume: %w", err)
+		}
+		if err := backend.writeControllerRecoveryJournal(plan, journal); err != nil {
+			return fmt.Errorf("retain interrupted controller root volume identity: %w", err)
+		}
+	}
 	if err := backend.deleteExactOldControllerPod(ctx, request, journal); err != nil {
 		return err
 	}
@@ -201,7 +285,7 @@ func (backend *scalewayBackend) recoverInterruptedControllerFailure(
 	if err := backend.ensureStoppedKapsuleNodeReplacement(ctx, plan, journal); err != nil {
 		return err
 	}
-	if err := backend.waitInstanceAbsent(ctx, scw.Zone(journal.OldZone), journal.OldServerID); err != nil {
+	if err := backend.retireStoppedKapsuleInstance(ctx, plan, journal); err != nil {
 		return err
 	}
 	if recovered, err := backend.controllerRecoveredFromJournal(ctx, request, journal); err != nil {
@@ -216,8 +300,35 @@ func (backend *scalewayBackend) recoverInterruptedControllerFailure(
 	if successor.Spec.NodeName == journal.OldNodeName || podReady(successor) {
 		return fmt.Errorf("cleanup successor controller is not fail-closed on a distinct node")
 	}
+	expectedLease, present, err := journal.leaseFenceEvidence()
+	if err != nil {
+		return err
+	}
+	if !present {
+		// Compatibility for a retained pre-fence RC28 journal. New runs always
+		// persist the exact Lease generation before SIGSTOP.
+		expectedLease, err = backend.readControllerLease(ctx, request)
+		if err != nil {
+			return err
+		}
+		if expectedLease.Metadata.UID != journal.LeaseUID ||
+			expectedLease.Spec.HolderIdentity != journal.OldControllerPodUID {
+			return fmt.Errorf("legacy controller recovery Lease differs from the journaled holder")
+		}
+	}
+	blockedLease, _, blockedDriverRestartCount, err := backend.waitForBlockedController(
+		ctx, request, successor, expectedLease,
+	)
+	if err != nil {
+		return err
+	}
 
 	if err := backend.removeMatchingApprovalSecret(ctx, request, journal); err != nil {
+		return err
+	}
+	if err := backend.assertControllerStillBlocked(
+		ctx, request, successor, blockedLease, blockedDriverRestartCount,
+	); err != nil {
 		return err
 	}
 	approvalRequestID, err := randomUUIDv4()
@@ -336,9 +447,12 @@ func (backend *scalewayBackend) ensureStoppedKapsuleNodeReplacement(
 	plan e2eplan.Plan,
 	journal controllerRecoveryJournal,
 ) error {
-	present, err := backend.controllerRecoveryNodePresent(ctx, plan, journal)
-	if err != nil || !present {
+	node, err := backend.exactControllerRecoveryNode(ctx, plan, journal)
+	if err != nil || node == nil {
 		return err
+	}
+	if node.Status == k8sapi.NodeStatusDeleting || node.Status == k8sapi.NodeStatusDeleted {
+		return nil
 	}
 	if _, err := backend.kubernetes.DeleteNode(&k8sapi.DeleteNodeRequest{
 		Region: scw.Region(plan.Region), NodeID: journal.OldKapsuleNodeID, Replace: true,
@@ -353,16 +467,8 @@ func (backend *scalewayBackend) controllerRecoveryNodePresent(
 	plan e2eplan.Plan,
 	journal controllerRecoveryJournal,
 ) (bool, error) {
-	listed, err := backend.kubernetes.ListNodes(&k8sapi.ListNodesRequest{
-		Region: scw.Region(plan.Region), ClusterID: journal.ClusterID, PoolID: &journal.PoolID,
-	}, scw.WithAllPages(), scw.WithContext(ctx))
-	if err != nil {
-		return false, err
-	}
-	if listed == nil {
-		return false, fmt.Errorf("cleanup recovery node inventory is empty")
-	}
-	return controllerRecoveryNodeIdentityPresent(listed.Nodes, journal)
+	node, err := backend.exactControllerRecoveryNode(ctx, plan, journal)
+	return node != nil, err
 }
 
 func controllerRecoveryNodeIdentityPresent(nodes []*k8sapi.Node, journal controllerRecoveryJournal) (bool, error) {
