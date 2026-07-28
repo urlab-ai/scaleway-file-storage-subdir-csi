@@ -49,10 +49,18 @@ harness passed the unsupported `--labels` flag to
 inventory reads proved its Private Network, cluster, node pool, two parents,
 disposable Instance, and root SBS volume absent. The corrected harness labels
 each streamed Secret manifest locally before its single API create, so no
-credential file or temporarily unlabeled Secret exists. RC26 is the next full
-qualification candidate and continues to use RC14 as its exact public
-predecessor. None is a qualified production release until the exact RC26
-artifacts pass every gate. The
+credential file or temporarily unlabeled Secret exists. RC26 then passed the
+complete N/N-1 path but exposed an out-of-order proof dependency. RC27 passed
+artifact/install, N/N-1, real `virtiofs`, `SINGLE_NODE_WRITER`, the 100-PVC
+scale test, and a 20-minute checksum soak with zero checksum failures. It was
+not promoted because provider `poweroff` allowed a normal Lease handoff instead
+of the required abrupt-failure proof. Safe uninstall and exact cleanup
+completed, and independent reads confirmed the Private Network, cluster, node
+pool, two parents, disposable Instance, and root SBS volume absent. The next
+candidate continues to use RC14 as its exact public predecessor, uses
+`stop_in_place` after the exact-process freeze, and bounds retries to explicit
+provider availability failures. None is a qualified production release until
+that exact candidate passes every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint

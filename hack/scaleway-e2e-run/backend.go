@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -957,9 +959,10 @@ func (backend *scalewayBackend) waitAbsent(ctx context.Context, kind, id string)
 	for {
 		present, err := backend.exactPresent(ctx, kind, id)
 		if err != nil {
-			return err
-		}
-		if !present {
+			if !providerObservationRetryable(ctx, err) {
+				return err
+			}
+		} else if !present {
 			return nil
 		}
 		select {
@@ -1124,6 +1127,30 @@ func inventoryResource(inventory e2ecleanup.Inventory, id string) (e2ecleanup.Re
 		}
 	}
 	return e2ecleanup.Resource{}, false
+}
+
+// providerObservationRetryable recognizes only availability failures that can
+// safely be retried inside an already bounded read-only polling loop. Permanent
+// authorization, validation, not-found, conflict, quota, and precondition
+// failures must remain visible immediately; treating one of those as eventual
+// consistency would hide a broken qualification or unsafe cleanup.
+func providerObservationRetryable(ctx context.Context, err error) bool {
+	if err == nil || (ctx != nil && ctx.Err() != nil) {
+		return false
+	}
+	var transient *scw.TransientStateError
+	var locked *scw.ResourceLockedError
+	if errors.As(err, &transient) || errors.As(err, &locked) {
+		return true
+	}
+	var response *scw.ResponseError
+	if errors.As(err, &response) {
+		return response.StatusCode == http.StatusRequestTimeout ||
+			response.StatusCode == http.StatusTooManyRequests ||
+			response.StatusCode >= http.StatusInternalServerError
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
 }
 
 func providerNotFound(err error) bool {

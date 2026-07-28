@@ -1093,7 +1093,7 @@ func (proof SafeUninstallProof) Validate() error {
 
 var controllerFailureOperatorSteps = []string{
 	"freeze-exact-controller-process",
-	"stop-old-controller-instance",
+	"stop-in-place-old-controller-instance",
 	"cordon-old-kubernetes-node",
 	"force-delete-old-controller-pod",
 	"verify-successor-blocked-by-uncleared-lease",

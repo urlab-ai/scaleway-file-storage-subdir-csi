@@ -344,6 +344,22 @@ only on its already completed structured proof, converged controller/node
 generation, and deployed Helm history, as required by the closed execution
 order.
 
+RC27 passed candidate artifact and install admission, the complete N/N-1
+upgrade, real `virtiofs`, `SINGLE_NODE_WRITER`, exactly 100 bound PVCs, and the
+20-minute checksum soak with 5,861 writes, 5,866 reads, and zero checksum
+failures across controller and node-plugin restarts. It also completed the
+foreign-attachment, parent-growth, and normal-node-drain operations before the
+destructive group could be admitted. The hard-failure harness then rejected
+its own proof because the provider `poweroff` path allowed a normal Lease
+handoff despite the immediately preceding process freeze. This was a harness
+fault, not evidence of a CSI runtime defect. Cleanup completed safe uninstall,
+removed the exact run-owned Private Network, cluster, node pool, two parents,
+disposable Instance, and root SBS volume, and independent exact-ID reads
+confirmed all seven absent. RC27 is superseded and must not be promoted. The
+next exact candidate uses `stop_in_place`, requires the SDK to observe
+`stopped in place`, and retries only explicitly transient errors inside bounded
+provider observation loops.
+
 No candidate is a production support claim until every Linux, kind, CSI, Helm,
 real Kapsule, and final-cleanup qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
@@ -6741,13 +6757,16 @@ Kapsule matrix must:
    the cloud;
 10. drain and uncordon a workload node, restart a node plugin, then inject an
     actual abrupt controller failure while workloads on another node continue
-    I/O. Immediately before hard-stopping the exact controller Instance, a
+    I/O. Immediately before stopping the exact controller Instance in place, a
     short-lived, credential-free test Pod on that disposable node must identify
     exactly one controller process from both the controller Pod UID in its
     cgroup and the immutable full driver entrypoint, revalidate that identity
     immediately before signaling, send `SIGSTOP`, and prove the process entered
-    the stopped state. The provider stop follows immediately, so the controller
-    cannot execute its graceful Lease release path. Prove the successor remains
+    the stopped state. The provider `stop_in_place` action follows immediately
+    and must return the exact `stopped in place` state, so the controller cannot
+    execute its graceful Lease release path. A provider `poweroff` is not an
+    admissible abrupt-failure proof because it may allow a guest shutdown and a
+    graceful Lease handoff. Prove the successor remains
     non-serving until exact provider fencing and one immutable approval, record
     the process-freeze result, recovery time, and operator steps, replace the
     stopped run-owned node, and revalidate commercial type, live attach limit,
@@ -6779,6 +6798,13 @@ Kapsule matrix must:
     controller, prove all exact mounts and attachments absent, uninstall the
     exact Helm release, remove the retained kubeconfig, and delete every
     run-owned cloud resource by exact retained ID.
+
+Every bounded provider observation loop retries only explicit availability
+conditions: Scaleway transient/locked states, HTTP 408/429/5xx responses, and
+transport errors while the enclosing operation context remains live.
+Authorization, validation, not-found, conflict, quota, precondition, malformed
+response, cancellation, and exhausted-deadline failures remain immediate and
+fail closed.
 
 The numbered matrix defines required coverage; the harness retains one explicit
 execution order and rejects every other ordering. The N/N-1 proof is necessarily

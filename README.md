@@ -73,10 +73,16 @@ Private Network, cluster, node pool, two parents, disposable Instance, and root
 SBS volume; independent Project inventories confirmed no surviving run
 resource. The harness now adds both ownership labels to each streamed Secret
 manifest through `kubectl label --local` before its single API create, without
-persisting credential data or creating an unlabeled Secret. RC26 is the next
-candidate. It uses a credential-free, qualification-only process freeze
-immediately before the provider stop, with exact Pod UID, cgroup, entrypoint,
-and PID checks. The
+persisting credential data or creating an unlabeled Secret. RC26 later passed
+the complete N/N-1 path but exposed an out-of-order proof dependency. RC27
+passed artifact/install, N/N-1, real `virtiofs`, `SINGLE_NODE_WRITER`, the
+100-PVC scale test, and a 20-minute soak with zero checksum failures. It was not
+promoted because provider `poweroff` allowed a normal Lease handoff instead of
+proving the intended abrupt controller failure. Exact cleanup and independent
+reads confirmed all seven run-owned cloud resources absent. The next candidate
+uses the provider `stop_in_place` action after the credential-free exact-process
+freeze and retries only explicitly transient provider observations inside
+bounded waits. The
 exact after-attach/before-claim state remains a deterministic recovery gate.
 Promotion remains blocked until the next exact candidate has concrete Linux,
 kind, CSI, Helm, Kapsule, and final-cleanup evidence.

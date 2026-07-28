@@ -6,12 +6,57 @@ import (
 	"strings"
 	"testing"
 
+	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
 )
+
+func TestControllerHardFailureUsesStopInPlace(t *testing.T) {
+	if controllerFailureServerAction != instanceapi.ServerActionStopInPlace {
+		t.Fatalf("controller failure action = %q, want stop_in_place", controllerFailureServerAction)
+	}
+	if controllerFailureServerAction == instanceapi.ServerActionPoweroff {
+		t.Fatal("poweroff may allow a graceful guest shutdown and is not an abrupt-failure proof")
+	}
+	proof := e2erunner.ControllerFailureProof{
+		SchemaVersion: "1", Scenario: "controller-hard-failure",
+		RunID: "00000000-0000-4000-8000-000000000000", ObservedAt: "2026-07-28T12:00:00Z",
+		LeaseUID:    "11111111-1111-4111-8111-111111111111",
+		OldPodUID:   "22222222-2222-4222-8222-222222222222",
+		NewPodUID:   "33333333-3333-4333-8333-333333333333",
+		OldNodeName: "old-node", NewNodeName: "new-node",
+		OldNodeID: "fr-par-1/44444444-4444-4444-8444-444444444444",
+		NewNodeID: "fr-par-1/55555555-5555-4555-8555-555555555555",
+		ParentFilesystemIDs: []string{
+			"66666666-6666-4666-8666-666666666666",
+			"77777777-7777-4777-8777-777777777777",
+		},
+		ApprovalSecretUID: "88888888-8888-4888-8888-888888888888",
+		ApprovalRequestID: "99999999-9999-4999-8999-999999999999",
+		OperatorSteps: []string{
+			"freeze-exact-controller-process", "stop-in-place-old-controller-instance",
+			"cordon-old-kubernetes-node", "force-delete-old-controller-pod",
+			"verify-successor-blocked-by-uncleared-lease",
+			"detach-exact-parents-and-verify-dual-absence",
+			"replace-stopped-kapsule-node",
+			"create-immutable-abnormal-takeover-approval",
+			"verify-approval-consumption-and-controller-recovery",
+			"delete-consumed-approval-secret",
+		},
+		RecoverySeconds: 1, OldHolderMatched: true, OldControllerProcessFrozen: true,
+		OldInstanceReachedStopped: true, SuccessorBlockedBeforeApproval: true,
+		ServerAttachmentsAbsent: true, RegionalAttachmentsAbsent: true,
+		ApprovalConsumed: true, ExistingVolumeReadWrite: true,
+		NewPVCName: "replacement-claim", NewPVCBound: true, LeaseUIDPreserved: true,
+		ControllerAvailable: true, ApprovalSecretDeletedAfterAudit: true,
+	}
+	if err := proof.Validate(); err != nil {
+		t.Fatalf("stop-in-place controller proof must be admissible: %v", err)
+	}
+}
 
 func TestRandomUUIDV4IsCanonicalAndUnique(t *testing.T) {
 	pattern := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)

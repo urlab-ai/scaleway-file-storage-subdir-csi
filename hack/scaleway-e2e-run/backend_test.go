@@ -1,17 +1,65 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
+	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2erunner"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/strictjson"
 )
+
+type providerTimeoutError struct{}
+
+func (providerTimeoutError) Error() string   { return "provider transport timeout" }
+func (providerTimeoutError) Timeout() bool   { return true }
+func (providerTimeoutError) Temporary() bool { return true }
+
+func TestProviderObservationRetryableIsNarrowAndHonorsCallerCancellation(t *testing.T) {
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		err := fmt.Errorf("wrapped: %w", &scw.ResponseError{StatusCode: status})
+		if !providerObservationRetryable(context.Background(), err) {
+			t.Fatalf("HTTP %d must be retryable during a bounded provider observation", status)
+		}
+	}
+	for _, status := range []int{
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusConflict,
+		http.StatusPreconditionFailed,
+	} {
+		err := fmt.Errorf("wrapped: %w", &scw.ResponseError{StatusCode: status})
+		if providerObservationRetryable(context.Background(), err) {
+			t.Fatalf("HTTP %d must fail closed without retry", status)
+		}
+	}
+	if !providerObservationRetryable(context.Background(), providerTimeoutError{}) {
+		t.Fatal("a transport timeout must be retryable while the polling context remains live")
+	}
+	if providerObservationRetryable(context.Background(), fmt.Errorf("malformed provider response")) {
+		t.Fatal("an unclassified provider error must not be retried")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if providerObservationRetryable(cancelled, providerTimeoutError{}) {
+		t.Fatal("caller cancellation must stop retries")
+	}
+}
 
 func TestExecutionReviewIncludesExactPredecessor(t *testing.T) {
 	plan := e2eplan.Plan{SchemaVersion: e2eplan.SchemaVersionV1, RunID: "11111111-1111-4111-8111-111111111111"}

@@ -23,6 +23,7 @@ import (
 
 const controllerSelector = "app.kubernetes.io/component=controller"
 const nodeSelector = "app.kubernetes.io/component=node"
+const controllerFailureServerAction = instanceapi.ServerActionStopInPlace
 
 type kubernetesPod struct {
 	Metadata struct {
@@ -334,9 +335,9 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 		}
 	}()
 	if err := backend.instance.ServerActionAndWait(&instanceapi.ServerActionAndWaitRequest{
-		Zone: scw.Zone(oldTarget.Zone), ServerID: oldTarget.ServerID, Action: instanceapi.ServerActionPoweroff,
+		Zone: scw.Zone(oldTarget.Zone), ServerID: oldTarget.ServerID, Action: controllerFailureServerAction,
 	}, scw.WithContext(ctx)); err != nil {
-		return proof, replacement, fmt.Errorf("hard-stop exact controller Instance: %w", err)
+		return proof, replacement, fmt.Errorf("stop-in-place exact controller Instance: %w", err)
 	}
 	instanceStopped = true
 	recoveryJournal.Phase = controllerRecoveryPhaseStopped
@@ -458,7 +459,7 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 		OldNodeID: oldNodeID, NewNodeID: newNodeID, ParentFilesystemIDs: parentIDs,
 		ApprovalSecretUID: approvalUID, ApprovalRequestID: approvalRequestID,
 		OperatorSteps: []string{
-			"freeze-exact-controller-process", "stop-old-controller-instance",
+			"freeze-exact-controller-process", "stop-in-place-old-controller-instance",
 			"cordon-old-kubernetes-node", "force-delete-old-controller-pod",
 			"verify-successor-blocked-by-uncleared-lease", "detach-exact-parents-and-verify-dual-absence",
 			"replace-stopped-kapsule-node",
@@ -502,26 +503,29 @@ func (backend *scalewayBackend) replaceStoppedKapsuleNode(
 			Region: scw.Region(plan.Region), ClusterID: clusterID, PoolID: &poolID,
 		}, scw.WithAllPages(), scw.WithContext(waitCtx))
 		if err != nil {
-			return nodeReplacementEvidence{}, err
-		}
-		oldPresent := false
-		for _, node := range listed.Nodes {
-			if node == nil || node.PoolID != poolID || node.ClusterID != clusterID {
-				return nodeReplacementEvidence{}, fmt.Errorf("replacement node inventory is incomplete or outside the exact pool")
+			if !providerObservationRetryable(waitCtx, err) {
+				return nodeReplacementEvidence{}, fmt.Errorf("observe exact Kapsule node replacement: %w", err)
 			}
-			if node.ID == oldNode.ID {
-				oldPresent = true
-			}
-			if _, existed := beforeIDs[node.ID]; !existed && node.Status == k8sapi.NodeStatusReady {
-				if replacement != nil && replacement.ID != node.ID {
-					return nodeReplacementEvidence{}, fmt.Errorf("multiple replacement Kapsule nodes appeared")
+		} else {
+			oldPresent := false
+			for _, node := range listed.Nodes {
+				if node == nil || node.PoolID != poolID || node.ClusterID != clusterID {
+					return nodeReplacementEvidence{}, fmt.Errorf("replacement node inventory is incomplete or outside the exact pool")
 				}
-				copy := *node
-				replacement = &copy
+				if node.ID == oldNode.ID {
+					oldPresent = true
+				}
+				if _, existed := beforeIDs[node.ID]; !existed && node.Status == k8sapi.NodeStatusReady {
+					if replacement != nil && replacement.ID != node.ID {
+						return nodeReplacementEvidence{}, fmt.Errorf("multiple replacement Kapsule nodes appeared")
+					}
+					copy := *node
+					replacement = &copy
+				}
 			}
-		}
-		if !oldPresent && replacement != nil && uint32(len(listed.Nodes)) == plan.NodePool.Count {
-			break
+			if !oldPresent && replacement != nil && uint32(len(listed.Nodes)) == plan.NodePool.Count {
+				break
+			}
 		}
 		select {
 		case <-waitCtx.Done():
@@ -872,7 +876,9 @@ func (backend *scalewayBackend) waitInstanceAbsent(ctx context.Context, zone scw
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("observe stopped Kapsule Instance deletion: %w", err)
+			if !providerObservationRetryable(waitCtx, err) {
+				return fmt.Errorf("observe stopped Kapsule Instance deletion: %w", err)
+			}
 		}
 		select {
 		case <-waitCtx.Done():

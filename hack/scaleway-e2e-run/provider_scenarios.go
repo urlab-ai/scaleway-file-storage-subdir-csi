@@ -262,30 +262,33 @@ func (backend *scalewayBackend) waitServerFilesystem(ctx context.Context, zone s
 	defer ticker.Stop()
 	for {
 		response, err := backend.instance.GetServer(&instanceapi.GetServerRequest{Zone: zone, ServerID: instanceID}, scw.WithContext(waitCtx))
-		if err != nil || response == nil || response.Server == nil {
-			if err == nil {
-				err = fmt.Errorf("provider returned an empty Instance")
+		if err != nil {
+			if !providerObservationRetryable(waitCtx, err) {
+				return fmt.Errorf("observe disposable Instance filesystem transition: %w", err)
 			}
-			return fmt.Errorf("observe disposable Instance filesystem transition: %w", err)
-		}
-		found := false
-		for _, filesystem := range response.Server.Filesystems {
-			if filesystem == nil {
-				return fmt.Errorf("disposable Instance returned a nil filesystem entry")
+		} else {
+			if response == nil || response.Server == nil {
+				return fmt.Errorf("observe disposable Instance filesystem transition: provider returned an empty Instance")
 			}
-			if filesystem.FilesystemID != filesystemID {
-				continue
+			found := false
+			for _, filesystem := range response.Server.Filesystems {
+				if filesystem == nil {
+					return fmt.Errorf("disposable Instance returned a nil filesystem entry")
+				}
+				if filesystem.FilesystemID != filesystemID {
+					continue
+				}
+				found = true
+				if wantPresent && filesystem.State == instanceapi.ServerFilesystemStateAvailable {
+					return nil
+				}
+				if filesystem.State == instanceapi.ServerFilesystemStateUnknownState {
+					return fmt.Errorf("disposable Instance parent entered unknown attachment state")
+				}
 			}
-			found = true
-			if wantPresent && filesystem.State == instanceapi.ServerFilesystemStateAvailable {
+			if !wantPresent && !found {
 				return nil
 			}
-			if filesystem.State == instanceapi.ServerFilesystemStateUnknownState {
-				return fmt.Errorf("disposable Instance parent entered unknown attachment state")
-			}
-		}
-		if !wantPresent && !found {
-			return nil
 		}
 		select {
 		case <-waitCtx.Done():
@@ -326,12 +329,12 @@ func (backend *scalewayBackend) waitRegionalAttachment(ctx context.Context, file
 	for {
 		attachment, err := backend.regionalAttachmentForInstance(waitCtx, filesystemID, instanceID)
 		if err != nil {
-			return nil, err
-		}
-		if wantPresent && attachment != nil {
+			if !providerObservationRetryable(waitCtx, err) {
+				return nil, err
+			}
+		} else if wantPresent && attachment != nil {
 			return attachment, nil
-		}
-		if !wantPresent && attachment == nil {
+		} else if !wantPresent && attachment == nil {
 			return nil, nil
 		}
 		select {

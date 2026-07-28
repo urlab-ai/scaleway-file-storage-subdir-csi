@@ -582,6 +582,9 @@ func (backend *scalewayBackend) waitForKapsuleNodeSet(ctx context.Context, plan 
 	defer ticker.Stop()
 	for {
 		listed, err := backend.kubernetes.ListNodes(&k8sapi.ListNodesRequest{Region: scw.Region(plan.Region), ClusterID: clusterID, PoolID: &poolID}, scw.WithAllPages(), scw.WithContext(waitCtx))
+		if err != nil && !providerObservationRetryable(waitCtx, err) {
+			return kapsuleNodeSet{}, fmt.Errorf("observe exact Kapsule recovery set: %w", err)
+		}
 		if err == nil && listed != nil && len(listed.Nodes) == count {
 			result := kapsuleNodeSet{Nodes: slices.Clone(listed.Nodes)}
 			valid := true
