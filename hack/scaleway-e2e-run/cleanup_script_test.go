@@ -120,6 +120,55 @@ wait_node_generation_counts previous candidate 1 1
 	}
 }
 
+func TestWaitVolumeAttachmentAbsentForNodeIsExactAndBounded(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in scenario script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "wait_volume_attachment_absent_for_node() {")
+	if start < 0 {
+		t.Fatal("VolumeAttachment wait function is missing")
+	}
+	end := strings.Index(contents[start:], "\n}\n\nwait_node_generation_counts()")
+	if end < 0 {
+		t.Fatal("VolumeAttachment wait function boundary is missing")
+	}
+	waitFunction := contents[start : start+end+2]
+
+	temporary := t.TempDir()
+	state := filepath.Join(temporary, "volumeattachments.json")
+	present := `{"items":[{"spec":{"attacher":"file-storage-subdir.csi.urlab.ai","nodeName":"worker-b","source":{"persistentVolumeName":"archive-pv"}}}]}`
+	if err := os.WriteFile(state, []byte(present), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	harness := `set -eu
+JQ=$1
+STATE=$2
+driver_name() { printf '%s\n' file-storage-subdir.csi.urlab.ai; }
+k() { cat "$STATE"; }
+sleep() { printf '%s\n' '{"items":[]}' >"$STATE"; }
+` + waitFunction + `
+wait_volume_attachment_absent_for_node archive-pv worker-b
+printf '%s\n' "$PRESENT" >"$STATE"
+! wait_volume_attachment_absent_for_node archive-pv worker-b 0
+wait_volume_attachment_absent_for_node archive-pv worker-a 0
+`
+	command := exec.Command("sh", "-c", harness, "volume-attachment-wait-test", jq, state)
+	command.Env = append(os.Environ(), "PRESENT="+present)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("exact bounded VolumeAttachment wait failed: %v, output = %s", err, output)
+	}
+}
+
 func TestControllerGenerationBlockRequiresDirectFailClosedEvidence(t *testing.T) {
 	jq, err := exec.LookPath("jq")
 	if err != nil {

@@ -427,6 +427,28 @@ wait_pv_absent() {
   done
 }
 
+wait_volume_attachment_absent_for_node() {
+  upgrade_attachment_pv=$1
+  upgrade_attachment_node=$2
+  upgrade_attachment_timeout=${3:-600}
+  upgrade_attachment_deadline=$(( $(date +%s) + upgrade_attachment_timeout ))
+  while :; do
+    upgrade_attachments=$(k get volumeattachments -o json)
+    if printf '%s' "$upgrade_attachments" | "$JQ" -e \
+      --arg driver "$(driver_name)" --arg pv "$upgrade_attachment_pv" --arg node "$upgrade_attachment_node" '
+        [.items[] |
+          select(.spec.attacher == $driver) |
+          select(.spec.source.persistentVolumeName == $pv) |
+          select(.spec.nodeName == $node)] |
+        length == 0
+      ' >/dev/null; then
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$upgrade_attachment_deadline" ] || return 1
+    sleep 3
+  done
+}
+
 wait_node_generation_counts() {
   upgrade_previous_generation=$1
   upgrade_candidate_generation=$2
@@ -682,6 +704,12 @@ prepare_n_minus_one_upgrade() {
   upgrade_rollback_pv=$(k -n "$namespace" get "pvc/$upgrade_rollback_claim" -o jsonpath='{.spec.volumeName}')
   k -n "$namespace" delete "pod/$upgrade_rollback_publish" "pvc/$upgrade_rollback_claim" --wait=true --timeout=10m
   wait_pv_absent "$upgrade_rollback_pv"
+  # Pod deletion proves only that the API object is gone. The attach/detach
+  # controller removes its VolumeAttachment asynchronously. Reusing the same
+  # archive volume on node B before that exact object disappears would bypass
+  # the old-node/new-controller block through stale successful attachment
+  # state, making this compatibility proof race with Kubernetes reconciliation.
+  wait_volume_attachment_absent_for_node "$upgrade_archive_pv" "$upgrade_node_b"
 
   # Now perform the real Helm upgrade with the candidate controller while all
   # node Pods still run N-1. This covers the opposite mixed-version direction.
