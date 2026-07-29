@@ -65,8 +65,20 @@ Pod, proves its Lease has stopped renewing, journals that node's exact root SBS
 volume, and then performs the freeze and `stop_in_place`. If Kapsule
 replacement leaves that exact stopped run-owned node deleting, the harness
 revalidates and removes only its exact Instance and detached journaled root
-volume. None is a qualified production release until
-that exact candidate passes every gate. The
+volume. RC29 subsequently passed the artifact/install, N/N-1, real
+`virtiofs`, `SINGLE_NODE_WRITER`, 100-PVC/20-minute checksum soak,
+provider-attachment, parent-growth, normal-drain, abrupt-controller-failure,
+and replacement-node proof paths. Its offline parent-decommission restart then
+failed closed because the lifecycle crash reconciler attempted to load
+ownership for a valid detailed, non-reserving historical `Deleted` allocation
+from the deliberately removed parent. No historical parent was reattached or
+mutated. RC29 is superseded and its exact run resources remain pending audited
+cleanup; they are not claimed absent. Startup and periodic reconciliation now
+validate that tombstone only through its non-authorizing Kubernetes projection
+and never dispatch it to delete or GC recovery. A configured-parent tombstone
+still completes its exact forward crash window, while every active, reserving,
+fenced, or invalid unconfigured-parent record remains fail-closed. None is a
+qualified production release until that exact candidate passes every gate. The
 source chart rejects `release.mode=production`; only an exact promoted chart
 copy with immutable image metadata may enable it. Supported versions and
 real-provider evidence still require approval. The CSI runtime and checkpoint

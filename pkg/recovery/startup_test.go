@@ -99,8 +99,25 @@ func TestBuildStartupInventoryPlanAcceptsOnlyCompletedHistoricalTombstones(t *te
 		t.Fatalf("historical plan = %#v", plan)
 	}
 
+	detailedDeleted, _ := detailedDeletedCheckpointPair(t)
+	snapshot.Allocations = []k8s.StoredAllocation{{Record: detailedDeleted, ResourceVersion: "11"}}
+	plan, err = BuildStartupInventoryPlan(snapshot)
+	if err != nil {
+		t.Fatalf("BuildStartupInventoryPlan(historical detailed) error = %v", err)
+	}
+	if len(plan.HistoricalTombstoneIDs) != 1 || plan.HistoricalTombstoneIDs[0] != detailedDeleted.LogicalVolumeID {
+		t.Fatalf("historical detailed plan = %#v", plan)
+	}
+
+	fenced := *detailedDeleted
+	fenced.PublishedNodeIDs = []string{"fr-par-1/11111111-1111-4111-8111-111111111111"}
+	snapshot.Allocations = []k8s.StoredAllocation{{Record: &fenced, ResourceVersion: "12"}}
+	if _, err := BuildStartupInventoryPlan(snapshot); err == nil {
+		t.Fatal("BuildStartupInventoryPlan(fenced historical detailed) error = nil")
+	}
+
 	detailed := checkpointAllocation(t)
-	snapshot.Allocations = []k8s.StoredAllocation{{Record: detailed, ResourceVersion: "11"}}
+	snapshot.Allocations = []k8s.StoredAllocation{{Record: detailed, ResourceVersion: "13"}}
 	if _, err := BuildStartupInventoryPlan(snapshot); err == nil {
 		t.Fatal("BuildStartupInventoryPlan(unconfigured Ready allocation) error = nil")
 	}

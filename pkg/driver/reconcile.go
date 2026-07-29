@@ -37,34 +37,55 @@ type ExistingGCReconciler interface {
 
 // LifecycleReconciliationSummary is the bounded startup audit for this phase.
 type LifecycleReconciliationSummary struct {
-	TotalAllocations      uint64
-	CreationResumes       uint64
-	FenceUnionRepairs     uint64
-	DeletionResumes       uint64
-	GCResumes             uint64
-	CompactTombstones     uint64
-	DeletedUnknownRecords uint64
+	TotalAllocations             uint64
+	CreationResumes              uint64
+	FenceUnionRepairs            uint64
+	DeletionResumes              uint64
+	GCResumes                    uint64
+	HistoricalDetailedTombstones uint64
+	CompactTombstones            uint64
+	DeletedUnknownRecords        uint64
 }
 
-// LifecycleCrashReconciler dispatches only already-paired allocation state to
-// its owning crash-recovery machine. A preceding startup inventory phase must
-// have validated allocation/PV/ownership completeness, parent claims, and any
-// ownership-only reconstruction. This type deliberately cannot discover or
-// infer a missing record.
+// LifecycleCrashReconciler dispatches configured-parent allocation state to its
+// owning crash-recovery machine and leaves validated historical tombstones
+// inert. A preceding startup inventory phase must have validated
+// allocation/PV/ownership completeness, parent claims, historical tombstones,
+// and any ownership-only reconstruction. This type deliberately cannot
+// discover or infer a missing record.
 type LifecycleCrashReconciler struct {
-	allocations StartupAllocationLister
-	create      ExistingCreationReconciler
-	fences      ExistingFenceReconciler
-	delete      ExistingDeletionReconciler
-	gc          ExistingGCReconciler
+	allocations       StartupAllocationLister
+	configuredParents map[string]struct{}
+	create            ExistingCreationReconciler
+	fences            ExistingFenceReconciler
+	delete            ExistingDeletionReconciler
+	gc                ExistingGCReconciler
 }
 
-// NewLifecycleCrashReconciler validates the post-inventory repair boundary.
-func NewLifecycleCrashReconciler(allocations StartupAllocationLister, create ExistingCreationReconciler, fences ExistingFenceReconciler, delete ExistingDeletionReconciler, gc ExistingGCReconciler) (*LifecycleCrashReconciler, error) {
+// NewLifecycleCrashReconciler validates the post-inventory repair boundary and
+// freezes the configured-parent set used to distinguish repairable lifecycle
+// state from non-authorizing historical tombstones.
+func NewLifecycleCrashReconciler(allocations StartupAllocationLister, create ExistingCreationReconciler, fences ExistingFenceReconciler, delete ExistingDeletionReconciler, gc ExistingGCReconciler, configuredParentIDs []string) (*LifecycleCrashReconciler, error) {
 	if allocations == nil || create == nil || fences == nil || delete == nil || gc == nil {
 		return nil, fmt.Errorf("lifecycle crash reconciler dependency is nil")
 	}
-	return &LifecycleCrashReconciler{allocations: allocations, create: create, fences: fences, delete: delete, gc: gc}, nil
+	if len(configuredParentIDs) == 0 {
+		return nil, fmt.Errorf("lifecycle crash reconciler requires at least one configured parent")
+	}
+	configuredParents := make(map[string]struct{}, len(configuredParentIDs))
+	for index, parentID := range configuredParentIDs {
+		if err := volume.ValidateParentFilesystemID(parentID); err != nil {
+			return nil, fmt.Errorf("lifecycle configured parent %d: %w", index, err)
+		}
+		if _, duplicate := configuredParents[parentID]; duplicate {
+			return nil, fmt.Errorf("lifecycle configured parent %q is duplicated", parentID)
+		}
+		configuredParents[parentID] = struct{}{}
+	}
+	return &LifecycleCrashReconciler{
+		allocations: allocations, configuredParents: configuredParents,
+		create: create, fences: fences, delete: delete, gc: gc,
+	}, nil
 }
 
 // Reconcile walks one stable allocation list in O(number of records). Compact
@@ -114,6 +135,22 @@ func (reconciler *LifecycleCrashReconciler) Reconcile(ctx context.Context) (Life
 }
 
 func (reconciler *LifecycleCrashReconciler) reconcileDetailed(ctx context.Context, record *volume.DetailedAllocationRecord, summary *LifecycleReconciliationSummary) error {
+	if _, configured := reconciler.configuredParents[record.ParentFilesystemID]; !configured {
+		// The read-only startup inventory has already proved that an
+		// unconfigured parent is referenced only by a schema-valid,
+		// non-reserving and unfenced Deleted tombstone. Revalidating that
+		// non-authorizing projection here is essential because this same
+		// reconciler also runs during periodic maintenance. Never delegate
+		// such a record to delete or GC recovery: their ownership stores live
+		// on the deliberately offline parent and would remount historical
+		// storage after a completed decommission.
+		if _, err := volume.CompactDeletedProjection(record); err != nil {
+			return fmt.Errorf("allocation references unconfigured parent %q outside completed decommission contract: %w", record.ParentFilesystemID, err)
+		}
+		summary.HistoricalDetailedTombstones++
+		return nil
+	}
+
 	switch record.State {
 	case volume.StateReserved, volume.StateCreatingDirectory:
 		if err := reconciler.create.ReconcileExistingCreation(ctx, record.LogicalVolumeID); err != nil {

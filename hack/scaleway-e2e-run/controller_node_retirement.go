@@ -55,6 +55,25 @@ func validateControllerNodeServer(
 	journal controllerRecoveryJournal,
 	requireStopped bool,
 ) (string, error) {
+	rootID, err := validateControllerNodeServerIdentity(server, plan, journal)
+	if err != nil {
+		return "", err
+	}
+	if requireStopped && server.State != instanceapi.ServerStateStopped &&
+		server.State != instanceapi.ServerStateStoppedInPlace {
+		return "", fmt.Errorf("controller Kapsule Instance state %q is not conclusively stopped", server.State)
+	}
+	if !requireStopped && server.State != instanceapi.ServerStateRunning {
+		return "", fmt.Errorf("controller Kapsule Instance state %q is not running before fault injection", server.State)
+	}
+	return rootID, nil
+}
+
+func validateControllerNodeServerIdentity(
+	server *instanceapi.Server,
+	plan e2eplan.Plan,
+	journal controllerRecoveryJournal,
+) (string, error) {
 	if server == nil || server.ID != journal.OldServerID ||
 		server.Project != plan.ProjectID || server.Zone.String() != journal.OldZone ||
 		server.CommercialType != plan.NodePool.CommercialType ||
@@ -63,13 +82,6 @@ func validateControllerNodeServer(
 		!slices.Contains(server.Tags, "pool="+journal.PoolID) ||
 		!slices.Contains(server.Tags, "node="+journal.OldKapsuleNodeID) {
 		return "", fmt.Errorf("controller Kapsule Instance differs from the exact run-owned node")
-	}
-	if requireStopped && server.State != instanceapi.ServerStateStopped &&
-		server.State != instanceapi.ServerStateStoppedInPlace {
-		return "", fmt.Errorf("controller Kapsule Instance state %q is not conclusively stopped", server.State)
-	}
-	if !requireStopped && server.State != instanceapi.ServerStateRunning {
-		return "", fmt.Errorf("controller Kapsule Instance state %q is not running before fault injection", server.State)
 	}
 	if len(server.Volumes) != 1 {
 		return "", fmt.Errorf("controller Kapsule Instance has %d volumes; exactly one root is required", len(server.Volumes))
@@ -84,6 +96,75 @@ func validateControllerNodeServer(
 		return "", fmt.Errorf("controller Kapsule Instance root volume changed after journaling")
 	}
 	return root.ID, nil
+}
+
+type controllerRetirementInstanceAPI interface {
+	ServerActionAndWait(*instanceapi.ServerActionAndWaitRequest, ...scw.RequestOption) error
+	GetServer(*instanceapi.GetServerRequest, ...scw.RequestOption) (*instanceapi.GetServerResponse, error)
+}
+
+const controllerInstanceArchivedState = instanceapi.ServerState("archived")
+
+// prepareControllerInstanceForDeletion converts the abrupt stop_in_place state
+// into the fully powered-off state required by the Instance delete API. This
+// happens only after the old controller is fenced, its parents are detached,
+// and Kapsule has accepted replacement of the exact node, so it cannot weaken
+// the abrupt-failure evidence. Kapsule may concurrently archive or delete the
+// server; both outcomes are accepted only after exact identity revalidation.
+func prepareControllerInstanceForDeletion(
+	ctx context.Context,
+	api controllerRetirementInstanceAPI,
+	plan e2eplan.Plan,
+	journal controllerRecoveryJournal,
+	server *instanceapi.Server,
+) (bool, error) {
+	if api == nil {
+		return false, fmt.Errorf("controller Kapsule Instance API is unavailable")
+	}
+	if _, err := validateControllerNodeServerIdentity(server, plan, journal); err != nil {
+		return false, err
+	}
+	switch server.State {
+	case instanceapi.ServerStateStopped:
+		return false, nil
+	case controllerInstanceArchivedState:
+		// Kapsule has already retired the compute resource. DeleteServer below
+		// still provides the authoritative exact-ID absence barrier.
+		return false, nil
+	case instanceapi.ServerStateStoppedInPlace:
+	default:
+		return false, fmt.Errorf("controller Kapsule Instance state %q is not safe for retirement", server.State)
+	}
+
+	actionErr := api.ServerActionAndWait(&instanceapi.ServerActionAndWaitRequest{
+		Zone: scw.Zone(journal.OldZone), ServerID: journal.OldServerID,
+		Action: instanceapi.ServerActionPoweroff,
+	}, scw.WithContext(ctx))
+	response, readErr := api.GetServer(&instanceapi.GetServerRequest{
+		Zone: scw.Zone(journal.OldZone), ServerID: journal.OldServerID,
+	}, scw.WithContext(ctx))
+	if providerNotFound(readErr) {
+		return true, nil
+	}
+	if readErr != nil {
+		return false, errors.Join(actionErr, fmt.Errorf("revalidate powered-off controller Kapsule Instance: %w", readErr))
+	}
+	if response == nil || response.Server == nil {
+		return false, errors.Join(actionErr, fmt.Errorf("revalidate powered-off controller Kapsule Instance: provider returned an empty response"))
+	}
+	if _, err := validateControllerNodeServerIdentity(response.Server, plan, journal); err != nil {
+		return false, errors.Join(actionErr, err)
+	}
+	if response.Server.State != instanceapi.ServerStateStopped &&
+		response.Server.State != controllerInstanceArchivedState {
+		return false, errors.Join(actionErr, fmt.Errorf(
+			"controller Kapsule Instance state %q is not fully powered off for deletion",
+			response.Server.State,
+		))
+	}
+	// The action response may be lost even though the state transition
+	// committed. The exact authoritative read above resolves that ambiguity.
+	return false, nil
 }
 
 func validateControllerNodeRootVolume(
@@ -144,18 +225,21 @@ func (backend *scalewayBackend) retireStoppedKapsuleInstance(
 		if node.Status != k8sapi.NodeStatusDeleting && node.Status != k8sapi.NodeStatusDeleted {
 			return fmt.Errorf("refuse direct Instance retirement while Kapsule node state is %q", node.Status)
 		}
-		if _, err := validateControllerNodeServer(response.Server, plan, journal, true); err != nil {
+		absent, err := prepareControllerInstanceForDeletion(ctx, backend.instance, plan, journal, response.Server)
+		if err != nil {
 			return err
 		}
-		if err := backend.instance.DeleteServer(&instanceapi.DeleteServerRequest{
-			Zone: scw.Zone(journal.OldZone), ServerID: journal.OldServerID,
-		}, scw.WithContext(ctx)); err != nil && !providerNotFound(err) {
-			// DeleteServer can commit while the response is lost. A bounded
-			// authoritative absence read below resolves that ambiguity.
-			if resolveErr := resolveAmbiguousDelete(err, func() error {
-				return backend.waitInstanceAbsent(ctx, scw.Zone(journal.OldZone), journal.OldServerID)
-			}); resolveErr != nil {
-				return fmt.Errorf("delete exact stopped controller Kapsule Instance: %w", resolveErr)
+		if !absent {
+			if err := backend.instance.DeleteServer(&instanceapi.DeleteServerRequest{
+				Zone: scw.Zone(journal.OldZone), ServerID: journal.OldServerID,
+			}, scw.WithContext(ctx)); err != nil && !providerNotFound(err) {
+				// DeleteServer can commit while the response is lost. A bounded
+				// authoritative absence read below resolves that ambiguity.
+				if resolveErr := resolveAmbiguousDelete(err, func() error {
+					return backend.waitInstanceAbsent(ctx, scw.Zone(journal.OldZone), journal.OldServerID)
+				}); resolveErr != nil {
+					return fmt.Errorf("delete exact stopped controller Kapsule Instance: %w", resolveErr)
+				}
 			}
 		}
 	}

@@ -288,6 +288,9 @@ func (backend *scalewayBackend) recoverInterruptedControllerFailure(
 	if err := backend.retireStoppedKapsuleInstance(ctx, plan, journal); err != nil {
 		return err
 	}
+	if err := backend.restorePlannedKapsulePoolSize(ctx, plan, journal.ClusterID, journal.PoolID); err != nil {
+		return err
+	}
 	if recovered, err := backend.controllerRecoveredFromJournal(ctx, request, journal); err != nil {
 		return err
 	} else if recovered {
@@ -455,9 +458,9 @@ func (backend *scalewayBackend) ensureStoppedKapsuleNodeReplacement(
 		return nil
 	}
 	if _, err := backend.kubernetes.DeleteNode(&k8sapi.DeleteNodeRequest{
-		Region: scw.Region(plan.Region), NodeID: journal.OldKapsuleNodeID, Replace: true,
+		Region: scw.Region(plan.Region), NodeID: journal.OldKapsuleNodeID, Replace: false,
 	}, scw.WithContext(ctx)); err != nil {
-		return fmt.Errorf("replace interrupted exact Kapsule node: %w", err)
+		return fmt.Errorf("delete interrupted exact Kapsule node before explicit pool-size restoration: %w", err)
 	}
 	return nil
 }

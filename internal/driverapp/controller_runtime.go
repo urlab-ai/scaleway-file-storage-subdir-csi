@@ -815,7 +815,7 @@ func buildControllerRuntime(
 		return nil, err
 	}
 	lifecycle, err := driver.NewLifecycleCrashReconciler(
-		allocations, createController, publishController, deleteController, gcController,
+		allocations, createController, publishController, deleteController, gcController, parentIDs,
 	)
 	if err != nil {
 		return nil, err

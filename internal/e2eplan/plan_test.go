@@ -117,6 +117,7 @@ func TestBuildReleaseCandidatePlansOneRunOwnedDisposableInstance(t *testing.T) {
 	for _, operation := range []string{
 		"delete the exact run-owned disposable Instance root volume after deleting its Instance",
 		"attach and detach the two run-owned parents on the standalone run-owned disposable Instance",
+		"fully power off and delete the exact stopped run-owned controller Kapsule Instance and its journaled root volume after replacement fencing",
 		"delete and recreate the dedicated run-owned driver namespace for checkpoint recovery",
 		"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",
 		"decommission, detach, and remove the second run-owned parent from the driver configuration",

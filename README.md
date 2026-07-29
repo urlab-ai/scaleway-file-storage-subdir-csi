@@ -89,7 +89,21 @@ fail-closed qualification-harness defect, not an admitted CSI runtime failure.
 The corrected path isolates only the exact old controller Pod from Kubernetes
 API egress before `SIGSTOP`, proves its Lease has stopped renewing, and
 journals/deletes only the exact stopped Kapsule Instance root volume when
-managed deletion remains stuck. The
+managed deletion remains stuck. RC29 then passed artifact/install, N/N-1,
+real `virtiofs`, `SINGLE_NODE_WRITER`, the 100-PVC multiplex test, and a
+20-minute checksum soak with 4,862 writes, 5,249 reads, and zero checksum
+failures. It also produced valid provider attach/detach, parent-growth, normal
+node drain, abrupt controller-failure, and replacement-node data-read proofs.
+It was not promoted: the offline decommission scenario exposed a CSI startup
+defect in which the lifecycle crash reconciler treated a valid detailed
+historical `Deleted` tombstone as an active deletion repair and attempted to
+remount its deliberately removed parent. The controller failed closed before
+reattaching or mutating that parent. RC29 is superseded. Its run-owned resources
+remain retained for exact audited cleanup; no cleanup-absence claim is made.
+The corrected lifecycle boundary revalidates the tombstone's non-authorizing
+Kubernetes projection and performs no ownership, provider, mount, or filesystem
+operation for an unconfigured historical parent, while every reserving,
+fenced, non-terminal, or otherwise invalid reference still fails closed. The
 exact after-attach/before-claim state remains a deterministic recovery gate.
 Promotion remains blocked until the next exact candidate has concrete Linux,
 kind, CSI, Helm, Kapsule, and final-cleanup evidence.

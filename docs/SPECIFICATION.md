@@ -375,9 +375,41 @@ controller Pod with a run-owned standard NetworkPolicy, proves the Lease stops
 renewing while its holder remains unchanged, and only then freezes the process.
 It also journals the exact Kapsule root SBS volume before the failure. After
 the Kapsule replacement request and exact File Storage detach proof, it may
-delete only the revalidated stopped, run-owned, deleting-node Instance and then
-its exact detached root volume. These qualification actions never affect the
-release chart or CSI runtime.
+fully power off only the revalidated `stopped in place`, run-owned,
+deleting-node Instance, authoritatively observe it as stopped, archived, or
+absent, delete that exact Instance, and then delete its exact detached root
+volume. This retirement poweroff occurs after the abrupt failure and
+fail-closed evidence; it cannot replace the `stop_in_place` fault injection.
+These qualification actions never affect the release chart or CSI runtime.
+
+RC29 passed candidate artifact/install admission, the complete N/N-1 path,
+real `virtiofs`, `SINGLE_NODE_WRITER`, exactly 100 bound PVCs, and a 20-minute
+checksum soak with 4,862 writes, 5,249 reads, and zero checksum failures across
+controller and node-plugin restarts. It also completed fresh-parent bootstrap,
+foreign-attachment fencing, parent growth, normal node drain, abrupt
+controller failure, and replacement-node data access. The offline
+parent-decommission scenario then removed all workload references, completed
+the audited detach, preserved the required permanent non-reserving tombstones,
+and removed only the second parent from values. On restart, the read-only
+inventory correctly classified a detailed `Deleted` allocation as historical,
+but the following lifecycle pass incorrectly dispatched it to delete recovery.
+That recovery attempted to load its compact ownership peer by mounting the
+deliberately unconfigured historical parent and kept the controller
+non-serving. It did not reattach or mutate that parent. This is a CSI runtime
+defect, not a qualification-harness failure; RC29 is superseded and must not be
+promoted. Its exact run-owned resources remain retained pending audited
+cleanup, so no final-absence evidence is claimed.
+
+The corrected lifecycle reconciler freezes the configured-parent set at
+construction. For an unconfigured parent it independently revalidates the
+detailed allocation's schema-defined compact projection, including terminal
+`Deleted` state, `reservesCapacity: false`, complete delete or GC evidence, and
+an empty published-node fence set. It then counts the record as historical and
+performs no ownership read, delete/GC dispatch, provider call, mount, capacity
+operation, or filesystem mutation. Configured-parent detailed tombstones still
+resume their exact forward-only ownership transition. Every other detailed
+reference to an unconfigured parent remains a fail-closed reconciliation
+error. Focused tests prove all three boundaries.
 
 No candidate is a production support claim until every Linux, kind, CSI, Helm,
 real Kapsule, and final-cleanup qualification gate passes.
@@ -4736,9 +4768,15 @@ through the GC state machine; stable `Archived`/`Retained` pairs restore the
 fence union and validate complete terminal evidence. Detailed GC and delete
 repair paths never substitute for one another. `compactDeleted` and
 `deletedUnknown` records cause no per-record follow-up API or filesystem read in
-this pass; their pairing/absence contract was already established by the
-inventory phase. Any first conflict stops startup serving and later records are
-not opportunistically mutated.
+this pass. A detailed, non-reserving and unfenced `Deleted` tombstone whose
+parent is no longer configured is likewise historical: the pass revalidates its
+schema-defined non-authorizing Kubernetes projection, counts it for audit, and
+must not dispatch delete or GC reconciliation, read ownership, attach, mount,
+or mutate its offline parent. Configured-parent detailed tombstones still
+complete only their exact forward crash window. Any other detailed record that
+references an unconfigured parent fails closed. These pairing and absence
+contracts were already established by the inventory phase. Any first conflict
+stops startup serving and later records are not opportunistically mutated.
 
 The inventory phase itself is read-only and validates the complete set before
 the first recovery write. Every configured parent has exactly one matching
@@ -6805,8 +6843,29 @@ Kapsule matrix must:
     Block API to reference that run-owned Kapsule Instance. If Kapsule leaves
     the stopped node in `deleting`, the harness may, only after both parents
     are conclusively detached, revalidate the exact cluster/pool/node/server
-    tags and stopped state, delete that exact Instance, wait for the journaled
-    root volume to become reference-free, and delete that exact root volume;
+    tags and stopped state, request `poweroff` when the server remains
+    `stopped in place`, and authoritatively observe that exact server as
+    stopped, provider-archived, or absent before deletion. A concurrent
+    Kapsule archive or deletion is acceptable only after the same immutable
+    identity checks. This retirement transition is not abrupt-failure
+    evidence. The harness must then wait for the journaled root volume to
+    become reference-free and delete that exact root volume. The harness must
+    not depend on `DeleteNode(replace=true)` to preserve the desired pool size:
+    live Kapsule qualification showed that direct retirement of a
+    `stop_in_place` Instance can leave that request successfully converged at
+    `N-1`. It must instead delete the exact stopped Kapsule node without an
+    implicit replacement, complete the exact Instance and root-volume
+    retirement, wait for the run-owned pool to settle at either the planned
+    size or exactly `N-1`, validate its immutable pool ID, cluster ID, run tag,
+    name, region, Instance type, and disabled autoscaling/autohealing, and
+    explicitly restore only that pool to the original planned size before
+    takeover approval. A retry may treat an already-restored planned size as
+    success. A lost update response is successful only when a bounded
+    authoritative read of that same exact pool proves the planned size. The
+    later replacement proof still requires the old node absent, exactly the
+    planned node count, one distinct new Ready node, matching CSINode and
+    node-plugin generations, release-compatible live Instance capabilities,
+    and successful data access on that new node;
     the structured proof retains that root-volume ID, the stable Lease
     `resourceVersion`, `renewTime`, `leaseDurationSeconds`, stable driver
     restart count, and measured blocked duration. The base-profile controller
@@ -6897,7 +6956,8 @@ detach, cleanup must re-read the exact Kapsule cluster/pool/node/provider-ID
 relationship. A missing Kapsule node permits automatic continuation only after
 the exact old Instance is conclusively absent and the regional attachment view
 also reports absence. An interrupted cleanup may then fence and replace only
-the journaled run-owned Instance and Kapsule node, remove only the exact
+the journaled run-owned Instance and Kapsule node, fully power off a retained
+`stopped in place` Instance before exact-ID deletion, remove only the exact
 detached journaled root volume, and admit only an approval bound to the
 original Lease evidence. Missing, foreign, attached, or ambiguous identity
 leaves the journal and resources intact for operator recovery.

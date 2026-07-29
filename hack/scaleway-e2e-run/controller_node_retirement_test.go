@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	blockapi "github.com/scaleway/scaleway-sdk-go/api/block/v1alpha1"
@@ -10,6 +12,34 @@ import (
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
 )
+
+type fakeControllerRetirementInstanceAPI struct {
+	actionErr       error
+	getResponse     *instanceapi.GetServerResponse
+	getErr          error
+	actionCalls     int
+	requestedZone   scw.Zone
+	requestedID     string
+	requestedAction instanceapi.ServerAction
+}
+
+func (api *fakeControllerRetirementInstanceAPI) ServerActionAndWait(
+	request *instanceapi.ServerActionAndWaitRequest,
+	_ ...scw.RequestOption,
+) error {
+	api.actionCalls++
+	api.requestedZone = request.Zone
+	api.requestedID = request.ServerID
+	api.requestedAction = request.Action
+	return api.actionErr
+}
+
+func (api *fakeControllerRetirementInstanceAPI) GetServer(
+	_ *instanceapi.GetServerRequest,
+	_ ...scw.RequestOption,
+) (*instanceapi.GetServerResponse, error) {
+	return api.getResponse, api.getErr
+}
 
 func controllerRetirementFixture() (e2eplan.Plan, controllerRecoveryJournal, *instanceapi.Server, *blockapi.Volume) {
 	plan := e2eplan.Plan{
@@ -67,6 +97,108 @@ func TestControllerNodeRetirementRequiresExactStoppedRunOwnedServerAndRoot(t *te
 	foreign.Tags = []string{plan.OwnershipTag, "kapsule=" + journal.ClusterID, "pool=" + journal.PoolID}
 	if _, err := validateControllerNodeServer(&foreign, plan, journal, true); err == nil {
 		t.Fatal("controller Instance without exact Kapsule node tag was accepted")
+	}
+}
+
+func TestPrepareControllerInstanceForDeletionPowersOffStoppedInPlaceServer(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	poweredOff := *server
+	poweredOff.State = instanceapi.ServerStateStopped
+	api := &fakeControllerRetirementInstanceAPI{
+		getResponse: &instanceapi.GetServerResponse{Server: &poweredOff},
+	}
+
+	absent, err := prepareControllerInstanceForDeletion(context.Background(), api, plan, journal, server)
+	if err != nil {
+		t.Fatalf("prepare stopped-in-place controller Instance: %v", err)
+	}
+	if absent {
+		t.Fatal("powered-off controller Instance reported absent")
+	}
+	if api.actionCalls != 1 || api.requestedZone != scw.Zone(journal.OldZone) ||
+		api.requestedID != journal.OldServerID || api.requestedAction != instanceapi.ServerActionPoweroff {
+		t.Fatalf("poweroff request = calls:%d zone:%q id:%q action:%q",
+			api.actionCalls, api.requestedZone, api.requestedID, api.requestedAction)
+	}
+}
+
+func TestPrepareControllerInstanceForDeletionAcceptsConcurrentProviderRetirement(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	notFound := fmt.Errorf("provider read: %w", &scw.ResourceNotFoundError{
+		Resource:   "instance_server",
+		ResourceID: journal.OldServerID,
+	})
+	api := &fakeControllerRetirementInstanceAPI{
+		actionErr: errors.New("poweroff response lost"),
+		getErr:    notFound,
+	}
+
+	absent, err := prepareControllerInstanceForDeletion(context.Background(), api, plan, journal, server)
+	if err != nil {
+		t.Fatalf("concurrent exact Instance deletion: %v", err)
+	}
+	if !absent {
+		t.Fatal("concurrently deleted controller Instance reported present")
+	}
+}
+
+func TestPrepareControllerInstanceForDeletionResolvesLostPoweroffResponse(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	poweredOff := *server
+	poweredOff.State = instanceapi.ServerStateStopped
+	api := &fakeControllerRetirementInstanceAPI{
+		actionErr:   errors.New("poweroff response lost"),
+		getResponse: &instanceapi.GetServerResponse{Server: &poweredOff},
+	}
+
+	absent, err := prepareControllerInstanceForDeletion(context.Background(), api, plan, journal, server)
+	if err != nil || absent {
+		t.Fatalf("committed poweroff with lost response = absent:%t error:%v", absent, err)
+	}
+}
+
+func TestPrepareControllerInstanceForDeletionRejectsIncompleteOrForeignPoweroff(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	stillStoppedInPlace := *server
+	foreign := *server
+	foreign.Tags = []string{plan.OwnershipTag, "kapsule=" + journal.ClusterID, "pool=" + journal.PoolID}
+	tests := []struct {
+		name     string
+		response *instanceapi.Server
+	}{
+		{name: "still stopped in place", response: &stillStoppedInPlace},
+		{name: "foreign identity", response: &foreign},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeControllerRetirementInstanceAPI{
+				getResponse: &instanceapi.GetServerResponse{Server: test.response},
+			}
+			if _, err := prepareControllerInstanceForDeletion(context.Background(), api, plan, journal, server); err == nil {
+				t.Fatal("unsafe post-poweroff state was accepted")
+			}
+		})
+	}
+}
+
+func TestPrepareControllerInstanceForDeletionIsIdempotentAfterPoweroffOrArchive(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	for _, state := range []instanceapi.ServerState{
+		instanceapi.ServerStateStopped,
+		controllerInstanceArchivedState,
+	} {
+		t.Run(state.String(), func(t *testing.T) {
+			existing := *server
+			existing.State = state
+			api := &fakeControllerRetirementInstanceAPI{}
+			absent, err := prepareControllerInstanceForDeletion(context.Background(), api, plan, journal, &existing)
+			if err != nil || absent {
+				t.Fatalf("idempotent retirement state %q = absent:%t error:%v", state, absent, err)
+			}
+			if api.actionCalls != 0 {
+				t.Fatalf("idempotent retirement state %q requested poweroff", state)
+			}
+		})
 	}
 }
 

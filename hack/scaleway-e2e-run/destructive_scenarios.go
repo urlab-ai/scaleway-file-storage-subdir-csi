@@ -442,16 +442,21 @@ func (backend *scalewayBackend) controllerHardFailureScenario(
 			return proof, replacement, fmt.Errorf("fence old controller from parent %s: %w", parentID, err)
 		}
 	}
-	// Start the exact Kapsule replacement after the stopped Instance is detached
-	// but before approval. This prevents pool auto-healing from racing a later
-	// replacement request, while the successor still remains non-serving behind
-	// the uncleared Lease.
-	if _, err := backend.kubernetes.DeleteNode(&k8sapi.DeleteNodeRequest{
-		Region: scw.Region(plan.Region), NodeID: oldKapsuleNode.ID, Replace: true,
-	}, scw.WithContext(ctx)); err != nil {
-		return proof, replacement, fmt.Errorf("replace exact stopped Kapsule node: %w", err)
+	// Delete the exact stopped node without relying on Kapsule's replace query.
+	// Live qualification showed that direct retirement of a stop_in_place
+	// Instance can still leave the pool converged at N-1 despite replace=true.
+	// The explicit, identity-checked size restoration below is the sole
+	// replacement request and therefore cannot race an implicit replacement.
+	if err := backend.ensureStoppedKapsuleNodeReplacement(ctx, plan, recoveryJournal); err != nil {
+		return proof, replacement, err
 	}
 	if err := backend.retireStoppedKapsuleInstance(ctx, plan, recoveryJournal); err != nil {
+		return proof, replacement, err
+	}
+	// Start the exact Kapsule replacement after the stopped Instance and root
+	// volume are absent but before approval, while the successor remains
+	// non-serving behind the uncleared Lease.
+	if err := backend.restorePlannedKapsulePoolSize(ctx, plan, clusterID, poolID); err != nil {
 		return proof, replacement, err
 	}
 	if err := backend.assertControllerStillBlocked(

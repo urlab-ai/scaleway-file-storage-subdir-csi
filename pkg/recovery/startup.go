@@ -131,8 +131,15 @@ func BuildStartupInventoryPlan(snapshot StartupInventorySnapshot) (StartupInvent
 			plan.PairedAllocationIDs = append(plan.PairedAllocationIDs, logicalID)
 		case *volume.DetailedAllocationRecord:
 			if _, parentConfigured := configured[record.ParentFilesystemID]; !parentConfigured {
-				if record.State != volume.StateDeleted || record.ReservesCapacity || ownershipPresent || pvPresent {
+				// A historical detailed tombstone is deliberately verified
+				// only from its non-authorizing Kubernetes projection. The
+				// decommissioned parent must never be remounted to retrieve
+				// its already-validated compact ownership peer.
+				if ownershipPresent || pvPresent {
 					return StartupInventoryPlan{}, fmt.Errorf("detailed allocation %q references unconfigured parent outside completed decommission contract", logicalID)
+				}
+				if _, err := volume.CompactDeletedProjection(record); err != nil {
+					return StartupInventoryPlan{}, fmt.Errorf("historical detailed allocation %q: %w", logicalID, err)
 				}
 				plan.HistoricalTombstoneIDs = append(plan.HistoricalTombstoneIDs, logicalID)
 				continue
