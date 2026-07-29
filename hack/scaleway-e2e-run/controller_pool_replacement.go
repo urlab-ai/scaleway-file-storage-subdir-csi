@@ -100,7 +100,7 @@ func validateReplacementPool(
 	allowedSizes ...uint32,
 ) error {
 	if pool == nil {
-		return fmt.Errorf("Kapsule replacement pool response is empty")
+		return fmt.Errorf("kapsule replacement pool response is empty")
 	}
 	if pool.ID != poolID ||
 		pool.ClusterID != clusterID ||
@@ -110,10 +110,10 @@ func validateReplacementPool(
 		pool.Autoscaling ||
 		pool.Autohealing ||
 		!slices.Contains(pool.Tags, plan.OwnershipTag) {
-		return fmt.Errorf("Kapsule replacement pool identity differs from the exact run plan")
+		return fmt.Errorf("kapsule replacement pool identity differs from the exact run plan")
 	}
 	if !slices.Contains(allowedSizes, pool.Size) {
-		return fmt.Errorf("Kapsule replacement pool size is %d, want one of %v", pool.Size, allowedSizes)
+		return fmt.Errorf("kapsule replacement pool size is %d, want one of %v", pool.Size, allowedSizes)
 	}
 	return nil
 }
