@@ -275,6 +275,101 @@ func TestLifecycleCrashReconcilerSkipsOnlyHistoricalDetailedTombstones(t *testin
 	}
 }
 
+func TestLifecycleCrashReconcilerKeepsHistoricalGCTombstoneInert(t *testing.T) {
+	harness := newGCHarness(t, "execute")
+	if _, err := harness.controller.Reconcile(context.Background(), harness.logicalID); err != nil {
+		t.Fatalf("GC Reconcile() error = %v", err)
+	}
+	stored, err := harness.allocations.Get(context.Background(), harness.logicalID)
+	if err != nil {
+		t.Fatalf("Get(GC tombstone) error = %v", err)
+	}
+	record := stored.Record.(*volume.DetailedAllocationRecord)
+	if _, err := volume.CompactDeletedProjection(record); err != nil {
+		t.Fatalf("GC tombstone projection error = %v", err)
+	}
+
+	create := &fakeExistingCreationReconciler{}
+	fences := &fakeExistingFenceReconciler{}
+	deletion := &fakeExistingDeletionReconciler{}
+	gc := &fakeExistingGCReconciler{}
+	reconciler, err := NewLifecycleCrashReconciler(
+		&fakeStartupAllocationLister{stored: []k8s.StoredAllocation{stored}},
+		create, fences, deletion, gc,
+		[]string{"44444444-4444-4444-8444-444444444444"},
+	)
+	if err != nil {
+		t.Fatalf("NewLifecycleCrashReconciler() error = %v", err)
+	}
+	summary, err := reconciler.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile(historical GC tombstone) error = %v", err)
+	}
+	if summary.HistoricalDetailedTombstones != 1 || summary.GCResumes != 0 {
+		t.Fatalf("historical GC reconciliation summary = %#v", summary)
+	}
+	if len(create.calls)+len(fences.calls)+len(deletion.calls)+len(gc.calls) != 0 {
+		t.Fatalf("historical GC tombstone triggered repair: create=%#v fences=%#v delete=%#v gc=%#v", create.calls, fences.calls, deletion.calls, gc.calls)
+	}
+
+	configuredGC := &fakeExistingGCReconciler{}
+	reconciler, err = NewLifecycleCrashReconciler(
+		&fakeStartupAllocationLister{stored: []k8s.StoredAllocation{stored}},
+		create, fences, deletion, configuredGC,
+		[]string{record.ParentFilesystemID},
+	)
+	if err != nil {
+		t.Fatalf("NewLifecycleCrashReconciler(configured GC tombstone) error = %v", err)
+	}
+	summary, err = reconciler.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile(configured GC tombstone) error = %v", err)
+	}
+	if summary.GCResumes != 1 || summary.HistoricalDetailedTombstones != 0 || len(configuredGC.calls) != 1 {
+		t.Fatalf("configured GC tombstone reconciliation = summary %#v calls %#v", summary, configuredGC.calls)
+	}
+}
+
+func TestLifecycleCrashReconcilerRejectsFencedHistoricalTombstoneWithoutRepair(t *testing.T) {
+	request := validCreateRequest()
+	request.Parameters.DeletePolicy = volume.DeletePolicyDelete
+	harness := newDeleteHarness(t, request)
+	if err := harness.controller.Delete(context.Background(), harness.response.VolumeHandle); err != nil {
+		t.Fatalf("Delete(fenced historical fixture) error = %v", err)
+	}
+	stored, err := harness.allocations.Get(context.Background(), harness.allocation.LogicalVolumeID)
+	if err != nil {
+		t.Fatalf("Get(fenced historical fixture) error = %v", err)
+	}
+	record := cloneDetailedAllocation(stored.Record.(*volume.DetailedAllocationRecord))
+	record.PublishedNodeIDs = []string{"fr-par-1/11111111-1111-4111-8111-111111111111"}
+	record.RecordRevision++
+	if err := record.Validate(); err != nil {
+		t.Fatalf("fenced historical fixture Validate() error = %v", err)
+	}
+
+	create := &fakeExistingCreationReconciler{}
+	fences := &fakeExistingFenceReconciler{}
+	deletion := &fakeExistingDeletionReconciler{}
+	gc := &fakeExistingGCReconciler{}
+	reconciler, err := NewLifecycleCrashReconciler(
+		&fakeStartupAllocationLister{stored: []k8s.StoredAllocation{{
+			Record: record, ResourceVersion: "fenced-historical-rv",
+		}}},
+		create, fences, deletion, gc,
+		[]string{"44444444-4444-4444-8444-444444444444"},
+	)
+	if err != nil {
+		t.Fatalf("NewLifecycleCrashReconciler() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("Reconcile(fenced historical tombstone) error = nil")
+	}
+	if len(create.calls)+len(fences.calls)+len(deletion.calls)+len(gc.calls) != 0 {
+		t.Fatalf("fenced historical tombstone triggered repair: create=%#v fences=%#v delete=%#v gc=%#v", create.calls, fences.calls, deletion.calls, gc.calls)
+	}
+}
+
 func TestNewLifecycleCrashReconcilerRejectsInvalidConfiguredParents(t *testing.T) {
 	dependencies := func(parentIDs []string) error {
 		_, err := NewLifecycleCrashReconciler(
