@@ -212,7 +212,7 @@ func Build(request Request) (Plan, error) {
 			"replace that exact stopped run-owned Kapsule node during compatibility revalidation",
 			"fully power off and delete the exact stopped run-owned controller Kapsule Instance and its journaled root volume after replacement fencing",
 			"delete and recreate the dedicated run-owned driver namespace for checkpoint recovery",
-			"scale the exact run-owned Kapsule node pool to zero and restore its planned size for checkpoint fencing",
+			"stop each exact pre-recovery Kapsule Instance, detach its parents, delete its node without implicit replacement, directly retire its journaled Instance and root volume if needed, and restore the pool between deletions",
 			"decommission, detach, and remove the second run-owned parent from the driver configuration",
 			"stop or delete only disposable run-owned Instances for recovery fencing",
 			"add the fresh second parent and restart the controller after its ownership claim is complete",

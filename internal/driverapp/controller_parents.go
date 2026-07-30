@@ -457,6 +457,39 @@ func (access *controllerParentAccess) ensureAttached(ctx context.Context, parent
 	})
 }
 
+// ensureProvisionalRecoveryAttached is the only attachment path that does not
+// require node-plugin Pod and CSINode rollout evidence. Its live capability
+// proves the exact provisional Lease holder, and its singleton Kubernetes and
+// provider authorization cannot escape into ordinary CSI publish state.
+func (access *controllerParentAccess) ensureProvisionalRecoveryAttached(ctx context.Context, parentID string, authorization provisionalRecoveryAuthorization) error {
+	if _, configured := access.configuredParents[parentID]; !configured {
+		return fmt.Errorf("parent %q is not configured", parentID)
+	}
+	lockKey := access.localNodeID + "\x00" + parentID
+	unlock, err := access.attachmentLocks.Lock(ctx, lockKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	target, known, eligible, err := access.authorizations.provisionalRecoveryTarget(ctx, authorization)
+	if err != nil {
+		return fmt.Errorf("authorize provisional recovery attachment: %w", err)
+	}
+	if target.Zone+"/"+target.ServerID != access.localNodeID {
+		return fmt.Errorf("provisional recovery target differs from local controller Instance")
+	}
+	// AttachmentManager performs fresh complete File Storage and Instance reads,
+	// rejects every attachment outside the singleton local authorization, and
+	// applies the same type, state, exclusivity, and capacity checks as the
+	// normal path before issuing at most one attach.
+	return access.attachments.EnsureAttached(ctx, scaleway.AttachRequest{
+		Region: access.region, ProjectID: access.projectID, FilesystemID: parentID,
+		Target: target, ConfiguredParentIDs: cloneSet(access.configuredParents),
+		KnownInstances: known, EligibleInstanceIDs: eligible,
+		QualifiedCommercialTypes: cloneSet(access.qualifiedTypes),
+	})
+}
+
 // EnsureMounted implements parentfs.MountedParentAccess. The attachment lock
 // serializes same-parent mount check-and-act after the enclosing global and
 // per-volume/pool locks; no code path acquires those outer locks from here.
@@ -464,6 +497,19 @@ func (access *controllerParentAccess) EnsureMounted(ctx context.Context, parentI
 	if err := access.ensureAttached(ctx, parentID, access.localNodeID); err != nil {
 		return "", err
 	}
+	return access.ensureMountedAfterAttach(ctx, parentID)
+}
+
+// EnsureProvisionalRecoveryMounted attaches and mounts one parent only through
+// the exact active provisional recovery capability.
+func (access *controllerParentAccess) EnsureProvisionalRecoveryMounted(ctx context.Context, parentID string, authorization provisionalRecoveryAuthorization) (string, error) {
+	if err := access.ensureProvisionalRecoveryAttached(ctx, parentID, authorization); err != nil {
+		return "", err
+	}
+	return access.ensureMountedAfterAttach(ctx, parentID)
+}
+
+func (access *controllerParentAccess) ensureMountedAfterAttach(ctx context.Context, parentID string) (string, error) {
 	target := path.Join(access.parentRoot, parentID)
 	// The attachment operation released its keyed lock after provider
 	// readiness. A second key section serializes the kernel mount check itself.

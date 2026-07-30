@@ -363,7 +363,8 @@ func TestCheckpointAndMissingLeaseProofsRequireCompleteRecoveryFence(t *testing.
 		PersistentVolumeName: "pv-checkpoint", OldInstanceIDs: slices.Clone(oldInstances), ReplacementInstanceIDs: slices.Clone(replacements),
 		PrepareCompleted: true, ControllerQuiesced: true, DriverNamespaceDeleted: true, DriverNamespaceRecreated: true,
 		PersistentVolumePreserved: true, RestoreDryRunCompleted: true, RestoreExecuteCompleted: true,
-		CheckpointSecretImmutable: true, CheckpointSecretDeletedAfterAudit: true, OldPoolScaledToZero: true, AllOldInstancesAbsent: true,
+		CheckpointSecretImmutable: true, CheckpointSecretDeletedAfterAudit: true,
+		WorkloadStoppedBeforeNamespaceDeletion: true, OldInstancesReplacedSequentially: true, AllOldInstancesAbsent: true,
 		PoolRestoredWithFreshInstances: true, ExistingMarkerReadAfterRecovery: true, NewProvisioningSucceeded: true,
 		ArchiveLifecycleVerified: true, DeleteLifecycleVerified: true, TombstoneInventoryVerified: true,
 		ExternalWorkloadCleanupCompleted: true,
@@ -371,6 +372,11 @@ func TestCheckpointAndMissingLeaseProofsRequireCompleteRecoveryFence(t *testing.
 	if err := checkpoint.Validate(); err != nil {
 		t.Fatalf("checkpoint Validate() error = %v", err)
 	}
+	checkpoint.WorkloadStoppedBeforeNamespaceDeletion = false
+	if err := checkpoint.Validate(); err == nil {
+		t.Fatal("checkpoint Validate(live workload at namespace deletion) error = nil")
+	}
+	checkpoint.WorkloadStoppedBeforeNamespaceDeletion = true
 	checkpoint.ReplacementInstanceIDs[0] = checkpoint.OldInstanceIDs[0]
 	if err := checkpoint.Validate(); err == nil {
 		t.Fatal("checkpoint Validate(reused Instance) error = nil")

@@ -271,8 +271,8 @@ func controllerParentFixture(t *testing.T) (config.Loaded, *scaleway.FakeAPI, *s
 		}},
 	}}
 	inventory := &staticNodeInventory{observations: []k8s.NodeInventoryObservation{
-		{NodeName: "worker-a", CSINodeID: eligibleNodeID, OperatingSystem: "linux", Schedulable: true, Ready: true, PluginPodPresent: true, PluginPodReady: true, DriverRegistered: true, NodeConfigGeneration: generation},
-		{NodeName: "worker-b", CSINodeID: cordonedNodeID, OperatingSystem: "linux", Schedulable: false, Ready: true, DriverRegistered: true},
+		{NodeName: "worker-a", ProviderID: "scaleway://instance/" + eligibleNodeID, CSINodeID: eligibleNodeID, OperatingSystem: "linux", Schedulable: true, Ready: true, PluginPodPresent: true, PluginPodReady: true, DriverRegistered: true, NodeConfigGeneration: generation},
+		{NodeName: "worker-b", ProviderID: "scaleway://instance/" + cordonedNodeID, CSINodeID: cordonedNodeID, OperatingSystem: "linux", Schedulable: false, Ready: true, DriverRegistered: true},
 	}}
 	provider := scaleway.NewFakeAPI()
 	for _, nodeID := range []string{eligibleNodeID, cordonedNodeID} {

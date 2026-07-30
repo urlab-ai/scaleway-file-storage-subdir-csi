@@ -262,6 +262,34 @@ The same cleanup pass detaches any interrupted run-owned disposable-Instance
 attachment before safe uninstall, verifies checkpoint values/archive and
 candidate artifacts again before replay, and converges an interrupted N/N-1
 transition to one Ready candidate generation before removing workloads.
+One retained journal written by an older harness may lack the new node/root
+retirement records. Recovery arms the missing records before another mutation.
+If Scaleway has already completed one old node deletion, the runner accepts
+that entry only when the exact Instance is `NotFound`, the complete Kapsule pool
+no longer references its provider ID, and neither parent has a regional
+attachment to it. The compatibility record contains no root-volume ID and
+performs no stop, detach, Instance deletion, or root deletion for that entry.
+Any ambiguity fails closed. New journals never use this compatibility state:
+they always retain the exact node, Instance, and root identities before the
+first provider mutation.
+
+When developing the harness itself, a previously approved retained
+release-candidate run can test the remaining costly phases independently:
+
+```bash
+go run ./hack/scaleway-e2e-run \
+  --input=/absolute/path/execution-request.json \
+  --diagnostic-phase=destructive \
+  --confirm-run-id=11111111-1111-4111-8111-111111111111
+```
+
+Run the four values in order: `destructive`, `mid`, `recovery`, then `post`.
+This mode never creates a cluster and every result explicitly says
+`releaseQualified=false`. It first revalidates the exact candidate, retained
+inventory and ownership, restores only journaled interrupted transitions, and
+requires the preceding diagnostic result before advancing. Use it to avoid
+replaying the 20-minute soak while diagnosing later scenarios; it never
+replaces the one final complete release-candidate qualification run.
 
 Dry-run is the default and never loads credentials. The live form creates only
 the request's tagged resources, creates and journals a run-owned Private
@@ -467,11 +495,30 @@ or parent filesystem.
 Then install or retain the release with only the controller starting into its
 provisional non-serving recovery path. Stop/delete every pre-recovery Instance,
 prove parent claims match the current cluster, and prove only the new
-provisional Instance appears in complete attachment inventories. Create the
-checkpoint-bound `missing-lease-recovery` approval with
-`all-pre-recovery-instances` scope. Stop/drain provisional renewal, repeat fresh
-fencing, consume approval in the promotion CAS, and reconcile every mapping
-before serving. Delete the consumed approval and in-cluster checkpoint Secrets
+provisional Instance appears in complete attachment inventories. The real-E2E
+runner first scales its exact external checkpoint workload to zero while the
+full CSI release is still available, and requires the same Bound PVC/PV plus no
+Pod or `VolumeAttachment` before deleting the driver namespace. It journals
+each old Kapsule node, Instance, and root-volume ID before provider mutation.
+For a two-node Kapsule pool, do not request a zero-node pool: keep another exact
+Ready node, stop and detach one journaled old Instance, delete its Kapsule node
+without implicit replacement, and restore the pool to two fresh Ready nodes
+before repeating for the other old node. If Kapsule leaves a node `deleting`,
+the runner may directly retire only that ownership-validated, pre-journaled
+Instance and root volume through the same exact recovery path used by the
+controller-failure scenario. Prove every old Instance, root volume, and File
+Storage attachment absent before continuing. Create the checkpoint-bound
+`missing-lease-recovery` approval with
+`all-pre-recovery-instances` scope while the node DaemonSet is still absent.
+Immediately restore the full Helm release after creating that immutable
+approval. The controller may consume the approval before the node DaemonSet has
+converged; it remains non-serving and waits, up to the configured
+attach-readiness deadline, for the ordinary Ready node-plugin, CSINode, and
+configuration-generation evidence. Stop/drain provisional renewal, repeat
+fresh fencing, consume approval in the promotion CAS, and reconcile every
+mapping only after that normal node authorization succeeds. A provider,
+identity, attachment, or capacity safety failure is not retried as rollout
+convergence. Delete the consumed approval and in-cluster checkpoint Secrets
 only after successful retained audit; keep the external archive. V1 never
 authorizes a different cluster UID.
 

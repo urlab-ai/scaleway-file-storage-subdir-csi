@@ -558,6 +558,7 @@ func buildControllerRuntime(
 	if err != nil {
 		return nil, err
 	}
+	approvedMissingLeaseRecovery := false
 	if !acquired.MutationAllowed {
 		provisionalDrained := false
 		discovery, err := newFreshInstallationDiscovery(
@@ -572,7 +573,16 @@ func buildControllerRuntime(
 			if acquired.Session.Context().Err() != nil {
 				return nil, fmt.Errorf("promote fresh controller installation after provisional session stopped: %w", err)
 			}
-			if recoveryErr := bootstrap.DiscoverExistingReadOnly(coldStartCtx); recoveryErr != nil {
+			recoveryAuthorization, recoveryErr := newProvisionalRecoveryAuthorization(
+				acquired.Mode, acquired.MutationAllowed, acquired.Session, holder,
+			)
+			if recoveryErr != nil {
+				return nil, errors.Join(
+					fmt.Errorf("fresh installation discovery: %w", err),
+					fmt.Errorf("authorize read-only missing-Lease recovery discovery: %w", recoveryErr),
+				)
+			}
+			if recoveryErr := bootstrap.DiscoverExistingReadOnly(coldStartCtx, recoveryAuthorization); recoveryErr != nil {
 				return nil, errors.Join(
 					fmt.Errorf("fresh installation discovery: %w", err),
 					fmt.Errorf("read-only missing-Lease recovery discovery: %w", recoveryErr),
@@ -665,6 +675,13 @@ func buildControllerRuntime(
 			if recoveryErr != nil {
 				return nil, fmt.Errorf("consume missing-Lease recovery approval: %w", recoveryErr)
 			}
+			if promoted.Mode != coordination.AcquisitionApprovedRecovery || !promoted.MutationAllowed {
+				// Make the returned session visible to the existing deferred
+				// stop before rejecting an impossible runtime contract drift.
+				acquired = promoted
+				return nil, fmt.Errorf("missing-Lease recovery approval returned an unexpected acquisition mode")
+			}
+			approvedMissingLeaseRecovery = true
 		}
 		if !provisionalDrained {
 			if runErr := <-leaseRun; runErr != nil {
@@ -683,6 +700,13 @@ func buildControllerRuntime(
 		coldStartCtx, cancelColdStart, err = controllerOperationContext(ctx, promoted.Session.Context())
 		if err != nil {
 			return nil, err
+		}
+	}
+	if approvedMissingLeaseRecovery {
+		if err := authorizations.waitForOperationalNodeRollout(
+			coldStartCtx, operationClock, scaleway.RandomJitter{}, configured.Controller.AttachReadyDeadline,
+		); err != nil {
+			return nil, fmt.Errorf("wait for node-plugin rollout after missing-Lease approval: %w", err)
 		}
 	}
 	if err := acquired.Session.RequireActiveLeadership(coldStartCtx); err != nil {

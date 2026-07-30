@@ -26,16 +26,33 @@ func main() {
 		}
 		return
 	}
-	var input, confirmedRunID string
+	var input, confirmedRunID, diagnosticPhase string
 	var execute, dryRun, cleanupOnly bool
 	flags := flag.NewFlagSet("scaleway-e2e-run", flag.ContinueOnError)
 	flags.StringVar(&input, "input", "", "absolute closed execution request JSON")
 	flags.BoolVar(&dryRun, "dry-run", false, "render the non-authorizing plan (default)")
 	flags.BoolVar(&execute, "execute", false, "create and mutate the exact approved run resources")
 	flags.BoolVar(&cleanupOnly, "cleanup-only", false, "resume exact-ID cleanup for the approved run")
-	flags.StringVar(&confirmedRunID, "confirm-run-id", "", "complete approved run ID required with --execute or --cleanup-only")
-	if err := flags.Parse(os.Args[1:]); err != nil || flags.NArg() != 0 || input == "" || (dryRun && (execute || cleanupOnly)) || (execute && cleanupOnly) {
-		fmt.Fprintln(os.Stderr, "usage: scaleway-e2e-run --input=/absolute/request.json [--dry-run | --execute --confirm-run-id=<uuid> | --cleanup-only --confirm-run-id=<uuid>]")
+	flags.StringVar(&diagnosticPhase, "diagnostic-phase", "", "run one non-qualifying retained phase: destructive, mid, recovery, or post")
+	flags.StringVar(&confirmedRunID, "confirm-run-id", "", "complete approved run ID required with --execute, --cleanup-only, or --diagnostic-phase")
+	parseErr := flags.Parse(os.Args[1:])
+	liveModes := 0
+	if execute {
+		liveModes++
+	}
+	if cleanupOnly {
+		liveModes++
+	}
+	if diagnosticPhase != "" {
+		liveModes++
+	}
+	if parseErr != nil ||
+		flags.NArg() != 0 ||
+		input == "" ||
+		(dryRun && liveModes != 0) ||
+		liveModes > 1 ||
+		(diagnosticPhase != "" && !validDiagnosticPhase(diagnosticPhase)) {
+		fmt.Fprintln(os.Stderr, "usage: scaleway-e2e-run --input=/absolute/request.json [--dry-run | --execute --confirm-run-id=<uuid> | --cleanup-only --confirm-run-id=<uuid> | --diagnostic-phase=<destructive|mid|recovery|post> --confirm-run-id=<uuid>]")
 		os.Exit(2)
 	}
 	request, err := readRequest(input)
@@ -51,14 +68,14 @@ func main() {
 		fail(err)
 	}
 	fmt.Println(string(encodedPlan))
-	if !execute && !cleanupOnly {
+	if !execute && !cleanupOnly && diagnosticPhase == "" {
 		fmt.Fprintln(os.Stderr, "dry-run only: no credentials loaded and no Scaleway or Kubernetes API called")
 		return
 	}
 	if confirmedRunID != plan.RunID {
 		fail(fmt.Errorf("--confirm-run-id must equal the complete planned run ID"))
 	}
-	if execute && plan.Profile == e2eplan.ProfileReleaseCandidate {
+	if (execute || diagnosticPhase != "") && plan.Profile == e2eplan.ProfileReleaseCandidate {
 		// Fail before constructing the credentialed backend while the checked-in
 		// release matrix still contains smoke-only probes. The base profile has a
 		// separate non-qualifying evidence contract.
@@ -90,6 +107,25 @@ func main() {
 			fail(fmt.Errorf("cleanup ended without a complete exact-ID inventory"))
 		}
 		fmt.Println(plan.CleanupInventoryPath)
+		return
+	}
+	if diagnosticPhase != "" {
+		inventory, readErr := backend.readInventory()
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				fail(fmt.Errorf("refuse diagnostics without the fsynced run inventory at %q", plan.CleanupInventoryPath))
+			}
+			fail(readErr)
+		}
+		prepared, prepareErr := backend.prepareRetainedDiagnosticRun(ctx, request, plan, inventory)
+		if prepareErr != nil {
+			fail(prepareErr)
+		}
+		output, diagnosticErr := backend.runDiagnosticPhase(ctx, request, plan, prepared, diagnosticPhase)
+		if diagnosticErr != nil {
+			fail(diagnosticErr)
+		}
+		fmt.Println(output)
 		return
 	}
 	if _, err := os.Lstat(plan.CleanupInventoryPath); err == nil {

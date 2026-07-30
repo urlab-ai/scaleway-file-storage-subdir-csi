@@ -14,6 +14,7 @@ import (
 	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
@@ -894,12 +895,123 @@ func (backend *scalewayBackend) applyPVC(ctx context.Context, request e2erunner.
 }
 
 func (backend *scalewayBackend) applyMarkerPod(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, name, claim, nodeName, scenario string) error {
-	manifest := fmt.Sprintf("apiVersion: v1\nkind: Pod\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    sfs-subdir-e2e-run: %q\n    sfs-subdir-e2e-scenario: %s\nspec:\n  restartPolicy: Never\n  nodeSelector: {kubernetes.io/hostname: %q}\n  containers:\n    - name: workload\n      image: %s\n      command: [\"sh\", \"-c\", \"sleep 3600\"]\n      volumeMounts: [{name: data, mountPath: /data}]\n  volumes:\n    - name: data\n      persistentVolumeClaim: {claimName: %s}\n", name, request.DriverNamespace, plan.RunID, scenario, nodeName, request.WorkloadImage, claim)
-	if _, err := backend.kubectl(ctx, request, strings.NewReader(manifest), "apply", "-f", "-"); err != nil {
+	if err := backend.removeRetainedMarkerPod(ctx, request, plan, name, claim, scenario); err != nil {
+		return err
+	}
+	manifest := markerPodManifest(request, plan, name, claim, nodeName, scenario)
+	// Pods have immutable scheduling and volume fields. Use create after the
+	// exact retained-object cleanup instead of apply so a rerun can never turn
+	// an immutable-field conflict into a partial or ambiguous replacement.
+	if _, err := backend.kubectl(ctx, request, strings.NewReader(manifest), "create", "-f", "-"); err != nil {
 		return err
 	}
 	_, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "wait", "pod/"+name, "--for=condition=Ready", "--timeout=10m")
 	return err
+}
+
+func markerPodManifest(request e2erunner.Request, plan e2eplan.Plan, name, claim, nodeName, scenario string) string {
+	return fmt.Sprintf("apiVersion: v1\nkind: Pod\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    sfs-subdir-e2e-run: %q\n    sfs-subdir-e2e-scenario: %s\nspec:\n  automountServiceAccountToken: false\n  restartPolicy: Never\n  nodeSelector: {kubernetes.io/hostname: %q}\n  containers:\n    - name: workload\n      image: %s\n      command: [\"sh\", \"-c\", \"sleep 3600\"]\n      volumeMounts: [{name: data, mountPath: /data}]\n  volumes:\n    - name: data\n      persistentVolumeClaim: {claimName: %s}\n", name, request.DriverNamespace, plan.RunID, scenario, nodeName, request.WorkloadImage, claim)
+}
+
+// removeRetainedMarkerPod makes the destructive scenario safely restartable
+// after an earlier run retained its witness Pod for later provider proofs. It
+// refuses to delete an object unless its exact namespace, run ownership,
+// scenario, workload image, and PVC all match the closed request. Deletion is
+// additionally constrained server-side by the exact name and both ownership
+// labels; a foreign or concurrently replaced Pod therefore fails closed.
+func (backend *scalewayBackend) removeRetainedMarkerPod(
+	ctx context.Context,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	name, claim, scenario string,
+) error {
+	encoded, err := backend.kubectl(
+		ctx,
+		request,
+		nil,
+		"-n", request.DriverNamespace,
+		"get", "pod/"+name,
+		"--ignore-not-found=true",
+		"-o", "json",
+	)
+	if err != nil {
+		return fmt.Errorf("inspect retained marker Pod %q: %w", name, err)
+	}
+	if len(strings.TrimSpace(string(encoded))) == 0 {
+		return nil
+	}
+	var pod corev1.Pod
+	if err := json.Unmarshal(encoded, &pod); err != nil {
+		return fmt.Errorf("decode retained marker Pod %q: %w", name, err)
+	}
+	if err := validateRetainedMarkerPod(pod, request, plan, name, claim, scenario); err != nil {
+		return err
+	}
+	if _, err := backend.kubectl(
+		ctx,
+		request,
+		nil,
+		"-n", request.DriverNamespace,
+		"delete", "pods",
+		"--selector=sfs-subdir-e2e-run="+plan.RunID+",sfs-subdir-e2e-scenario="+scenario,
+		"--field-selector=metadata.name="+name,
+		"--wait=true",
+		"--timeout=5m",
+	); err != nil {
+		return fmt.Errorf("delete exact retained marker Pod %q: %w", name, err)
+	}
+	remaining, err := backend.kubectl(
+		ctx,
+		request,
+		nil,
+		"-n", request.DriverNamespace,
+		"get", "pod/"+name,
+		"--ignore-not-found=true",
+		"-o", "json",
+	)
+	if err != nil {
+		return fmt.Errorf("prove retained marker Pod %q deletion: %w", name, err)
+	}
+	if len(strings.TrimSpace(string(remaining))) != 0 {
+		return fmt.Errorf("retained marker Pod %q still exists or was concurrently replaced", name)
+	}
+	return nil
+}
+
+func validateRetainedMarkerPod(
+	pod corev1.Pod,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	name, claim, scenario string,
+) error {
+	if pod.Name != name ||
+		pod.Namespace != request.DriverNamespace ||
+		pod.UID == "" ||
+		pod.Labels["sfs-subdir-e2e-run"] != plan.RunID ||
+		pod.Labels["sfs-subdir-e2e-scenario"] != scenario {
+		return fmt.Errorf("retained marker Pod %q differs from the exact run ownership", name)
+	}
+	if len(pod.Spec.NodeSelector) != 1 || pod.Spec.NodeSelector["kubernetes.io/hostname"] == "" {
+		return fmt.Errorf("retained marker Pod %q has an unexpected node selector", name)
+	}
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
+		len(pod.Spec.Containers) != 1 ||
+		pod.Spec.Containers[0].Name != "workload" ||
+		pod.Spec.Containers[0].Image != request.WorkloadImage {
+		return fmt.Errorf("retained marker Pod %q has an unexpected workload", name)
+	}
+	matchingClaims := 0
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == "data" &&
+			volume.PersistentVolumeClaim != nil &&
+			volume.PersistentVolumeClaim.ClaimName == claim {
+			matchingClaims++
+		}
+	}
+	if matchingClaims != 1 {
+		return fmt.Errorf("retained marker Pod %q differs from the exact PVC", name)
+	}
+	return nil
 }
 
 func (backend *scalewayBackend) applyReadMarkerPod(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, name, claim, nodeName, scenario string) error {

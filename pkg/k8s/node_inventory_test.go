@@ -11,12 +11,13 @@ import (
 )
 
 const (
-	inventoryDriver  = "file-storage-subdir.csi.urlab.ai"
-	inventoryNodeID  = "fr-par-1/11111111-1111-4111-8111-111111111111"
-	inventoryNode    = "worker-a"
-	inventoryNS      = "scaleway-sfs-subdir-csi"
-	inventoryApp     = "scaleway-sfs-subdir-csi"
-	inventoryRelease = "driver-release"
+	inventoryDriver   = "file-storage-subdir.csi.urlab.ai"
+	inventoryNodeID   = "fr-par-1/11111111-1111-4111-8111-111111111111"
+	inventoryNode     = "worker-a"
+	inventoryNS       = "scaleway-sfs-subdir-csi"
+	inventoryApp      = "scaleway-sfs-subdir-csi"
+	inventoryRelease  = "driver-release"
+	inventoryProvider = "scaleway://instance/" + inventoryNodeID
 )
 
 func TestClientGoNodeInventoryJoinsExactNodeCSINodeAndPod(t *testing.T) {
@@ -33,7 +34,7 @@ func TestClientGoNodeInventoryJoinsExactNodeCSINodeAndPod(t *testing.T) {
 		t.Fatalf("observations = %#v", observations)
 	}
 	got := observations[0]
-	if got.NodeName != inventoryNode || got.CSINodeID != inventoryNodeID || !got.Ready || !got.Schedulable || !got.PluginPodReady || !got.DriverRegistered || got.NodeConfigGeneration != "generation" || got.FailureDomain != "fr-par-1" {
+	if got.NodeName != inventoryNode || got.ProviderID != inventoryProvider || got.CSINodeID != inventoryNodeID || !got.Ready || !got.Schedulable || !got.PluginPodReady || !got.DriverRegistered || got.NodeConfigGeneration != "generation" || got.FailureDomain != "fr-par-1" {
 		t.Fatalf("observation = %#v", got)
 	}
 }
@@ -82,6 +83,7 @@ func TestClientGoNormalNodeEvidenceRequiresReadyIdentityWithoutOutOfServiceTaint
 func inventoryNodeObject() *corev1.Node {
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: inventoryNode, Labels: map[string]string{standardZoneLabel: "fr-par-1"}},
+		Spec:       corev1.NodeSpec{ProviderID: inventoryProvider},
 		Status: corev1.NodeStatus{
 			NodeInfo:   corev1.NodeSystemInfo{OperatingSystem: "linux"},
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},

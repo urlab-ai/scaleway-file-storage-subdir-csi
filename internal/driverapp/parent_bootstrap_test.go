@@ -107,6 +107,13 @@ func (access *fakeParentBootstrapAccess) EnsureMounted(_ context.Context, parent
 	return access.root, nil
 }
 
+func (access *fakeParentBootstrapAccess) EnsureProvisionalRecoveryMounted(ctx context.Context, parentID string, authorization provisionalRecoveryAuthorization) (string, error) {
+	if err := authorization.validate(ctx); err != nil {
+		return "", err
+	}
+	return access.EnsureMounted(ctx, parentID)
+}
+
 type fakeParentBootstrapFilesystem struct {
 	claim        volume.ParentOwnerRecord
 	claimPresent bool
@@ -369,7 +376,8 @@ func TestParentBootstrapReadOnlyRecoveryDiscoveryNeverMutatesFilesystemOrLease(t
 	}
 	filesystem.claim, filesystem.claimPresent = claim, true
 
-	if err := manager.DiscoverExistingReadOnly(context.Background()); err != nil {
+	authorization := provisionalRecoveryAuthorizationForTest(t, manager, leadership)
+	if err := manager.DiscoverExistingReadOnly(context.Background(), authorization); err != nil {
 		t.Fatalf("DiscoverExistingReadOnly() error = %v", err)
 	}
 	if !slices.Equal(*leadership.events, []string{"mount", "read", "close"}) {
@@ -385,12 +393,45 @@ func TestParentBootstrapReadOnlyRecoveryDiscoveryNeverMutatesFilesystemOrLease(t
 
 func TestParentBootstrapReadOnlyRecoveryDiscoveryRequiresClaim(t *testing.T) {
 	manager, leadership, _, _, _, _ := parentBootstrapTestManager(t)
-	if err := manager.DiscoverExistingReadOnly(context.Background()); err == nil {
+	authorization := provisionalRecoveryAuthorizationForTest(t, manager, leadership)
+	if err := manager.DiscoverExistingReadOnly(context.Background(), authorization); err == nil {
 		t.Fatal("DiscoverExistingReadOnly(missing claim) error = nil")
 	}
 	if slices.Contains(*leadership.events, "install") || slices.Contains(*leadership.events, "layout") || slices.Contains(*leadership.events, "set") {
 		t.Fatalf("missing-claim recovery discovery mutated state: %#v", *leadership.events)
 	}
+}
+
+func provisionalRecoveryAuthorizationForTest(t *testing.T, manager *parentBootstrapManager, leadership *fakeParentBootstrapLeadership) provisionalRecoveryAuthorization {
+	t.Helper()
+	holder, err := coordination.NewHolderEvidence(
+		"77777777-7777-4777-8777-777777777777", "worker-a", manager.localNodeID,
+		manager.localTarget.ServerID, manager.localTarget.Zone, manager.installationID, manager.clusterUID,
+	)
+	if err != nil {
+		t.Fatalf("NewHolderEvidence() error = %v", err)
+	}
+	annotations, err := holder.Annotations()
+	if err != nil {
+		t.Fatalf("holder.Annotations() error = %v", err)
+	}
+	marker, err := coordination.NewDiscoveryMarker(holder, time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("NewDiscoveryMarker() error = %v", err)
+	}
+	annotations, err = coordination.ApplyDiscoveryMarker(annotations, marker, holder)
+	if err != nil {
+		t.Fatalf("ApplyDiscoveryMarker() error = %v", err)
+	}
+	leadership.snapshot.HolderIdentity = holder.PodUID
+	leadership.snapshot.Annotations = annotations
+	authorization, err := newProvisionalRecoveryAuthorization(
+		coordination.AcquisitionProvisionalRecovery, false, leadership, holder,
+	)
+	if err != nil {
+		t.Fatalf("newProvisionalRecoveryAuthorization() error = %v", err)
+	}
+	return authorization
 }
 
 func parentBootstrapTestManager(t *testing.T) (*parentBootstrapManager, *fakeParentBootstrapLeadership, *fakeParentBootstrapAccess, *fakeParentBootstrapFilesystem, *fixedBootstrapIDs, string) {

@@ -147,6 +147,11 @@ func TestCheckpointRecoveryJournalClosesEveryPhase(t *testing.T) {
 	if err := journal.validate(plan); err != nil {
 		t.Fatalf("validate(workload ready) error = %v", err)
 	}
+	journal.Phase = checkpointPhaseWorkloadStopped
+	journal.WorkloadStoppedBeforeNamespaceDeletion = true
+	if err := journal.validate(plan); err != nil {
+		t.Fatalf("validate(workload stopped) error = %v", err)
+	}
 	journal.Phase = checkpointPhasePreparing
 	journal.ValuesPath = filepath.Join(filepath.Dir(plan.CleanupInventoryPath), "checkpoint-release-values-"+plan.RunID+".yaml")
 	journal.ValuesSHA256 = "sha256:" + strings.Repeat("c", 64)
@@ -156,8 +161,33 @@ func TestCheckpointRecoveryJournalClosesEveryPhase(t *testing.T) {
 		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 	}
+	journal.NodeRetirements = []checkpointNodeRetirement{
+		{
+			KapsuleNodeID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+			NodeName:      "worker-a",
+			InstanceID:    journal.OldInstanceIDs[0],
+			RootVolumeID:  "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+		},
+		{
+			KapsuleNodeID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+			NodeName:      "worker-b",
+			InstanceID:    journal.OldInstanceIDs[1],
+			RootVolumeID:  "ffffffff-ffff-4fff-8fff-ffffffffffff",
+		},
+	}
 	if err := journal.validate(plan); err != nil {
 		t.Fatalf("validate(preparing) error = %v", err)
+	}
+	currentJournalWithLegacyAbsence := journal
+	currentJournalWithLegacyAbsence.NodeRetirements = append(
+		[]checkpointNodeRetirement(nil), journal.NodeRetirements...,
+	)
+	currentJournalWithLegacyAbsence.NodeRetirements[0] = checkpointNodeRetirement{
+		InstanceID:    journal.OldInstanceIDs[0],
+		AlreadyAbsent: true,
+	}
+	if err := currentJournalWithLegacyAbsence.validate(plan); err == nil {
+		t.Fatal("current checkpoint journal accepted a legacy already-absent retirement")
 	}
 	journal.Phase = checkpointPhasePrepared
 	journal.ArchiveSHA256 = "sha256:" + strings.Repeat("a", 64)
@@ -176,6 +206,7 @@ func TestCheckpointRecoveryReplayRequiresDurablyPreparedArchive(t *testing.T) {
 	for _, phase := range []string{
 		checkpointPhaseWorkloadCreating,
 		checkpointPhaseWorkloadReady,
+		checkpointPhaseWorkloadStopped,
 		checkpointPhasePreparing,
 	} {
 		if checkpointRecoveryCanReplay(phase) {
@@ -190,6 +221,136 @@ func TestCheckpointRecoveryReplayRequiresDurablyPreparedArchive(t *testing.T) {
 		if !checkpointRecoveryCanReplay(phase) {
 			t.Fatalf("checkpointRecoveryCanReplay(%q) = false after durable preparation", phase)
 		}
+	}
+}
+
+func TestCheckpointRecoveryRestoresNodePluginsImmediatelyAfterApproval(t *testing.T) {
+	tests := []struct {
+		file     string
+		function string
+	}{
+		{"checkpoint_recovery.go", "func (backend *scalewayBackend) runCheckpointRecoveryScenarios("},
+		{"checkpoint_recovery_journal.go", "func (backend *scalewayBackend) replayCheckpointForCleanup("},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			encoded, err := os.ReadFile(test.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents := string(encoded)
+			start := strings.Index(contents, test.function)
+			if start < 0 {
+				t.Fatalf("%s is missing", test.function)
+			}
+			body := contents[start:]
+			if next := strings.Index(body[len(test.function):], "\nfunc "); next >= 0 {
+				body = body[:len(test.function)+next]
+			}
+			approval := strings.Index(body, "createMissingLeaseApproval(")
+			fullRelease := strings.Index(body, "installFullRecoveredRelease(")
+			controllerReady := strings.Index(body, `"rollout", "status", "deployment"`)
+			if approval < 0 || fullRelease < 0 || controllerReady < 0 ||
+				approval >= fullRelease || fullRelease >= controllerReady {
+				t.Fatalf("recovery order must be approval, full release, then controller readiness")
+			}
+			if strings.Count(body, "installFullRecoveredRelease(") != 1 {
+				t.Fatalf("recovery must restore the full release exactly once")
+			}
+		})
+	}
+}
+
+func TestMissingLeaseApprovalRechecksNodeDaemonSetAbsenceAtCreationBoundary(t *testing.T) {
+	encoded, err := os.ReadFile("checkpoint_recovery.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, "func (backend *scalewayBackend) createMissingLeaseApproval(")
+	if start < 0 {
+		t.Fatal("createMissingLeaseApproval is missing")
+	}
+	body := contents[start:]
+	if next := strings.Index(body, "\nfunc "); next >= 0 {
+		body = body[:next]
+	}
+	absence := strings.Index(body, "requireRecoveryNodeDaemonSetAbsent(")
+	approvalIdentity := strings.Index(body, "randomUUIDv4()")
+	create := strings.Index(body, `"create", "-f", "-"`)
+	if absence < 0 || approvalIdentity < 0 || create < 0 ||
+		absence >= approvalIdentity || absence >= create {
+		t.Fatal("missing-Lease approval does not prove node DaemonSet absence immediately before creation")
+	}
+}
+
+func TestCheckpointNodeRetirementsCloseExactOldInstanceSet(t *testing.T) {
+	oldInstances := []string{
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	}
+	retirements := []checkpointNodeRetirement{
+		{
+			KapsuleNodeID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+			NodeName:      "worker-a",
+			InstanceID:    oldInstances[0],
+			RootVolumeID:  "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+		},
+		{
+			KapsuleNodeID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+			NodeName:      "worker-b",
+			InstanceID:    oldInstances[1],
+			RootVolumeID:  "ffffffff-ffff-4fff-8fff-ffffffffffff",
+		},
+	}
+	if err := validateCheckpointNodeRetirements(oldInstances, retirements); err != nil {
+		t.Fatalf("validate exact checkpoint retirement set: %v", err)
+	}
+	if err := validateCheckpointNodeRetirements(oldInstances, nil); err != nil {
+		t.Fatalf("legacy checkpoint journal without retirement records: %v", err)
+	}
+	legacyRetirements := append([]checkpointNodeRetirement(nil), retirements...)
+	legacyRetirements[0] = checkpointNodeRetirement{
+		InstanceID:    oldInstances[0],
+		AlreadyAbsent: true,
+	}
+	if err := validateCheckpointNodeRetirements(oldInstances, legacyRetirements); err != nil {
+		t.Fatalf("legacy checkpoint journal with conclusive absence: %v", err)
+	}
+	invalidLegacy := append([]checkpointNodeRetirement(nil), legacyRetirements...)
+	invalidLegacy[0].RootVolumeID = "99999999-9999-4999-8999-999999999999"
+	if err := validateCheckpointNodeRetirements(oldInstances, invalidLegacy); err == nil {
+		t.Fatal("already-absent retirement with invented root authority was accepted")
+	}
+
+	tests := map[string]func([]checkpointNodeRetirement) []checkpointNodeRetirement{
+		"missing record": func(items []checkpointNodeRetirement) []checkpointNodeRetirement {
+			return items[:1]
+		},
+		"foreign Instance": func(items []checkpointNodeRetirement) []checkpointNodeRetirement {
+			items[0].InstanceID = "99999999-9999-4999-8999-999999999999"
+			return items
+		},
+		"duplicate Kapsule node": func(items []checkpointNodeRetirement) []checkpointNodeRetirement {
+			items[1].KapsuleNodeID = items[0].KapsuleNodeID
+			return items
+		},
+		"duplicate root volume": func(items []checkpointNodeRetirement) []checkpointNodeRetirement {
+			items[1].RootVolumeID = items[0].RootVolumeID
+			return items
+		},
+		"invalid node name": func(items []checkpointNodeRetirement) []checkpointNodeRetirement {
+			items[0].NodeName = "worker/a"
+			return items
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			changed := append([]checkpointNodeRetirement(nil), retirements...)
+			if err := validateCheckpointNodeRetirements(oldInstances, mutate(changed)); err == nil {
+				t.Fatal("unsafe checkpoint retirement records were accepted")
+			}
+		})
 	}
 }
 

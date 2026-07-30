@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -36,25 +37,32 @@ func TestValidateNodeRolloutAuthorizesEveryExactReadyGeneration(t *testing.T) {
 	}
 }
 
-func TestValidateNodeRolloutRejectsEveryIncompleteEligibleNode(t *testing.T) {
+func TestValidateNodeRolloutClassifiesOnlyConvergenceFailuresAsRetryable(t *testing.T) {
 	generation := strings.Repeat("a", 64)
-	tests := map[string]func(*NodeRolloutObservation){
-		"deleting":        func(node *NodeRolloutObservation) { node.Deleting = true },
-		"Node unready":    func(node *NodeRolloutObservation) { node.Ready = false },
-		"Pod absent":      func(node *NodeRolloutObservation) { node.PluginPodPresent = false },
-		"Pod unready":     func(node *NodeRolloutObservation) { node.PluginPodReady = false },
-		"CSINode missing": func(node *NodeRolloutObservation) { node.DriverRegistered = false },
-		"generation":      func(node *NodeRolloutObservation) { node.NodeConfigGeneration = strings.Repeat("b", 64) },
-		"node ID":         func(node *NodeRolloutObservation) { node.CSINodeID = "invalid" },
-		"commercial type": func(node *NodeRolloutObservation) { node.CommercialType = "UNTESTED" },
-		"attach limit":    func(node *NodeRolloutObservation) { node.MaxFileSystems = 0 },
+	tests := map[string]struct {
+		mutate    func(*NodeRolloutObservation)
+		retryable bool
+	}{
+		"deleting":        {func(node *NodeRolloutObservation) { node.Deleting = true }, true},
+		"Node unready":    {func(node *NodeRolloutObservation) { node.Ready = false }, true},
+		"Pod absent":      {func(node *NodeRolloutObservation) { node.PluginPodPresent = false }, true},
+		"Pod unready":     {func(node *NodeRolloutObservation) { node.PluginPodReady = false }, true},
+		"CSINode missing": {func(node *NodeRolloutObservation) { node.DriverRegistered = false }, true},
+		"generation":      {func(node *NodeRolloutObservation) { node.NodeConfigGeneration = strings.Repeat("b", 64) }, true},
+		"node ID":         {func(node *NodeRolloutObservation) { node.CSINodeID = "invalid" }, false},
+		"commercial type": {func(node *NodeRolloutObservation) { node.CommercialType = "UNTESTED" }, false},
+		"attach limit":    {func(node *NodeRolloutObservation) { node.MaxFileSystems = 0 }, false},
 	}
-	for name, mutate := range tests {
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			node := rolloutNode("worker-a", "fr-par-1/11111111-1111-4111-8111-111111111111", generation)
-			mutate(&node)
-			if _, err := ValidateNodeRollout([]NodeRolloutObservation{node}, generation, "fr-par", rolloutCommercialTypes); err == nil {
+			test.mutate(&node)
+			_, err := ValidateNodeRollout([]NodeRolloutObservation{node}, generation, "fr-par", rolloutCommercialTypes)
+			if err == nil {
 				t.Fatal("ValidateNodeRollout(incomplete) error = nil")
+			}
+			if got := errors.Is(err, ErrNodeRolloutNotReady); got != test.retryable {
+				t.Fatalf("errors.Is(ErrNodeRolloutNotReady) = %t, want %t: %v", got, test.retryable, err)
 			}
 		})
 	}

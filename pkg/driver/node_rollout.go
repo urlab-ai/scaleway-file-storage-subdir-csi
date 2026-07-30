@@ -1,12 +1,19 @@
 package driver
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	releasecompat "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/compatibility"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/volume"
 )
+
+// ErrNodeRolloutNotReady identifies only rollout convergence conditions that
+// may become true when the expected node DaemonSet and CSINode registrations
+// finish. Identity, provider-scope, compatibility, and attachment failures do
+// not wrap this error and must fail closed without a rollout retry.
+var ErrNodeRolloutNotReady = errors.New("node-plugin rollout is not ready")
 
 // NodeRolloutObservation is the coherent Kubernetes and live provider
 // projection for one Node, its CSINode registration, this release's node-plugin
@@ -53,7 +60,7 @@ func ValidateNodeRollout(observations []NodeRolloutObservation, expectedGenerati
 		qualified[commercialType] = struct{}{}
 	}
 	if len(observations) == 0 {
-		return NodeAuthorizationSet{}, fmt.Errorf("eligible node inventory is empty")
+		return NodeAuthorizationSet{}, fmt.Errorf("eligible node inventory is empty: %w", ErrNodeRolloutNotReady)
 	}
 	authorized := make(map[string]struct{})
 	known := make(map[string]struct{})
@@ -86,7 +93,7 @@ func ValidateNodeRollout(observations []NodeRolloutObservation, expectedGenerati
 			continue
 		}
 		if observation.Deleting || !observation.Ready || !observation.PluginPodPresent || !observation.PluginPodReady || !observation.DriverRegistered {
-			return NodeAuthorizationSet{}, fmt.Errorf("eligible node %q is deleting, unready, missing its Ready plugin Pod, or lacks CSINode registration", observation.NodeName)
+			return NodeAuthorizationSet{}, fmt.Errorf("eligible node %q is deleting, unready, missing its Ready plugin Pod, or lacks CSINode registration: %w", observation.NodeName, ErrNodeRolloutNotReady)
 		}
 		if err := volume.ValidateNodeID(observation.CSINodeID); err != nil {
 			return NodeAuthorizationSet{}, fmt.Errorf("eligible node %q CSI node ID: %w", observation.NodeName, err)
@@ -102,7 +109,7 @@ func ValidateNodeRollout(observations []NodeRolloutObservation, expectedGenerati
 			return NodeAuthorizationSet{}, fmt.Errorf("eligible node %q has no positive live MaxFileSystems capability", observation.NodeName)
 		}
 		if observation.NodeConfigGeneration != expectedGeneration {
-			return NodeAuthorizationSet{}, fmt.Errorf("eligible node %q generation %q differs from expected %q", observation.NodeName, observation.NodeConfigGeneration, expectedGeneration)
+			return NodeAuthorizationSet{}, fmt.Errorf("eligible node %q generation %q differs from expected %q: %w", observation.NodeName, observation.NodeConfigGeneration, expectedGeneration, ErrNodeRolloutNotReady)
 		}
 		if _, duplicate := authorized[observation.CSINodeID]; duplicate {
 			return NodeAuthorizationSet{}, fmt.Errorf("CSI node ID %q is advertised by multiple eligible nodes", observation.CSINodeID)
@@ -110,7 +117,7 @@ func ValidateNodeRollout(observations []NodeRolloutObservation, expectedGenerati
 		authorized[observation.CSINodeID] = struct{}{}
 	}
 	if len(authorized) == 0 {
-		return NodeAuthorizationSet{}, fmt.Errorf("no schedulable Ready Linux node satisfies the driver generation")
+		return NodeAuthorizationSet{}, fmt.Errorf("no schedulable Ready Linux node satisfies the driver generation: %w", ErrNodeRolloutNotReady)
 	}
 	return NodeAuthorizationSet{EligibleNodeIDs: authorized, KnownNodeIDs: known}, nil
 }

@@ -102,18 +102,68 @@ func validateReplacementPool(
 	if pool == nil {
 		return fmt.Errorf("kapsule replacement pool response is empty")
 	}
-	if pool.ID != poolID ||
-		pool.ClusterID != clusterID ||
-		pool.Name != plan.ResourcePrefix+"-nodes" ||
-		pool.Region.String() != plan.Region ||
-		pool.NodeType != plan.NodePool.CommercialType ||
-		pool.Autoscaling ||
-		pool.Autohealing ||
-		!slices.Contains(pool.Tags, plan.OwnershipTag) {
-		return fmt.Errorf("kapsule replacement pool identity differs from the exact run plan")
+	if pool.ID != poolID {
+		return fmt.Errorf("kapsule replacement pool ID differs from the exact run plan")
+	}
+	if pool.ClusterID != clusterID {
+		return fmt.Errorf("kapsule replacement pool cluster differs from the exact run plan")
+	}
+	if pool.Name != plan.ResourcePrefix+"-nodes" {
+		return fmt.Errorf("kapsule replacement pool name differs from the exact run plan")
+	}
+	if pool.Region.String() != plan.Region {
+		return fmt.Errorf("kapsule replacement pool region differs from the exact run plan")
+	}
+	if !sameKapsuleCommercialType(pool.NodeType, plan.NodePool.CommercialType) {
+		return fmt.Errorf(
+			"kapsule replacement pool node type %q differs from the planned commercial type %q",
+			pool.NodeType,
+			plan.NodePool.CommercialType,
+		)
+	}
+	if pool.Autoscaling || pool.Autohealing {
+		return fmt.Errorf("kapsule replacement pool unexpectedly enables autoscaling or autohealing")
+	}
+	if !slices.Contains(pool.Tags, plan.OwnershipTag) {
+		return fmt.Errorf("kapsule replacement pool lacks the exact run ownership tag")
 	}
 	if !slices.Contains(allowedSizes, pool.Size) {
 		return fmt.Errorf("kapsule replacement pool size is %d, want one of %v", pool.Size, allowedSizes)
 	}
 	return nil
+}
+
+// sameKapsuleCommercialType accepts only the representation difference exposed
+// by the live Scaleway APIs: the Kapsule Pool API returns lower-case words
+// separated by underscores while the Instance catalog and create plan use
+// upper-case words separated by hyphens. It deliberately rejects whitespace,
+// omitted characters, suffixes, and every other punctuation difference so an
+// actually different machine offer can never pass the ownership check.
+func sameKapsuleCommercialType(observed, planned string) bool {
+	normalize := func(value string) (string, bool) {
+		if value == "" {
+			return "", false
+		}
+		normalized := make([]byte, len(value))
+		for index := range len(value) {
+			character := value[index]
+			switch {
+			case character >= 'a' && character <= 'z':
+				character -= 'a' - 'A'
+			case character == '_':
+				character = '-'
+			case character >= 'A' && character <= 'Z':
+			case character >= '0' && character <= '9':
+			case character == '-':
+			default:
+				return "", false
+			}
+			normalized[index] = character
+		}
+		return string(normalized), true
+	}
+
+	normalizedObserved, observedValid := normalize(observed)
+	normalizedPlanned, plannedValid := normalize(planned)
+	return observedValid && plannedValid && normalizedObserved == normalizedPlanned
 }

@@ -55,7 +55,9 @@ func (fake *fakeKapsuleReplacementPoolAPI) UpdatePool(
 func TestRestorePlannedKapsulePoolSizeUsesExplicitExactResize(t *testing.T) {
 	plan, clusterID, poolID := replacementPoolFixture()
 	settled := replacementPool(plan, clusterID, poolID, 1, k8sapi.PoolStatusReady)
+	settled.NodeType = "pop2_hm_2c_16g"
 	updated := replacementPool(plan, clusterID, poolID, 2, k8sapi.PoolStatusScaling)
+	updated.NodeType = "pop2_hm_2c_16g"
 	api := &fakeKapsuleReplacementPoolAPI{
 		waitResponses:  []*k8sapi.Pool{settled},
 		updateResponse: updated,
@@ -72,6 +74,29 @@ func TestRestorePlannedKapsulePoolSizeUsesExplicitExactResize(t *testing.T) {
 		request.Size == nil || *request.Size != plan.NodePool.Count ||
 		request.MinSize != nil || request.MaxSize != nil {
 		t.Fatalf("UpdatePool request differs from exact planned-size restoration: %#v", request)
+	}
+}
+
+func TestSameKapsuleCommercialTypeAcceptsOnlyDocumentedAPIRepresentation(t *testing.T) {
+	for name, test := range map[string]struct {
+		observed string
+		planned  string
+		want     bool
+	}{
+		"exact":                 {observed: "POP2-HM-2C-16G", planned: "POP2-HM-2C-16G", want: true},
+		"live pool API":         {observed: "pop2_hm_2c_16g", planned: "POP2-HM-2C-16G", want: true},
+		"missing component":     {observed: "pop2_hm_2c", planned: "POP2-HM-2C-16G", want: false},
+		"different size":        {observed: "pop2_hm_4c_16g", planned: "POP2-HM-2C-16G", want: false},
+		"suffix":                {observed: "pop2_hm_2c_16g_extra", planned: "POP2-HM-2C-16G", want: false},
+		"leading whitespace":    {observed: " pop2_hm_2c_16g", planned: "POP2-HM-2C-16G", want: false},
+		"unsupported separator": {observed: "pop2/hm/2c/16g", planned: "POP2-HM-2C-16G", want: false},
+		"empty":                 {observed: "", planned: "POP2-HM-2C-16G", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := sameKapsuleCommercialType(test.observed, test.planned); got != test.want {
+				t.Fatalf("sameKapsuleCommercialType(%q, %q) = %t, want %t", test.observed, test.planned, got, test.want)
+			}
+		})
 	}
 }
 

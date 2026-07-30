@@ -182,6 +182,104 @@ func TestNodeDrainManifestCarriesReleaseIdentityOnDeploymentAndPod(t *testing.T)
 	}
 }
 
+func TestMarkerPodManifestIsCredentialFreeAndValidatesAsRetainedWitness(t *testing.T) {
+	request := e2erunner.Request{
+		DriverNamespace: "driver-system",
+		WorkloadImage:   "registry.example.test/workload@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	plan := e2eplan.Plan{RunID: "00000000-0000-4000-8000-000000000000"}
+	manifest := markerPodManifest(
+		request,
+		plan,
+		"controller-survivor",
+		"existing-claim",
+		"old-survivor-node",
+		"controller-hard-failure",
+	)
+	var pod corev1.Pod
+	if err := k8syaml.NewYAMLToJSONDecoder(strings.NewReader(manifest)).Decode(&pod); err != nil {
+		t.Fatalf("decode marker Pod manifest: %v\n%s", err, manifest)
+	}
+	pod.UID = "11111111-1111-4111-8111-111111111111"
+	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+		t.Fatal("marker Pod must not receive a service-account token")
+	}
+	// The API server can inject a projected service-account volume into a Pod
+	// created by an older harness. Exact retained-PVC validation must ignore
+	// that unrelated volume while still requiring exactly one data claim.
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: "kube-api-access-legacy",
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{},
+		},
+	})
+	if err := validateRetainedMarkerPod(
+		pod,
+		request,
+		plan,
+		"controller-survivor",
+		"existing-claim",
+		"controller-hard-failure",
+	); err != nil {
+		t.Fatalf("exact retained marker Pod was rejected: %v", err)
+	}
+}
+
+func TestValidateRetainedMarkerPodRejectsForeignOrAmbiguousObject(t *testing.T) {
+	request := e2erunner.Request{
+		DriverNamespace: "driver-system",
+		WorkloadImage:   "registry.example.test/workload@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	plan := e2eplan.Plan{RunID: "00000000-0000-4000-8000-000000000000"}
+	const (
+		podName  = "controller-survivor"
+		claim    = "existing-claim"
+		scenario = "controller-hard-failure"
+	)
+	exact := func() corev1.Pod {
+		var pod corev1.Pod
+		pod.Name = podName
+		pod.Namespace = request.DriverNamespace
+		pod.UID = "11111111-1111-4111-8111-111111111111"
+		pod.Labels = map[string]string{
+			"sfs-subdir-e2e-run":      plan.RunID,
+			"sfs-subdir-e2e-scenario": scenario,
+		}
+		pod.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": "retained-old-node"}
+		pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+		pod.Spec.Containers = []corev1.Container{{Name: "workload", Image: request.WorkloadImage}}
+		pod.Spec.Volumes = []corev1.Volume{{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
+			},
+		}}
+		return pod
+	}
+	tests := map[string]func(*corev1.Pod){
+		"foreign run":        func(pod *corev1.Pod) { pod.Labels["sfs-subdir-e2e-run"] = "foreign" },
+		"foreign scenario":   func(pod *corev1.Pod) { pod.Labels["sfs-subdir-e2e-scenario"] = "foreign" },
+		"foreign namespace":  func(pod *corev1.Pod) { pod.Namespace = "foreign" },
+		"missing UID":        func(pod *corev1.Pod) { pod.UID = "" },
+		"wrong image":        func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "foreign" },
+		"wrong claim":        func(pod *corev1.Pod) { pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "foreign" },
+		"ambiguous selector": func(pod *corev1.Pod) { pod.Spec.NodeSelector["foreign"] = "value" },
+		"duplicate workload": func(pod *corev1.Pod) { pod.Spec.Containers = append(pod.Spec.Containers, pod.Spec.Containers[0]) },
+		"duplicate data claim": func(pod *corev1.Pod) {
+			pod.Spec.Volumes = append(pod.Spec.Volumes, pod.Spec.Volumes[0])
+		},
+	}
+	for caseName, mutate := range tests {
+		t.Run(caseName, func(t *testing.T) {
+			pod := exact()
+			mutate(&pod)
+			if err := validateRetainedMarkerPod(pod, request, plan, podName, claim, scenario); err == nil {
+				t.Fatal("foreign or ambiguous retained marker Pod was accepted")
+			}
+		})
+	}
+}
+
 func TestControllerFaultInjectorIsNarrowAndCredentialFree(t *testing.T) {
 	request := e2erunner.Request{
 		DriverNamespace: "driver-system",

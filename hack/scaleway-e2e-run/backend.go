@@ -173,7 +173,29 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 	if !creatableClusterTypeAvailability(typeAvailability) {
 		return fmt.Errorf("planned Kapsule type %q has non-creatable availability %q", request.KapsuleType, string(typeAvailability))
 	}
-	serverTypes, err := backend.instance.ListServersTypes(&instanceapi.ListServersTypesRequest{Zone: scw.Zone(request.Zone)}, scw.WithAllPages(), scw.WithContext(ctx))
+	if err := backend.refreshPlannedAttachmentCapability(ctx, request, plan); err != nil {
+		return err
+	}
+	filesystems, err := backend.file.ListFileSystems(&fileapi.ListFileSystemsRequest{Region: region, ProjectID: &plan.ProjectID}, scw.WithAllPages(), scw.WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("validate File Storage read access: %w", err)
+	}
+	if filesystems == nil {
+		return fmt.Errorf("validate File Storage regional availability returned an empty response")
+	}
+	return nil
+}
+
+func (backend *scalewayBackend) refreshPlannedAttachmentCapability(
+	ctx context.Context,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+) error {
+	serverTypes, err := backend.instance.ListServersTypes(
+		&instanceapi.ListServersTypesRequest{Zone: scw.Zone(request.Zone)},
+		scw.WithAllPages(),
+		scw.WithContext(ctx),
+	)
 	if err != nil {
 		return fmt.Errorf("list live commercial-type capabilities: %w", err)
 	}
@@ -191,13 +213,6 @@ func (backend *scalewayBackend) LivePreflight(ctx context.Context, request e2eru
 		return err
 	}
 	backend.maxFileSystems = serverType.Capabilities.MaxFileSystems
-	filesystems, err := backend.file.ListFileSystems(&fileapi.ListFileSystemsRequest{Region: region, ProjectID: &plan.ProjectID}, scw.WithAllPages(), scw.WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("validate File Storage read access: %w", err)
-	}
-	if filesystems == nil {
-		return fmt.Errorf("validate File Storage regional availability returned an empty response")
-	}
 	return nil
 }
 
@@ -427,8 +442,21 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 	if err := backend.completeProviderCreate(&inventory, backend.resource(e2ecleanup.ResourceKindNodePool, pool.ID, pool.Name, true, pool.Tags)); err != nil {
 		return inventory, err
 	}
-	if _, err := backend.kubernetes.WaitForPool(&k8sapi.WaitForPoolRequest{Region: region, PoolID: pool.ID}, scw.WithContext(ctx)); err != nil {
+	readyPool, err := backend.kubernetes.WaitForPool(
+		&k8sapi.WaitForPoolRequest{Region: region, PoolID: pool.ID},
+		scw.WithContext(ctx),
+	)
+	if err != nil {
 		return inventory, err
+	}
+	if err := validateReplacementPool(
+		readyPool,
+		plan,
+		clusterID,
+		pool.ID,
+		plan.NodePool.Count,
+	); err != nil {
+		return inventory, fmt.Errorf("validate initial exact Kapsule pool: %w", err)
 	}
 	for index := uint32(0); index < plan.Parents.Count; index++ {
 		name := fmt.Sprintf("%s-parent-%c", plan.ResourcePrefix, 'a'+index)
@@ -492,34 +520,9 @@ func (backend *scalewayBackend) Provision(ctx context.Context, request e2erunner
 
 func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, inventory e2ecleanup.Inventory) ([]e2erunner.ScenarioResult, error) {
 	evidenceDirectory := filepath.Dir(plan.CleanupInventoryPath)
-	validator, err := os.Executable()
+	arguments, err := backend.scenarioArguments(request, plan, inventory, evidenceDirectory)
 	if err != nil {
-		return nil, fmt.Errorf("locate scenario evidence validator: %w", err)
-	}
-	arguments := []string{"--kubeconfig=" + backend.kubeconfig, "--chart=" + request.ChartPackage,
-		"--values=" + request.ReleaseValues, "--namespace=" + request.DriverNamespace, "--release=" + request.HelmRelease,
-		"--admin=" + request.AdminBinary, "--workload-image=" + request.WorkloadImage,
-		"--profile=" + plan.Profile,
-		"--validator=" + validator,
-		fmt.Sprintf("--max-filesystems=%d", backend.maxFileSystems),
-		"--project-id=" + plan.ProjectID, "--region=" + plan.Region, "--run-id=" + plan.RunID,
-		"--cluster-id=" + resourceID(inventory, e2ecleanup.ResourceKindCluster, 0),
-		"--parent-a=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 0), "--parent-b=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
-		"--evidence-dir=" + evidenceDirectory}
-	if request.PreviousChart != "" {
-		predecessor := request.Predecessor
-		arguments = append(arguments,
-			"--previous-chart="+request.PreviousChart,
-			"--previous-values="+request.PreviousValues,
-			"--predecessor-kind="+predecessor.Kind,
-			"--predecessor-version="+predecessor.Version,
-			"--predecessor-release-tag="+predecessor.ReleaseTag,
-			"--predecessor-public-reference="+predecessor.PublicReference,
-			"--predecessor-compatibility-identity="+predecessor.CompatibilityIdentity,
-			"--predecessor-chart-sha256="+predecessor.ChartSHA256,
-			"--predecessor-values-sha256="+predecessor.ValuesSHA256,
-			"--predecessor-driver-image="+predecessor.DriverImage,
-		)
+		return nil, err
 	}
 	if plan.Profile == e2eplan.ProfileBase {
 		smoke, err := backend.runScenarioPhase(ctx, evidenceDirectory, "run-smoke", arguments)
@@ -581,6 +584,47 @@ func (backend *scalewayBackend) RunScenarios(ctx context.Context, request e2erun
 		return nil, err
 	}
 	return results, nil
+}
+
+func (backend *scalewayBackend) scenarioArguments(
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	inventory e2ecleanup.Inventory,
+	evidenceDirectory string,
+) ([]string, error) {
+	validator, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate scenario evidence validator: %w", err)
+	}
+	arguments := []string{"--kubeconfig=" + backend.kubeconfig, "--chart=" + request.ChartPackage,
+		"--values=" + request.ReleaseValues, "--namespace=" + request.DriverNamespace, "--release=" + request.HelmRelease,
+		"--admin=" + request.AdminBinary, "--workload-image=" + request.WorkloadImage,
+		"--profile=" + plan.Profile,
+		"--validator=" + validator,
+		fmt.Sprintf("--max-filesystems=%d", backend.maxFileSystems),
+		"--project-id=" + plan.ProjectID, "--region=" + plan.Region, "--run-id=" + plan.RunID,
+		"--cluster-id=" + resourceID(inventory, e2ecleanup.ResourceKindCluster, 0),
+		"--parent-a=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 0), "--parent-b=" + resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
+		"--evidence-dir=" + evidenceDirectory}
+	if request.PreviousChart != "" {
+		predecessor := request.Predecessor
+		if predecessor == nil {
+			return nil, fmt.Errorf("scenario arguments require the closed predecessor identity")
+		}
+		arguments = append(arguments,
+			"--previous-chart="+request.PreviousChart,
+			"--previous-values="+request.PreviousValues,
+			"--predecessor-kind="+predecessor.Kind,
+			"--predecessor-version="+predecessor.Version,
+			"--predecessor-release-tag="+predecessor.ReleaseTag,
+			"--predecessor-public-reference="+predecessor.PublicReference,
+			"--predecessor-compatibility-identity="+predecessor.CompatibilityIdentity,
+			"--predecessor-chart-sha256="+predecessor.ChartSHA256,
+			"--predecessor-values-sha256="+predecessor.ValuesSHA256,
+			"--predecessor-driver-image="+predecessor.DriverImage,
+		)
+	}
+	return arguments, nil
 }
 
 func (backend *scalewayBackend) runScenarioPhase(ctx context.Context, evidenceDirectory, phase string, common []string) ([]e2erunner.ScenarioResult, error) {

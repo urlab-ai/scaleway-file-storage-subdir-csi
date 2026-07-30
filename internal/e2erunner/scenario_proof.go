@@ -322,41 +322,43 @@ type ProviderBootstrapRestartProof struct {
 }
 
 // CheckpointRestoreProof records one complete same-cluster namespace restore.
-// The workload claim and cluster-scoped PV survive outside the deleted driver
-// namespace, while every pre-recovery Instance is replaced before the restored
-// controller is allowed to serve.
+// The workload is cleanly unpublished while the CSI still serves; its claim
+// and cluster-scoped PV then survive outside the deleted driver namespace,
+// while every pre-recovery Instance is replaced before the restored controller
+// is allowed to serve.
 type CheckpointRestoreProof struct {
-	SchemaVersion                     string   `json:"schemaVersion"`
-	Scenario                          string   `json:"scenario"`
-	RunID                             string   `json:"runId"`
-	ObservedAt                        string   `json:"observedAt"`
-	CheckpointRequestID               string   `json:"checkpointRequestId"`
-	ArchiveSHA256                     string   `json:"archiveSha256"`
-	ArchiveBytes                      uint64   `json:"archiveBytes"`
-	ManifestSHA256                    string   `json:"manifestSha256"`
-	WorkloadNamespace                 string   `json:"workloadNamespace"`
-	WorkloadClaimName                 string   `json:"workloadClaimName"`
-	PersistentVolumeName              string   `json:"persistentVolumeName"`
-	OldInstanceIDs                    []string `json:"oldInstanceIds"`
-	ReplacementInstanceIDs            []string `json:"replacementInstanceIds"`
-	PrepareCompleted                  bool     `json:"prepareCompleted"`
-	ControllerQuiesced                bool     `json:"controllerQuiesced"`
-	DriverNamespaceDeleted            bool     `json:"driverNamespaceDeleted"`
-	DriverNamespaceRecreated          bool     `json:"driverNamespaceRecreated"`
-	PersistentVolumePreserved         bool     `json:"persistentVolumePreserved"`
-	RestoreDryRunCompleted            bool     `json:"restoreDryRunCompleted"`
-	RestoreExecuteCompleted           bool     `json:"restoreExecuteCompleted"`
-	CheckpointSecretImmutable         bool     `json:"checkpointSecretImmutable"`
-	CheckpointSecretDeletedAfterAudit bool     `json:"checkpointSecretDeletedAfterAudit"`
-	OldPoolScaledToZero               bool     `json:"oldPoolScaledToZero"`
-	AllOldInstancesAbsent             bool     `json:"allOldInstancesAbsent"`
-	PoolRestoredWithFreshInstances    bool     `json:"poolRestoredWithFreshInstances"`
-	ExistingMarkerReadAfterRecovery   bool     `json:"existingMarkerReadAfterRecovery"`
-	NewProvisioningSucceeded          bool     `json:"newProvisioningSucceeded"`
-	ArchiveLifecycleVerified          bool     `json:"archiveLifecycleVerified"`
-	DeleteLifecycleVerified           bool     `json:"deleteLifecycleVerified"`
-	TombstoneInventoryVerified        bool     `json:"tombstoneInventoryVerified"`
-	ExternalWorkloadCleanupCompleted  bool     `json:"externalWorkloadCleanupCompleted"`
+	SchemaVersion                          string   `json:"schemaVersion"`
+	Scenario                               string   `json:"scenario"`
+	RunID                                  string   `json:"runId"`
+	ObservedAt                             string   `json:"observedAt"`
+	CheckpointRequestID                    string   `json:"checkpointRequestId"`
+	ArchiveSHA256                          string   `json:"archiveSha256"`
+	ArchiveBytes                           uint64   `json:"archiveBytes"`
+	ManifestSHA256                         string   `json:"manifestSha256"`
+	WorkloadNamespace                      string   `json:"workloadNamespace"`
+	WorkloadClaimName                      string   `json:"workloadClaimName"`
+	PersistentVolumeName                   string   `json:"persistentVolumeName"`
+	OldInstanceIDs                         []string `json:"oldInstanceIds"`
+	ReplacementInstanceIDs                 []string `json:"replacementInstanceIds"`
+	PrepareCompleted                       bool     `json:"prepareCompleted"`
+	ControllerQuiesced                     bool     `json:"controllerQuiesced"`
+	DriverNamespaceDeleted                 bool     `json:"driverNamespaceDeleted"`
+	DriverNamespaceRecreated               bool     `json:"driverNamespaceRecreated"`
+	PersistentVolumePreserved              bool     `json:"persistentVolumePreserved"`
+	RestoreDryRunCompleted                 bool     `json:"restoreDryRunCompleted"`
+	RestoreExecuteCompleted                bool     `json:"restoreExecuteCompleted"`
+	CheckpointSecretImmutable              bool     `json:"checkpointSecretImmutable"`
+	CheckpointSecretDeletedAfterAudit      bool     `json:"checkpointSecretDeletedAfterAudit"`
+	WorkloadStoppedBeforeNamespaceDeletion bool     `json:"workloadStoppedBeforeNamespaceDeletion"`
+	OldInstancesReplacedSequentially       bool     `json:"oldInstancesReplacedSequentially"`
+	AllOldInstancesAbsent                  bool     `json:"allOldInstancesAbsent"`
+	PoolRestoredWithFreshInstances         bool     `json:"poolRestoredWithFreshInstances"`
+	ExistingMarkerReadAfterRecovery        bool     `json:"existingMarkerReadAfterRecovery"`
+	NewProvisioningSucceeded               bool     `json:"newProvisioningSucceeded"`
+	ArchiveLifecycleVerified               bool     `json:"archiveLifecycleVerified"`
+	DeleteLifecycleVerified                bool     `json:"deleteLifecycleVerified"`
+	TombstoneInventoryVerified             bool     `json:"tombstoneInventoryVerified"`
+	ExternalWorkloadCleanupCompleted       bool     `json:"externalWorkloadCleanupCompleted"`
 }
 
 // MissingLeaseRecoveryProof records the fail-closed provisional Lease and its
@@ -902,7 +904,8 @@ func (proof CheckpointRestoreProof) Validate() error {
 	}
 	if !proof.PrepareCompleted || !proof.ControllerQuiesced || !proof.DriverNamespaceDeleted ||
 		!proof.DriverNamespaceRecreated || !proof.PersistentVolumePreserved || !proof.RestoreDryRunCompleted ||
-		!proof.RestoreExecuteCompleted || !proof.CheckpointSecretImmutable || !proof.CheckpointSecretDeletedAfterAudit || !proof.OldPoolScaledToZero ||
+		!proof.RestoreExecuteCompleted || !proof.CheckpointSecretImmutable || !proof.CheckpointSecretDeletedAfterAudit ||
+		!proof.WorkloadStoppedBeforeNamespaceDeletion || !proof.OldInstancesReplacedSequentially ||
 		!proof.AllOldInstancesAbsent || !proof.PoolRestoredWithFreshInstances || !proof.ExistingMarkerReadAfterRecovery ||
 		!proof.NewProvisioningSucceeded || !proof.ArchiveLifecycleVerified || !proof.DeleteLifecycleVerified ||
 		!proof.TombstoneInventoryVerified || !proof.ExternalWorkloadCleanupCompleted {

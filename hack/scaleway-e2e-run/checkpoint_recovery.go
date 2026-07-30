@@ -85,10 +85,6 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 		return nil, fmt.Errorf("checkpoint recovery lacks exact retained cloud identities")
 	}
 
-	oldNodes, err := backend.waitForKapsuleNodeSet(ctx, plan, clusterID, poolID, int(plan.NodePool.Count), nil)
-	if err != nil {
-		return nil, err
-	}
 	if err := backend.createCheckpointWorkload(ctx, request, plan, workloadNamespace, workloadClaim, workloadDeployment, marker); err != nil {
 		return nil, err
 	}
@@ -100,6 +96,27 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	journal.PersistentVolume = persistentVolumeName
 	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
 		return nil, fmt.Errorf("retain checkpoint workload identity: %w", err)
+	}
+	if err := backend.stopCheckpointWorkload(
+		ctx, request, plan, workloadNamespace, workloadClaim, workloadDeployment, persistentVolumeName,
+	); err != nil {
+		return nil, err
+	}
+	journal.Phase = checkpointPhaseWorkloadStopped
+	journal.WorkloadStoppedBeforeNamespaceDeletion = true
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return nil, fmt.Errorf("retain stopped checkpoint workload state: %w", err)
+	}
+
+	oldNodes, err := backend.waitForKapsuleNodeSet(ctx, plan, clusterID, poolID, int(plan.NodePool.Count), nil)
+	if err != nil {
+		return nil, err
+	}
+	nodeRetirements, err := backend.captureCheckpointNodeRetirements(
+		ctx, plan, clusterID, poolID, oldNodes.InstanceIDs, parentIDs,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	valuesPath := filepath.Join(evidenceDirectory, "checkpoint-release-values-"+plan.RunID+".yaml")
@@ -126,6 +143,7 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	journal.CheckpointRequestID = checkpointRequestID
 	journal.ArchivePath = archivePath
 	journal.OldInstanceIDs = slices.Clone(oldNodes.InstanceIDs)
+	journal.NodeRetirements = slices.Clone(nodeRetirements)
 	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
 		return nil, fmt.Errorf("retain preparing checkpoint recovery state: %w", err)
 	}
@@ -153,6 +171,7 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	journal.ArchiveBytes = prepared.Receipt.ArchiveBytes
 	journal.ManifestSHA256 = prepared.Receipt.ManifestSHA256
 	journal.OldInstanceIDs = slices.Clone(oldNodes.InstanceIDs)
+	journal.NodeRetirements = slices.Clone(nodeRetirements)
 	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
 		return nil, fmt.Errorf("retain prepared checkpoint recovery state: %w", err)
 	}
@@ -171,22 +190,11 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
 		return nil, fmt.Errorf("retain deleted-namespace checkpoint recovery state: %w", err)
 	}
-	if err := backend.scalePoolAndWait(ctx, plan, clusterID, poolID, 0, oldNodes.InstanceIDs); err != nil {
+	replacementNodes, err := backend.replacePreRecoveryKapsuleNodes(
+		ctx, plan, clusterID, poolID, parentIDs, nodeRetirements,
+	)
+	if err != nil {
 		return nil, err
-	}
-	for _, parentID := range parentIDs {
-		for _, instanceID := range oldNodes.InstanceIDs {
-			if _, err := backend.waitRegionalAttachment(ctx, parentID, instanceID, false); err != nil {
-				return nil, fmt.Errorf("wait for old Instance %s attachment cleanup on %s: %w", instanceID, parentID, err)
-			}
-		}
-		listed, err := backend.file.ListAttachments(&fileapi.ListAttachmentsRequest{Region: scw.Region(plan.Region), FilesystemID: &parentID}, scw.WithAllPages(), scw.WithContext(ctx))
-		if err != nil {
-			return nil, fmt.Errorf("list parent %s attachments after the pool reached zero: %w", parentID, err)
-		}
-		if listed == nil || len(listed.Attachments) != 0 {
-			return nil, fmt.Errorf("parent %s retains an old or unknown attachment after the pool reached zero", parentID)
-		}
 	}
 	if err := backend.createRecoveryNamespaceAndSecrets(ctx, request, plan); err != nil {
 		return nil, err
@@ -248,13 +256,6 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 		return nil, err
 	}
 
-	if err := backend.scalePoolAndWait(ctx, plan, clusterID, poolID, plan.NodePool.Count, oldNodes.InstanceIDs); err != nil {
-		return nil, err
-	}
-	replacementNodes, err := backend.waitForKapsuleNodeSet(ctx, plan, clusterID, poolID, int(plan.NodePool.Count), oldNodes.InstanceIDs)
-	if err != nil {
-		return nil, err
-	}
 	if err := backend.installRecoveryControllerOnly(ctx, request, valuesPath); err != nil {
 		return nil, err
 	}
@@ -277,6 +278,13 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 		ctx, request, plan, checkpointRequestID, prepared.Receipt.ManifestSHA256, provisionalLease,
 	)
 	if err != nil {
+		return nil, err
+	}
+	// The recovery proof requires the node DaemonSet to be absent when approval
+	// is created, not after it exists. Restore the full release immediately so
+	// the promoted controller can observe the ordinary Ready node-plugin and
+	// CSINode rollout before it resumes normal startup reconciliation.
+	if err := backend.installFullRecoveredRelease(ctx, request, valuesPath); err != nil {
 		return nil, err
 	}
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "rollout", "status", "deployment", "-l", "app.kubernetes.io/instance="+request.HelmRelease+","+controllerSelector, "--timeout=30m"); err != nil {
@@ -306,12 +314,14 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "delete", "secret/sfs-subdir-controller-approval", "--wait=true", "--timeout=5m"); err != nil {
 		return nil, err
 	}
-	if err := backend.installFullRecoveredRelease(ctx, request, valuesPath); err != nil {
-		return nil, err
-	}
 	journal.Phase = checkpointPhaseControllerRestored
 	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
 		return nil, fmt.Errorf("retain restored checkpoint controller state: %w", err)
+	}
+	if err := backend.startCheckpointWorkload(
+		ctx, request, plan, workloadNamespace, workloadClaim, workloadDeployment,
+	); err != nil {
+		return nil, err
 	}
 	if err := backend.waitForCheckpointWorkloadMarker(ctx, request, workloadNamespace, workloadDeployment, marker); err != nil {
 		return nil, err
@@ -339,7 +349,8 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 		PrepareCompleted: true, ControllerQuiesced: true, DriverNamespaceDeleted: true, DriverNamespaceRecreated: true,
 		PersistentVolumePreserved: true, RestoreDryRunCompleted: dryRun.Ready, RestoreExecuteCompleted: executed.Completed,
 		CheckpointSecretImmutable: checkpointSecretImmutable, CheckpointSecretDeletedAfterAudit: true,
-		OldPoolScaledToZero: true, AllOldInstancesAbsent: true,
+		WorkloadStoppedBeforeNamespaceDeletion: true,
+		OldInstancesReplacedSequentially:       true, AllOldInstancesAbsent: true,
 		PoolRestoredWithFreshInstances: true, ExistingMarkerReadAfterRecovery: true, NewProvisioningSucceeded: true,
 		ArchiveLifecycleVerified: archiveVerified, DeleteLifecycleVerified: deleteVerified,
 		TombstoneInventoryVerified: tombstonesVerified, ExternalWorkloadCleanupCompleted: true,
@@ -550,27 +561,6 @@ func (backend *scalewayBackend) workloadPersistentVolume(ctx context.Context, re
 	return name, nil
 }
 
-func (backend *scalewayBackend) scalePoolAndWait(ctx context.Context, plan e2eplan.Plan, clusterID, poolID string, size uint32, oldInstanceIDs []string) error {
-	if _, err := backend.kubernetes.UpdatePool(&k8sapi.UpdatePoolRequest{Region: scw.Region(plan.Region), PoolID: poolID, Size: &size}, scw.WithContext(ctx)); err != nil {
-		return fmt.Errorf("scale exact recovery pool to %d: %w", size, err)
-	}
-	timeout := 30 * time.Minute
-	if _, err := backend.kubernetes.WaitForPool(&k8sapi.WaitForPoolRequest{Region: scw.Region(plan.Region), PoolID: poolID, Timeout: &timeout}, scw.WithContext(ctx)); err != nil {
-		return fmt.Errorf("wait for exact recovery pool size %d: %w", size, err)
-	}
-	if size == 0 {
-		if _, err := backend.waitForKapsuleNodeSet(ctx, plan, clusterID, poolID, 0, nil); err != nil {
-			return err
-		}
-		for _, instanceID := range oldInstanceIDs {
-			if err := backend.waitInstanceAbsent(ctx, scw.Zone(backend.request.Zone), instanceID); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func (backend *scalewayBackend) waitForKapsuleNodeSet(ctx context.Context, plan e2eplan.Plan, clusterID, poolID string, count int, excluded []string) (kapsuleNodeSet, error) {
 	excludedSet := make(map[string]struct{}, len(excluded))
 	for _, id := range excluded {
@@ -678,6 +668,14 @@ func (backend *scalewayBackend) installRecoveryControllerOnly(ctx context.Contex
 		"--namespace", request.DriverNamespace, "--values", valuesPath, "--post-renderer", postRenderer, "--timeout", "30m"); err != nil {
 		return err
 	}
+	return backend.requireRecoveryNodeDaemonSetAbsent(ctx, request)
+}
+
+// requireRecoveryNodeDaemonSetAbsent proves the release has no node component
+// at the exact call boundary. Recovery checks once after the controller-only
+// render and again immediately before creating approval; the latter closes the
+// evidence window represented by NodeDaemonSetAbsentBeforeApproval.
+func (backend *scalewayBackend) requireRecoveryNodeDaemonSetAbsent(ctx context.Context, request e2erunner.Request) error {
 	encoded, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace, "get", "daemonset", "-l", "app.kubernetes.io/instance="+request.HelmRelease, "-o", "json")
 	if err != nil {
 		return err
@@ -816,6 +814,9 @@ func (backend *scalewayBackend) requirePVCUnbound(ctx context.Context, request e
 }
 
 func (backend *scalewayBackend) createMissingLeaseApproval(ctx context.Context, request e2erunner.Request, plan e2eplan.Plan, checkpointRequestID, manifestSHA string, lease kubernetesLease) (string, string, error) {
+	if err := backend.requireRecoveryNodeDaemonSetAbsent(ctx, request); err != nil {
+		return "", "", fmt.Errorf("prove node DaemonSet absent immediately before missing-Lease approval: %w", err)
+	}
 	requestID, err := randomUUIDv4()
 	if err != nil {
 		return "", "", err

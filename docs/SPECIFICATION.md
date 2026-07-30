@@ -5181,6 +5181,23 @@ different Pod UID must never overwrite or provisionally acquire a Lease with a
 non-empty previous holder, even when it is expired, before the exact abnormal
 takeover approval has been validated and consumed.
 
+This provisional attach path is deliberately independent of the normal
+node-plugin rollout authorization because the recovery procedure requires the
+node DaemonSet to remain absent until operator approval. It may authorize only
+the exact local controller Instance. A fresh complete Kubernetes Node snapshot
+must contain exactly one Node whose name equals the holder evidence, which is
+Linux, Ready, not deleting, and whose canonical
+`scaleway://instance/<zone>/<instance-id>` `spec.providerID` equals the holder
+zone, Instance ID, and metadata-derived CSI node ID. The controller then
+revalidates that exact Instance through the authenticated Scaleway API,
+including project, region, zone, running state, release-qualified commercial
+type, positive attachment limit, exclusive configured-parent inventory, and
+post-attach budget. Complete regional and Instance attachment inventories must
+reject every foreign or contradictory attachment. This singleton authorization
+exists only while the exact provisional discovery marker and holder remain
+active, is never written into the normal node-authorization cache, and cannot
+authorize CSI publish or any filesystem write.
+
 The provisional acquisition persists a closed all-or-none discovery marker on
 the same Lease containing schema version `1`, state `Provisional`, the canonical
 UTC condition-observation timestamp, installation ID, active cluster UID, and
@@ -5231,6 +5248,18 @@ the operator-approved recovery path.
   is never sufficient;
 - if any parent claim has a different `activeClusterUID`, recovery approval
   cannot authorize it and the controller fails closed.
+
+The node DaemonSet must be absent when the missing-Lease approval is created.
+Immediately after that immutable approval exists, the operator restores the
+full release, including the node DaemonSet. Approval promotion may complete
+before Kubernetes has made every node-plugin Pod and CSINode registration
+Ready, so the promoted controller remains non-serving and retries only the
+closed node-rollout-not-ready condition with bounded exponential backoff and
+jitter up to the configured attach-readiness deadline. Malformed identity,
+foreign attachment, provider-scope, commercial-type, capacity, permission, or
+other safety failures are not rollout retries and fail immediately. Normal
+startup reconciliation, parent mutation, and CSI service begin only after the
+ordinary complete node authorization succeeds.
 
 The Scaleway API can exhaustively enumerate every attachment of each configured
 parent, but it cannot infer historical Kubernetes-cluster membership for an
@@ -6862,7 +6891,22 @@ Kapsule matrix must:
     takeover approval. A retry may treat an already-restored planned size as
     success. A lost update response is successful only when a bounded
     authoritative read of that same exact pool proves the planned size. The
-    later replacement proof still requires the old node absent, exactly the
+    exact pool identity is validated both after initial provisioning and before
+    or after replacement. The Kapsule Pool API may expose the same commercial
+    type in lower-case underscore form while the Instance catalog and closed
+    plan use upper-case hyphen form (for example `pop2_hm_2c_16g` and
+    `POP2-HM-2C-16G`). Comparison permits only ASCII case and underscore/hyphen
+    representation differences. Missing or additional characters, whitespace,
+    other punctuation, and every other type difference fail closed.
+    A diagnostic rerun may encounter a completed witness Pod retained by the
+    interrupted attempt for later provider proof. Before recreating that
+    immutable Pod on the currently selected survivor or replacement node, the
+    harness must validate its exact namespace, name, run and scenario labels,
+    workload image, PVC, and non-empty node selector. It may then delete only
+    the server-side intersection of that exact name and both ownership labels,
+    prove the name absent, and create the new credential-free Pod. Any foreign,
+    malformed, or concurrently replaced object fails closed.
+    The later replacement proof still requires the old node absent, exactly the
     planned node count, one distinct new Ready node, matching CSINode and
     node-plugin generations, release-compatible live Instance capabilities,
     and successful data access on that new node;
@@ -6884,12 +6928,39 @@ Kapsule matrix must:
     no mount or attachment remains, preserve non-reserving permanent
     tombstones, remove only that parent from values, and restart without
     reattaching the historical parent;
-13. create a quiesced checkpoint, remove and recreate the driver namespace in
-    the same cluster while preserving the test PV and parents, replace every
-    pre-recovery worker Instance, restore the immutable checkpoint Secret,
-    require the missing-Lease controller to remain non-serving until exact
-    all-Instance fencing and one-time approval, then verify existing data, new
-    provisioning, archive/delete, and tombstone inventory;
+13. create one external workload and durable marker, preserve its bound PVC/PV,
+    then scale that exact run-owned Deployment to zero while the complete CSI
+    release is still serving. Before checkpoint preparation or driver-namespace
+    deletion, require the Deployment's desired replica count to be zero, no
+    matching Pod, the same Bound PVC/PV/claim UID relationship, and no
+    `VolumeAttachment` for that PV. A transient absence of Pods while the
+    Deployment still desires one replica is not clean unpublish evidence.
+    Create a quiesced checkpoint, remove and recreate the driver namespace in
+    the same cluster while preserving that PVC/PV, marker, and both parents,
+    and replace every pre-recovery worker Instance. Before the first provider
+    mutation, fsync the exact Kapsule node ID, Kubernetes node name, Instance ID,
+    and provider-created root Block Storage volume ID for every old worker.
+    Kapsule does not accept a zero-node managed pool, so the harness must not use
+    scale-to-zero as the fencing mechanism. For one worker at a time, require
+    another exact Ready pool node, stop the journaled Instance, detach both
+    parents with server and regional absence proof, delete the exact Kapsule
+    node with implicit replacement disabled, and prove the Instance and root
+    volume absent. If Kapsule remains stuck at `deleting`, reuse the same
+    exact-ID, ownership-validated, lost-response-safe Instance/root retirement
+    used by controller-failure recovery; never infer a root volume after its
+    Instance has disappeared. Restore the exact pool to its planned two-node
+    size and wait for a fresh Ready generation before processing the next old
+    worker. The pool therefore retains at least one Ready node and is never
+    intentionally reduced to zero. A retry derives progress from the fsynced
+    identities and exact provider state: it re-proves already absent resources
+    and restores an `N-1` pool before any later deletion. After both
+    replacements, require the planned number of Ready nodes with no
+    pre-recovery Instance ID and zero parent attachments before restoring the
+    immutable checkpoint Secret. Require the missing-Lease controller to remain
+    non-serving until exact all-Instance fencing and one-time approval, restore
+    the external Deployment to one replica only after the full release is
+    healthy, then verify the original marker, new provisioning, archive/delete,
+    and tombstone inventory;
 14. verify the managed Scaleway File Storage CSI remains installed but idle and
     that its CSIDriver, StorageClass, RBAC, sidecars, and node DaemonSet coexist
     without default-class or object collisions;
@@ -7163,6 +7234,23 @@ requires that retained fsynced inventory and never recreates an authorizing
 seed when it is missing. A missing ledger after possible provider mutation is
 corruption and requires operator recovery, not inferred absence.
 
+During development of the release harness, an operator may use the explicitly
+non-qualifying `--diagnostic-phase` mode to continue an already approved,
+retained release-candidate run without repeating earlier expensive scenarios.
+It accepts only the fixed ordered phases `destructive`, `mid`, `recovery`, and
+`post`; requires the same complete run-ID confirmation, closed request,
+candidate artifacts, predecessor artifacts, ready exact-ID inventory, and
+process-only credentials; revalidates current resource ownership and the live
+commercial-type attachment capability; and completes any exact journaled
+transition using the same fail-closed recovery order as cleanup before starting
+the requested phase. The first phase requires retained pre/provider evidence;
+each later phase requires the exact non-qualifying result of its predecessor.
+Every phase verifies its fixed scenario names and structured proofs, and writes
+`releaseQualified=false`. This mode cannot create a cluster, skip a phase,
+emit final qualification evidence, or promote a release. After diagnostics
+pass, one fresh uninterrupted execution of the complete ordered matrix,
+including the full soak and exact cleanup, remains mandatory release evidence.
+
 Cleanup inventory schema v2 is mandatory for every new run. It adds the
 disposable Instance root volume without invalidating schema-v1 cleanup of an
 already interrupted older candidate's recorded resources. Schema v1 cannot
@@ -7231,17 +7319,35 @@ successful retained Kapsule run and a final complete inventory.
 
 Qualification-only transitions that temporarily make ordinary safe uninstall
 impossible must be restartable by `--cleanup-only`. Before creating the
-external checkpoint workload, checkpoint preparation, driver-namespace
-deletion, and restored-controller admission, the executor fsyncs a
-credential-free run-scoped recovery journal. The journal contains only exact
-Kubernetes names, retained artifact paths and digests, checkpoint identity, and
-run-owned Instance IDs. The retained Helm values have their own digest, and a
-prepared archive retains and rechecks both its byte length and digest.
-`--cleanup-only` repeats the complete local candidate-artifact verification
-before recreating any Secret or invoking Helm. Before namespace deletion
-cleanup resumes the exact checkpoint when necessary and removes only the exact
-run-labelled workload. After namespace deletion it fences the journaled old
-pool, restores the exact completed checkpoint, admits recovery only with the
+external checkpoint workload, cleanly stopping that workload, checkpoint
+preparation, driver-namespace deletion, every provider retirement, and
+restored-controller admission, the executor fsyncs a credential-free run-scoped
+recovery journal. The journal contains only exact Kubernetes names, retained
+artifact paths and digests, checkpoint identity, and the closed Kapsule node,
+Instance, and root-volume identities needed for exact recovery; the zone remains
+the immutable value from the closed request. The retained Helm values have
+their own digest, and a prepared archive retains and rechecks both its byte
+length and digest. `--cleanup-only` repeats the complete local
+candidate-artifact verification before recreating any Secret or invoking Helm.
+While the driver namespace is still present, cleanup resumes the exact
+checkpoint when necessary and removes only the exact run-labelled workload.
+After namespace deletion it first durably arms any compatible older journal.
+For an old Instance that still exists, its Kapsule node, Instance, and root
+volume must all remain exactly observable and are recorded before mutation. A
+single compatibility state is allowed only when the exact old Instance is
+`NotFound`, the complete exact-pool Kapsule node inventory contains no provider
+identity for it, and the regional File Storage view proves it has no parent
+attachment. That record retains only the old Instance ID and `alreadyAbsent`;
+it must not infer a root ID or authorize any stop, detach, Instance deletion, or
+root-volume deletion. Ambiguous reads, an Instance without its expected Kapsule
+node, or any remaining attachment fail closed. Journals created by the current
+harness must always record the complete Kapsule node, Instance, and root
+identity before provider mutation and must never emit `alreadyAbsent`. It then
+fences every fully journaled old worker with the same one-at-a-time stop,
+detach, exact-node deletion, exact Instance/root retirement, and planned-size
+restoration used by the qualifying scenario; it never requests an unsupported
+zero-node Kapsule pool. It restores the exact completed checkpoint, admits
+recovery only with the
 checkpoint-bound approval, reinstalls the exact release, and then returns to
 normal safe uninstall. Any missing, symlinked, replaced, mismatched, or
 unreadable artifact, label, identity, attachment, or provider read fails closed

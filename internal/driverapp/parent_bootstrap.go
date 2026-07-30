@@ -28,6 +28,7 @@ type parentBootstrapLeadership interface {
 
 type parentBootstrapAccess interface {
 	EnsureMounted(ctx context.Context, parentID string) (string, error)
+	EnsureProvisionalRecoveryMounted(ctx context.Context, parentID string, authorization provisionalRecoveryAuthorization) (string, error)
 }
 
 type parentBootstrapEvidence interface {
@@ -196,7 +197,10 @@ func (manager *parentBootstrapManager) replaceLeadership(leadership parentBootst
 // journal, layout, ownership, or directory mutation. Missing-Lease recovery
 // calls this before consuming operator approval and then performs complete
 // startup inventory reconciliation only after mutation leadership is granted.
-func (manager *parentBootstrapManager) DiscoverExistingReadOnly(ctx context.Context) error {
+func (manager *parentBootstrapManager) DiscoverExistingReadOnly(ctx context.Context, authorization provisionalRecoveryAuthorization) error {
+	if err := authorization.validate(ctx); err != nil {
+		return fmt.Errorf("validate provisional recovery authorization: %w", err)
+	}
 	parentIDs := make([]string, 0, len(manager.parents))
 	for parentID := range manager.parents {
 		parentIDs = append(parentIDs, parentID)
@@ -207,7 +211,7 @@ func (manager *parentBootstrapManager) DiscoverExistingReadOnly(ctx context.Cont
 			return err
 		}
 		parent := manager.parents[parentID]
-		root, err := manager.access.EnsureMounted(ctx, parent.id)
+		root, err := manager.access.EnsureProvisionalRecoveryMounted(ctx, parent.id, authorization)
 		if err != nil {
 			return fmt.Errorf("attach and mount recovery parent %q: %w", parent.id, err)
 		}

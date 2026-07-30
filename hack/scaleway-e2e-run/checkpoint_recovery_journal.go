@@ -10,9 +10,6 @@ import (
 	"strings"
 	"time"
 
-	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
-	"github.com/scaleway/scaleway-sdk-go/scw"
-
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/canonicaljson"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2ecleanup"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/e2eplan"
@@ -26,33 +23,55 @@ const (
 	checkpointRecoverySchemaVersion   = "1"
 	checkpointPhaseWorkloadCreating   = "workload-creating"
 	checkpointPhaseWorkloadReady      = "workload-ready"
+	checkpointPhaseWorkloadStopped    = "workload-stopped"
 	checkpointPhasePreparing          = "preparing"
 	checkpointPhasePrepared           = "prepared"
 	checkpointPhaseNamespaceDeleted   = "namespace-deleted"
 	checkpointPhaseControllerRestored = "controller-restored"
 )
 
+// checkpointNodeRetirement normally binds one pre-recovery Kapsule node to the
+// exact run-owned Instance and provider-created root volume that may have to be
+// retired if Kapsule leaves DeleteNode stuck. The record is fsynced before the
+// first provider mutation so an interrupted recovery never has to rediscover
+// destructive authority from a name or from a partially deleted resource.
+//
+// AlreadyAbsent is a narrow compatibility state for a retained journal written
+// by the older harness before root-volume capture existed. It records only the
+// old Instance ID after both complete Kapsule inventory and Instance API prove
+// absence. It supplies no destructive authority and is forbidden in journals
+// created by the current harness.
+type checkpointNodeRetirement struct {
+	KapsuleNodeID string `json:"kapsuleNodeId,omitempty"`
+	NodeName      string `json:"nodeName,omitempty"`
+	InstanceID    string `json:"instanceId"`
+	RootVolumeID  string `json:"rootVolumeId,omitempty"`
+	AlreadyAbsent bool   `json:"alreadyAbsent,omitempty"`
+}
+
 // checkpointRecoveryJournal makes the namespace-delete checkpoint scenario
 // restartable. Paths refer only to files inside the exact evidence directory;
 // cloud and Kubernetes authority continues to come from the closed request and
 // exact-ID cleanup inventory.
 type checkpointRecoveryJournal struct {
-	SchemaVersion       string   `json:"schemaVersion"`
-	RunID               string   `json:"runId"`
-	Phase               string   `json:"phase"`
-	WorkloadNamespace   string   `json:"workloadNamespace"`
-	WorkloadClaim       string   `json:"workloadClaim"`
-	WorkloadDeployment  string   `json:"workloadDeployment"`
-	Marker              string   `json:"marker"`
-	PersistentVolume    string   `json:"persistentVolume,omitempty"`
-	ValuesPath          string   `json:"valuesPath,omitempty"`
-	ValuesSHA256        string   `json:"valuesSha256,omitempty"`
-	CheckpointRequestID string   `json:"checkpointRequestId,omitempty"`
-	ArchivePath         string   `json:"archivePath,omitempty"`
-	ArchiveSHA256       string   `json:"archiveSha256,omitempty"`
-	ArchiveBytes        uint64   `json:"archiveBytes,omitempty"`
-	ManifestSHA256      string   `json:"manifestSha256,omitempty"`
-	OldInstanceIDs      []string `json:"oldInstanceIds,omitempty"`
+	SchemaVersion                          string                     `json:"schemaVersion"`
+	RunID                                  string                     `json:"runId"`
+	Phase                                  string                     `json:"phase"`
+	WorkloadNamespace                      string                     `json:"workloadNamespace"`
+	WorkloadClaim                          string                     `json:"workloadClaim"`
+	WorkloadDeployment                     string                     `json:"workloadDeployment"`
+	Marker                                 string                     `json:"marker"`
+	PersistentVolume                       string                     `json:"persistentVolume,omitempty"`
+	WorkloadStoppedBeforeNamespaceDeletion bool                       `json:"workloadStoppedBeforeNamespaceDeletion,omitempty"`
+	ValuesPath                             string                     `json:"valuesPath,omitempty"`
+	ValuesSHA256                           string                     `json:"valuesSha256,omitempty"`
+	CheckpointRequestID                    string                     `json:"checkpointRequestId,omitempty"`
+	ArchivePath                            string                     `json:"archivePath,omitempty"`
+	ArchiveSHA256                          string                     `json:"archiveSha256,omitempty"`
+	ArchiveBytes                           uint64                     `json:"archiveBytes,omitempty"`
+	ManifestSHA256                         string                     `json:"manifestSha256,omitempty"`
+	OldInstanceIDs                         []string                   `json:"oldInstanceIds,omitempty"`
+	NodeRetirements                        []checkpointNodeRetirement `json:"nodeRetirements,omitempty"`
 }
 
 func newCheckpointRecoveryJournal(plan e2eplan.Plan) checkpointRecoveryJournal {
@@ -80,13 +99,24 @@ func (journal checkpointRecoveryJournal) validate(plan e2eplan.Plan) error {
 	}
 	switch journal.Phase {
 	case checkpointPhaseWorkloadCreating:
-		if journal.PersistentVolume != "" || journal.ValuesPath != "" || journal.ValuesSHA256 != "" || journal.CheckpointRequestID != "" {
+		if journal.PersistentVolume != "" || journal.WorkloadStoppedBeforeNamespaceDeletion ||
+			journal.ValuesPath != "" || journal.ValuesSHA256 != "" || journal.CheckpointRequestID != "" ||
+			len(journal.OldInstanceIDs) != 0 || len(journal.NodeRetirements) != 0 {
 			return fmt.Errorf("checkpoint workload-creating journal contains future authority")
 		}
 	case checkpointPhaseWorkloadReady:
 		if !safeKubernetesObjectName(journal.PersistentVolume) || journal.ValuesPath != "" ||
-			journal.ValuesSHA256 != "" || journal.CheckpointRequestID != "" {
+			journal.WorkloadStoppedBeforeNamespaceDeletion ||
+			journal.ValuesSHA256 != "" || journal.CheckpointRequestID != "" ||
+			len(journal.OldInstanceIDs) != 0 || len(journal.NodeRetirements) != 0 {
 			return fmt.Errorf("checkpoint workload-ready journal is incomplete")
+		}
+	case checkpointPhaseWorkloadStopped:
+		if !safeKubernetesObjectName(journal.PersistentVolume) ||
+			!journal.WorkloadStoppedBeforeNamespaceDeletion ||
+			journal.ValuesPath != "" || journal.ValuesSHA256 != "" || journal.CheckpointRequestID != "" ||
+			len(journal.OldInstanceIDs) != 0 || len(journal.NodeRetirements) != 0 {
+			return fmt.Errorf("checkpoint workload-stopped journal is incomplete")
 		}
 	case checkpointPhasePreparing:
 		if !safeKubernetesObjectName(journal.PersistentVolume) ||
@@ -123,6 +153,81 @@ func (journal checkpointRecoveryJournal) validate(plan e2eplan.Plan) error {
 			return fmt.Errorf("checkpoint recovery journal repeats an old Instance ID")
 		}
 		seen[id] = struct{}{}
+	}
+	if journal.WorkloadStoppedBeforeNamespaceDeletion &&
+		journal.Phase != checkpointPhaseWorkloadStopped &&
+		len(journal.NodeRetirements) != int(plan.NodePool.Count) {
+		return fmt.Errorf("checkpoint recovery journal lacks its exact node-retirement records")
+	}
+	if journal.WorkloadStoppedBeforeNamespaceDeletion {
+		for _, retirement := range journal.NodeRetirements {
+			if retirement.AlreadyAbsent {
+				return fmt.Errorf("new checkpoint recovery cannot infer an already-absent retirement")
+			}
+		}
+	}
+	if err := validateCheckpointNodeRetirements(journal.OldInstanceIDs, journal.NodeRetirements); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCheckpointNodeRetirements(oldInstanceIDs []string, retirements []checkpointNodeRetirement) error {
+	if len(retirements) == 0 {
+		// Compatibility for the retained diagnostic journal created before
+		// exact root-volume identities were added. Recovery must durably arm
+		// those identities from still-observable exact resources before it may
+		// perform another provider mutation.
+		return nil
+	}
+	if len(retirements) != len(oldInstanceIDs) {
+		return fmt.Errorf("checkpoint node-retirement records differ from the old Instance set")
+	}
+	old := make(map[string]struct{}, len(oldInstanceIDs))
+	for _, id := range oldInstanceIDs {
+		old[id] = struct{}{}
+	}
+	seenNodes := make(map[string]struct{}, len(retirements))
+	seenInstances := make(map[string]struct{}, len(retirements))
+	seenRoots := make(map[string]struct{}, len(retirements))
+	for _, retirement := range retirements {
+		if err := volume.ValidateOperationID(retirement.InstanceID); err != nil {
+			return fmt.Errorf("checkpoint Instance retirement identity: %w", err)
+		}
+		if retirement.AlreadyAbsent {
+			if retirement.KapsuleNodeID != "" || retirement.NodeName != "" || retirement.RootVolumeID != "" {
+				return fmt.Errorf("already-absent checkpoint retirement contains invented provider authority")
+			}
+		} else {
+			for label, id := range map[string]string{
+				"Kapsule node": retirement.KapsuleNodeID,
+				"root volume":  retirement.RootVolumeID,
+			} {
+				if err := volume.ValidateOperationID(id); err != nil {
+					return fmt.Errorf("checkpoint %s retirement identity: %w", label, err)
+				}
+			}
+			if !safeKubernetesObjectName(retirement.NodeName) {
+				return fmt.Errorf("checkpoint node-retirement name is invalid")
+			}
+		}
+		if _, present := old[retirement.InstanceID]; !present {
+			return fmt.Errorf("checkpoint node-retirement record names a foreign Instance")
+		}
+		if _, duplicate := seenInstances[retirement.InstanceID]; duplicate {
+			return fmt.Errorf("checkpoint node-retirement records repeat an Instance")
+		}
+		if !retirement.AlreadyAbsent {
+			if _, duplicate := seenNodes[retirement.KapsuleNodeID]; duplicate {
+				return fmt.Errorf("checkpoint node-retirement records repeat a Kapsule node")
+			}
+			if _, duplicate := seenRoots[retirement.RootVolumeID]; duplicate {
+				return fmt.Errorf("checkpoint node-retirement records repeat a root volume")
+			}
+			seenNodes[retirement.KapsuleNodeID] = struct{}{}
+			seenRoots[retirement.RootVolumeID] = struct{}{}
+		}
+		seenInstances[retirement.InstanceID] = struct{}{}
 	}
 	return nil
 }
@@ -282,23 +387,32 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 	if clusterID == "" || poolID == "" || parentIDs[0] == "" || parentIDs[1] == "" {
 		return fmt.Errorf("checkpoint cleanup recovery lacks exact retained cloud identities")
 	}
+	if len(journal.NodeRetirements) == 0 {
+		// Compatibility for the already-retained diagnostic journal. This is
+		// still pre-mutation: every surviving exact Kapsule node, Instance, and
+		// root volume remains observable. An old Instance already removed by
+		// Kapsule is accepted only after exact node, Instance, and regional
+		// attachment absence proof and carries no inferred root authority.
+		retirements, err := backend.captureCheckpointNodeRetirements(
+			ctx, plan, clusterID, poolID, journal.OldInstanceIDs, parentIDs,
+		)
+		if err != nil {
+			return fmt.Errorf("arm legacy checkpoint node retirement: %w", err)
+		}
+		journal.NodeRetirements = retirements
+		if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+			return fmt.Errorf("retain exact legacy checkpoint node retirement: %w", err)
+		}
+	}
 
 	if err := backend.deleteExactRunNamespaceIfPresent(ctx, request, plan); err != nil {
 		return err
 	}
-	if err := backend.scalePoolAndWait(ctx, plan, clusterID, poolID, 0, journal.OldInstanceIDs); err != nil {
+	replacement, err := backend.replacePreRecoveryKapsuleNodes(
+		ctx, plan, clusterID, poolID, parentIDs, journal.NodeRetirements,
+	)
+	if err != nil {
 		return err
-	}
-	for _, parentID := range parentIDs {
-		listed, err := backend.file.ListAttachments(&fileapi.ListAttachmentsRequest{
-			Region: scw.Region(plan.Region), FilesystemID: &parentID,
-		}, scw.WithAllPages(), scw.WithContext(ctx))
-		if err != nil {
-			return err
-		}
-		if listed == nil || len(listed.Attachments) != 0 {
-			return fmt.Errorf("parent %s remains attached before checkpoint cleanup replay", parentID)
-		}
 	}
 	if err := backend.createRecoveryNamespaceAndSecrets(ctx, request, plan); err != nil {
 		return err
@@ -325,15 +439,6 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 		restored.ManifestSHA256 != journal.ManifestSHA256 {
 		return fmt.Errorf("cleanup checkpoint restore differs from the retained journal: %w", err)
 	}
-	if err := backend.scalePoolAndWait(ctx, plan, clusterID, poolID, plan.NodePool.Count, journal.OldInstanceIDs); err != nil {
-		return err
-	}
-	replacement, err := backend.waitForKapsuleNodeSet(
-		ctx, plan, clusterID, poolID, int(plan.NodePool.Count), journal.OldInstanceIDs,
-	)
-	if err != nil {
-		return err
-	}
 	if err := backend.installRecoveryControllerOnly(ctx, request, journal.ValuesPath); err != nil {
 		return err
 	}
@@ -348,6 +453,12 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 		ctx, request, plan, journal.CheckpointRequestID, journal.ManifestSHA256, provisionalLease,
 	)
 	if err != nil {
+		return err
+	}
+	// The immutable approval closes the pre-approval DaemonSet-absence proof.
+	// Restore node plugins before waiting for the promoted controller so normal
+	// rollout authorization can converge without a circular dependency.
+	if err := backend.installFullRecoveredRelease(ctx, request, journal.ValuesPath); err != nil {
 		return err
 	}
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace,
@@ -368,9 +479,6 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace,
 		"delete", "secret/sfs-subdir-controller-approval", "--wait=true", "--timeout=5m",
 	); err != nil {
-		return err
-	}
-	if err := backend.installFullRecoveredRelease(ctx, request, journal.ValuesPath); err != nil {
 		return err
 	}
 	journal.Phase = checkpointPhaseControllerRestored

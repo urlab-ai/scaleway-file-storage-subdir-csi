@@ -34,6 +34,7 @@ const (
 // filled only after an authenticated Scaleway read by the controller runtime.
 type NodeInventoryObservation struct {
 	NodeName             string
+	ProviderID           string
 	CSINodeID            string
 	OperatingSystem      string
 	Schedulable          bool
@@ -119,7 +120,7 @@ func (inventory *ClientGoNodeInventory) Snapshot(ctx context.Context) ([]NodeInv
 		registration := csiByName[node.Name]
 		plugin, pluginPresent := podByNode[node.Name]
 		result = append(result, NodeInventoryObservation{
-			NodeName: node.Name, CSINodeID: registration.nodeID,
+			NodeName: node.Name, ProviderID: node.Spec.ProviderID, CSINodeID: registration.nodeID,
 			OperatingSystem: node.Status.NodeInfo.OperatingSystem,
 			Schedulable:     !node.Spec.Unschedulable, Deleting: node.DeletionTimestamp != nil,
 			Ready: nodeReady(node), PluginPodPresent: pluginPresent,
