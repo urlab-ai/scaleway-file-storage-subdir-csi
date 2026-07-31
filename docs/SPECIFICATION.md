@@ -6812,10 +6812,19 @@ Kapsule matrix must:
    prove one physical attachment for that parent and node, prove independent
    markers, and verify `NodeGetInfo` omits `MaxVolumesPerNode`;
 5. run a bounded soak for at least 20 minutes over at least 10 sampled PVCs.
-   Writers and cross-node readers must run concurrently, publish atomically
-   replaced checksum-bearing records, reject every corrupt or partial record,
-   retain positive read/write operation counts, and remain correct across one
-   controller restart and one node-plugin restart;
+   Every sampled PVC must remain mounted read-write by one Pod on each of two
+   distinct nodes. Both Pods must write independent, atomically replaced
+   checksum-bearing records while concurrently reading and authenticating the
+   other Pod's records. The runner must observe both peers ready on all sampled
+   PVCs before releasing their per-PVC start signals. Positive per-node write
+   and distinct-generation cross-read counts must then prove that both writers
+   were active during the same test interval; repeatedly reading one stale
+   valid record must not advance the count. Every peer must acknowledge its
+   first successful write and cross-read before fault injection. The test must
+   reject every corrupt or partial record and remain correct across one
+   controller restart and one node-plugin restart. All peer processes must
+   remain active, and both mounts of every sampled PVC must complete a new
+   write plus cross-read after each replacement becomes Ready;
 6. prove cross-node RWX, read-only rejection, `SINGLE_NODE_WRITER` conflict and
    handoff, and `archive`, `retain`, and `delete` behavior without changing a
    sibling volume;
@@ -7034,12 +7043,21 @@ original Lease evidence. Missing, foreign, attached, or ambiguous identity
 leaves the journal and resources intact for operator recovery.
 
 The soak is a correctness and recovery test, not a throughput benchmark. Its
-20-minute minimum is measured after every sampled writer and reader is Ready.
-Qualification evidence records duration, sampled PVC identities, aggregate
-successful writes and reads, checksum failures, and the controller and
-node-plugin Pod UIDs before and after their in-soak restarts. Zero successful
-operations, any checksum failure, an early workload exit, or a restart without
-a distinct Pod UID fails qualification.
+20-minute minimum is measured after every sampled peer is Ready. Peers write
+different records because unsynchronized concurrent modification of the same
+file tests application-level coordination rather than CSI RWX publication.
+Each peer publishes through a temporary file followed by `sync` and atomic
+rename, and authenticates the other peer's complete, strictly non-regressing
+record generations. Qualification evidence records duration, sampled PVC
+identities, the exact ready and active multi-writer pair counts, positive write
+and distinct cross-read counts for both nodes, aggregate successful writes and
+reads, checksum failures, controller and node-plugin recovery-proof completion
+offsets within the active workload window, explicit two-way post-restart I/O,
+and the controller and node-plugin Pod UIDs before and after their in-soak
+restarts. A missing pair, zero or insufficient operations on either node, a
+stale record counted more than once, any checksum failure, an early workload
+exit, a restart outside the active window, absent post-restart I/O, or a restart
+without a distinct Pod UID fails qualification.
 
 During the new-controller/old-node interval in item 11, the exact controller
 startup refusal naming both configuration generations together with a

@@ -1306,7 +1306,123 @@ bootstrap_restart_add_parent() {
 run_scale_soak() {
   scale_soak_duration=1200
   scale_soak_pids=
-  scale_soak_start=$(date +%s)
+  # Both peers use the same command with their own independent record path.
+  # Distinct records prove that both cross-node mounts are writable without
+  # turning the CSI qualification into an application-level file-locking test.
+  scale_soak_peer_command='
+    set -eu
+    duration=$1
+    own_prefix=$2
+    peer_prefix=$3
+    own_record=$4
+    peer_record=$5
+    own_ready=$6
+    peer_ready=$7
+    start_record=$8
+    start_identity=$9
+
+    ready_temporary="$own_ready.$$"
+    printf "%s\n" "$own_prefix" >"$ready_temporary"
+    sync
+    mv "$ready_temporary" "$own_ready"
+    sync
+    barrier_deadline=$(( $(date +%s) + 300 ))
+    while :; do
+      peer_ready_value=
+      if [ -e "$peer_ready" ]; then
+        peer_ready_value=$(cat "$peer_ready")
+      fi
+      [ "$peer_ready_value" = "$peer_prefix" ] && break
+      [ -z "$peer_ready_value" ] || {
+        echo "peer readiness record has an unexpected identity" >&2
+        exit 43
+      }
+      [ "$(date +%s)" -lt "$barrier_deadline" ] || {
+        echo "timed out waiting for the cross-node writer peer" >&2
+        exit 44
+      }
+      sleep 1
+    done
+
+    start_deadline=$(( $(date +%s) + 300 ))
+    while :; do
+      observed_start=
+      if [ -e "$start_record" ]; then
+        observed_start=$(cat "$start_record")
+      fi
+      [ "$observed_start" = "$start_identity" ] && break
+      [ -z "$observed_start" ] || {
+        echo "soak start record has an unexpected identity" >&2
+        exit 45
+      }
+      [ "$(date +%s)" -lt "$start_deadline" ] || {
+        echo "timed out waiting for the soak start signal" >&2
+        exit 46
+      }
+      sleep 1
+    done
+
+    deadline=$(( $(date +%s) + duration ))
+    write_count=0
+    cross_read_count=0
+    last_peer_sequence=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      write_count=$((write_count + 1))
+      payload="$own_prefix$write_count"
+      digest=$(printf "%s" "$payload" | sha256sum)
+      digest=${digest%% *}
+      temporary="$own_record.$$"
+      printf "%s %s\n" "$digest" "$payload" >"$temporary"
+      sync
+      mv "$temporary" "$own_record"
+      sync
+
+      peer_value=
+      if [ -e "$peer_record" ]; then
+        peer_value=$(cat "$peer_record")
+      fi
+      if [ -n "$peer_value" ]; then
+        set -- $peer_value
+        [ "$#" -eq 2 ] || {
+          echo "cross-node record is partial or malformed" >&2
+          exit 47
+        }
+        peer_digest=$1
+        peer_payload=$2
+        case "$peer_payload" in
+          "$peer_prefix"*) peer_sequence=${peer_payload#"$peer_prefix"} ;;
+          *) echo "cross-node record has an unexpected writer identity" >&2; exit 48 ;;
+        esac
+        case "$peer_sequence" in
+          ""|*[!0-9]*) echo "cross-node record has an invalid sequence" >&2; exit 49 ;;
+        esac
+        observed_digest=$(printf "%s" "$peer_payload" | sha256sum)
+        observed_digest=${observed_digest%% *}
+        [ "$peer_digest" = "$observed_digest" ] || {
+          echo "cross-node record checksum mismatch" >&2
+          exit 50
+        }
+        [ "$peer_sequence" -ge "$last_peer_sequence" ] || {
+          echo "cross-node record sequence moved backwards" >&2
+          exit 51
+        }
+        if [ "$peer_sequence" -gt "$last_peer_sequence" ]; then
+          last_peer_sequence=$peer_sequence
+          cross_read_count=$((cross_read_count + 1))
+          if [ "$cross_read_count" -eq 1 ]; then
+            active_record="$own_ready.active"
+            active_temporary="$active_record.$$"
+            printf "%s\n" "$own_prefix" >"$active_temporary"
+            sync
+            mv "$active_temporary" "$active_record"
+            sync
+          fi
+        fi
+      fi
+      sleep 2
+    done
+    printf "%s %s\n" "$write_count" "$cross_read_count"
+  '
   scale_soak_cleanup() {
     for scale_soak_pid in $scale_soak_pids; do
       kill "$scale_soak_pid" >/dev/null 2>&1 || true
@@ -1315,76 +1431,205 @@ run_scale_soak() {
       wait "$scale_soak_pid" >/dev/null 2>&1 || true
     done
   }
+  scale_soak_wait_pair_records() {
+    scale_soak_wait_pod=$1
+    scale_soak_wait_path_a=$2
+    scale_soak_wait_expected_a=$3
+    scale_soak_wait_path_b=$4
+    scale_soak_wait_expected_b=$5
+    scale_soak_wait_label=$6
+    k -n "$namespace" exec "$scale_soak_wait_pod" -- sh -c '
+      set -eu
+      deadline=$(( $(date +%s) + 300 ))
+      while :; do
+        observed_a=
+        observed_b=
+        if [ -e "$1" ]; then observed_a=$(cat "$1"); fi
+        if [ -e "$3" ]; then observed_b=$(cat "$3"); fi
+        [ "$observed_a" = "$2" ] && [ "$observed_b" = "$4" ] && exit 0
+        { [ -z "$observed_a" ] || [ "$observed_a" = "$2" ]; } &&
+          { [ -z "$observed_b" ] || [ "$observed_b" = "$4" ]; } || {
+          echo "$5 record has an unexpected identity" >&2
+          exit 53
+        }
+        [ "$(date +%s)" -lt "$deadline" ] || {
+          echo "timed out waiting for $5 records" >&2
+          exit 54
+        }
+        sleep 1
+      done
+    ' sh "$scale_soak_wait_path_a" "$scale_soak_wait_expected_a" \
+      "$scale_soak_wait_path_b" "$scale_soak_wait_expected_b" "$scale_soak_wait_label"
+  }
+  scale_soak_require_running() {
+    scale_soak_running_checkpoint=$1
+    for scale_soak_running_pid in $scale_soak_pids; do
+      kill -0 "$scale_soak_running_pid" >/dev/null 2>&1 || {
+        echo "soak peer exited before $scale_soak_running_checkpoint" >&2
+        return 1
+      }
+    done
+  }
+  scale_soak_require_restart_window() {
+    scale_soak_window_checkpoint=$1
+    scale_soak_window_now=$(date +%s)
+    [ $((scale_soak_window_now + scale_soak_restart_margin)) -le "$scale_soak_workload_deadline" ] || {
+      echo "soak has insufficient active time remaining after $scale_soak_window_checkpoint" >&2
+      return 1
+    }
+  }
+  scale_soak_prove_post_restart_io() {
+    scale_soak_recovery_phase=$1
+    scale_soak_recovery_write_command='
+      set -eu
+      { test ! -e "$1" && test ! -L "$1"; } || {
+        echo "post-restart probe path already exists: $1" >&2
+        exit 55
+      }
+      digest=$(printf "%s" "$2" | sha256sum)
+      digest=${digest%% *}
+      temporary="$1.$$"
+      printf "%s %s\n" "$digest" "$2" >"$temporary"
+      sync
+      mv "$temporary" "$1"
+      sync
+    '
+    scale_soak_recovery_read_command='
+      set -eu
+      digest=$(printf "%s" "$2" | sha256sum)
+      digest=${digest%% *}
+      [ "$(cat "$1")" = "$digest $2" ] || {
+        echo "post-restart cross-node record validation failed" >&2
+        exit 56
+      }
+    '
+    scale_soak_recovery_index=0
+    while [ "$scale_soak_recovery_index" -lt 10 ]; do
+      scale_soak_recovery_suffix=$(printf '%03d' "$scale_soak_recovery_index")
+      scale_soak_recovery_peer_a="e2e-scale-writer-$short_run-$scale_soak_recovery_suffix"
+      scale_soak_recovery_peer_b="e2e-scale-reader-$short_run-$scale_soak_recovery_suffix"
+      scale_soak_recovery_record_a="/data/soak-$short_run-$scale_soak_recovery_phase-a"
+      scale_soak_recovery_record_b="/data/soak-$short_run-$scale_soak_recovery_phase-b"
+      scale_soak_recovery_payload_a="soak-$short_run-$scale_soak_recovery_suffix-$scale_soak_recovery_phase-a"
+      scale_soak_recovery_payload_b="soak-$short_run-$scale_soak_recovery_suffix-$scale_soak_recovery_phase-b"
+
+      k -n "$namespace" exec "$scale_soak_recovery_peer_a" -- sh -c "$scale_soak_recovery_write_command" \
+        sh "$scale_soak_recovery_record_a" "$scale_soak_recovery_payload_a"
+      k -n "$namespace" exec "$scale_soak_recovery_peer_b" -- sh -c "$scale_soak_recovery_write_command" \
+        sh "$scale_soak_recovery_record_b" "$scale_soak_recovery_payload_b"
+      k -n "$namespace" exec "$scale_soak_recovery_peer_a" -- sh -c "$scale_soak_recovery_read_command" \
+        sh "$scale_soak_recovery_record_b" "$scale_soak_recovery_payload_b"
+      k -n "$namespace" exec "$scale_soak_recovery_peer_b" -- sh -c "$scale_soak_recovery_read_command" \
+        sh "$scale_soak_recovery_record_a" "$scale_soak_recovery_payload_a"
+      scale_soak_recovery_index=$((scale_soak_recovery_index + 1))
+    done
+  }
   trap 'scale_soak_cleanup' EXIT HUP INT TERM
 
   # Fail before the timed run if the pinned workload image lacks one of the
   # tiny POSIX tools used to authenticate each atomically replaced record.
   k -n "$namespace" exec "e2e-scale-writer-$short_run-000" -- sh -c \
-    'command -v date >/dev/null && command -v sha256sum >/dev/null && command -v sync >/dev/null'
+    'command -v date >/dev/null && command -v sha256sum >/dev/null && command -v sync >/dev/null && command -v mv >/dev/null'
 
   scale_soak_index=0
   while [ "$scale_soak_index" -lt 10 ]; do
     scale_soak_suffix=$(printf '%03d' "$scale_soak_index")
-    scale_soak_writer="e2e-scale-writer-$short_run-$scale_soak_suffix"
-    scale_soak_reader="e2e-scale-reader-$short_run-$scale_soak_suffix"
-    scale_soak_prefix="soak-$short_run-$scale_soak_suffix-"
-    scale_soak_writer_count="$evidence_dir/soak-writer-$scale_soak_suffix.count"
-    scale_soak_reader_count="$evidence_dir/soak-reader-$scale_soak_suffix.count"
-    scale_soak_writer_log="$evidence_dir/soak-writer-$scale_soak_suffix.log"
-    scale_soak_reader_log="$evidence_dir/soak-reader-$scale_soak_suffix.log"
-    rm -f "$scale_soak_writer_count" "$scale_soak_reader_count" "$scale_soak_writer_log" "$scale_soak_reader_log"
+    scale_soak_peer_a="e2e-scale-writer-$short_run-$scale_soak_suffix"
+    scale_soak_peer_b="e2e-scale-reader-$short_run-$scale_soak_suffix"
+    scale_soak_prefix_a="soak-$short_run-$scale_soak_suffix-a-"
+    scale_soak_prefix_b="soak-$short_run-$scale_soak_suffix-b-"
+    scale_soak_record_a="/data/soak-$short_run-record-a"
+    scale_soak_record_b="/data/soak-$short_run-record-b"
+    scale_soak_ready_a="/data/.soak-$short_run-ready-a"
+    scale_soak_ready_b="/data/.soak-$short_run-ready-b"
+    scale_soak_start_record="/data/.soak-$short_run-start"
+    scale_soak_start_identity="soak-$short_run-start"
+    scale_soak_peer_a_count="$evidence_dir/soak-peer-a-$scale_soak_suffix.count"
+    scale_soak_peer_b_count="$evidence_dir/soak-peer-b-$scale_soak_suffix.count"
+    scale_soak_peer_a_log="$evidence_dir/soak-peer-a-$scale_soak_suffix.log"
+    scale_soak_peer_b_log="$evidence_dir/soak-peer-b-$scale_soak_suffix.log"
+    rm -f "$scale_soak_peer_a_count" "$scale_soak_peer_b_count" "$scale_soak_peer_a_log" "$scale_soak_peer_b_log"
 
-    k -n "$namespace" exec "$scale_soak_writer" -- sh -c '
-      set -eu
-      duration=$1
-      prefix=$2
-      deadline=$(( $(date +%s) + duration ))
-      count=0
-      while [ "$(date +%s)" -lt "$deadline" ]; do
-        count=$((count + 1))
-        payload="$prefix$count"
-        digest=$(printf "%s" "$payload" | sha256sum)
-        digest=${digest%% *}
-        temporary="/data/.soak-record.$$"
-        printf "%s %s\n" "$digest" "$payload" >"$temporary"
-        sync
-        mv "$temporary" /data/soak-record
-        sync
-        record=$(cat /data/soak-record)
-        set -- $record
-        [ "$#" -eq 2 ] && [ "$1" = "$digest" ] && [ "$2" = "$payload" ]
-        sleep 2
+    # A rerun must not accept records from an earlier attempt with the same run
+    # identity. Each path is exact and belongs to this run-owned logical PVC.
+    k -n "$namespace" exec "$scale_soak_peer_a" -- sh -c '
+      for path; do
+        { test ! -e "$path" && test ! -L "$path"; } || {
+          echo "run-scoped soak path already exists: $path" >&2
+          exit 52
+        }
       done
-      printf "%s\n" "$count"
-    ' sh "$scale_soak_duration" "$scale_soak_prefix" >"$scale_soak_writer_count" 2>"$scale_soak_writer_log" &
+    ' sh "$scale_soak_record_a" "$scale_soak_record_b" "$scale_soak_ready_a" "$scale_soak_ready_b" \
+      "$scale_soak_ready_a.active" "$scale_soak_ready_b.active" "$scale_soak_start_record"
+
+    k -n "$namespace" exec "$scale_soak_peer_a" -- sh -c "$scale_soak_peer_command" sh \
+      "$scale_soak_duration" "$scale_soak_prefix_a" "$scale_soak_prefix_b" \
+      "$scale_soak_record_a" "$scale_soak_record_b" "$scale_soak_ready_a" "$scale_soak_ready_b" \
+      "$scale_soak_start_record" "$scale_soak_start_identity" \
+      >"$scale_soak_peer_a_count" 2>"$scale_soak_peer_a_log" &
     scale_soak_pids="$scale_soak_pids $!"
 
-    k -n "$namespace" exec "$scale_soak_reader" -- sh -c '
-      set -eu
-      duration=$1
-      prefix=$2
-      deadline=$(( $(date +%s) + duration ))
-      count=0
-      while [ "$(date +%s)" -lt "$deadline" ]; do
-        record=$(cat /data/soak-record 2>/dev/null || true)
-        if [ -n "$record" ]; then
-          set -- $record
-          [ "$#" -eq 2 ]
-          digest=$1
-          payload=$2
-          case "$payload" in "$prefix"*) ;; *) exit 41 ;; esac
-          observed=$(printf "%s" "$payload" | sha256sum)
-          observed=${observed%% *}
-          [ "$digest" = "$observed" ] || exit 42
-          count=$((count + 1))
-        fi
-        sleep 2
-      done
-      printf "%s\n" "$count"
-    ' sh "$scale_soak_duration" "$scale_soak_prefix" >"$scale_soak_reader_count" 2>"$scale_soak_reader_log" &
+    k -n "$namespace" exec "$scale_soak_peer_b" -- sh -c "$scale_soak_peer_command" sh \
+      "$scale_soak_duration" "$scale_soak_prefix_b" "$scale_soak_prefix_a" \
+      "$scale_soak_record_b" "$scale_soak_record_a" "$scale_soak_ready_b" "$scale_soak_ready_a" \
+      "$scale_soak_start_record" "$scale_soak_start_identity" \
+      >"$scale_soak_peer_b_count" 2>"$scale_soak_peer_b_log" &
     scale_soak_pids="$scale_soak_pids $!"
     scale_soak_index=$((scale_soak_index + 1))
   done
+
+  # Do not start the timed interval or restart CSI until every cross-node pair
+  # has joined its exact run-scoped barrier. This prevents a slow exec session
+  # from being counted without actually overlapping the recovery exercise.
+  scale_soak_index=0
+  while [ "$scale_soak_index" -lt 10 ]; do
+    scale_soak_suffix=$(printf '%03d' "$scale_soak_index")
+    scale_soak_peer_a="e2e-scale-writer-$short_run-$scale_soak_suffix"
+    scale_soak_prefix_a="soak-$short_run-$scale_soak_suffix-a-"
+    scale_soak_prefix_b="soak-$short_run-$scale_soak_suffix-b-"
+    scale_soak_ready_a="/data/.soak-$short_run-ready-a"
+    scale_soak_ready_b="/data/.soak-$short_run-ready-b"
+    scale_soak_wait_pair_records "$scale_soak_peer_a" \
+      "$scale_soak_ready_a" "$scale_soak_prefix_a" "$scale_soak_ready_b" "$scale_soak_prefix_b" "readiness"
+    scale_soak_index=$((scale_soak_index + 1))
+  done
+
+  scale_soak_start=$(date +%s)
+  scale_soak_workload_deadline=$((scale_soak_start + scale_soak_duration))
+  scale_soak_restart_margin=60
+  scale_soak_index=0
+  while [ "$scale_soak_index" -lt 10 ]; do
+    scale_soak_suffix=$(printf '%03d' "$scale_soak_index")
+    scale_soak_peer_a="e2e-scale-writer-$short_run-$scale_soak_suffix"
+    scale_soak_start_record="/data/.soak-$short_run-start"
+    scale_soak_start_identity="soak-$short_run-start"
+    k -n "$namespace" exec "$scale_soak_peer_a" -- sh -c '
+      set -eu
+      temporary="$1.$$"
+      printf "%s\n" "$2" >"$temporary"
+      sync
+      mv "$temporary" "$1"
+      sync
+    ' sh "$scale_soak_start_record" "$scale_soak_start_identity"
+    scale_soak_index=$((scale_soak_index + 1))
+  done
+
+  # Every peer publishes this acknowledgement only after its first successful
+  # write and its first distinct cross-read. CSI restarts begin only after all
+  # 20 peers have proved active I/O, not merely process readiness.
+  scale_soak_index=0
+  while [ "$scale_soak_index" -lt 10 ]; do
+    scale_soak_suffix=$(printf '%03d' "$scale_soak_index")
+    scale_soak_peer_a="e2e-scale-writer-$short_run-$scale_soak_suffix"
+    scale_soak_prefix_a="soak-$short_run-$scale_soak_suffix-a-"
+    scale_soak_prefix_b="soak-$short_run-$scale_soak_suffix-b-"
+    scale_soak_ready_a="/data/.soak-$short_run-ready-a.active"
+    scale_soak_ready_b="/data/.soak-$short_run-ready-b.active"
+    scale_soak_wait_pair_records "$scale_soak_peer_a" \
+      "$scale_soak_ready_a" "$scale_soak_prefix_a" "$scale_soak_ready_b" "$scale_soak_prefix_b" "active I/O"
+    scale_soak_index=$((scale_soak_index + 1))
+  done
+  scale_soak_require_running "controller restart"
 
   scale_soak_controller=$(one_name deployment controller)
   scale_soak_controller_pod_before=$(one_name pod controller)
@@ -1398,15 +1643,37 @@ run_scale_soak() {
   # The waits are workload duration, not readiness contracts. Kubernetes
   # readiness below remains bounded by rollout status and explicit Pod state.
   sleep 60
+  scale_soak_require_running "controller restart mutation"
+  scale_soak_require_restart_window "controller restart mutation"
   k -n "$namespace" rollout restart "$scale_soak_controller"
   k -n "$namespace" rollout status "$scale_soak_controller" --timeout=20m
-  scale_soak_controller_pod_after=$(one_name pod controller)
+  # Deployment rollout completion can briefly overlap with the terminating old
+  # Pod. Select the single active Ready controller so that Kubernetes object
+  # deletion timing cannot turn a healthy CSI restart into a false test failure.
+  scale_soak_controller_pod_after=$(k -n "$namespace" get pods \
+    -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=controller" -o json | "$JQ" -er '
+      .items |
+      map(select(.metadata.deletionTimestamp == null) |
+          select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))) |
+      if length == 1 then "pod/" + .[0].metadata.name
+      else error("controller soak rollout did not leave exactly one active Ready Pod")
+      end
+    ')
   scale_soak_controller_uid_after=$(k -n "$namespace" get "$scale_soak_controller_pod_after" -o jsonpath='{.metadata.uid}')
   [ "$scale_soak_controller_uid_before" != "$scale_soak_controller_uid_after" ]
+  scale_soak_require_running "controller post-restart I/O proof"
+  scale_soak_require_restart_window "controller rollout"
+  scale_soak_prove_post_restart_io controller
+  scale_soak_require_running "completed controller post-restart I/O proof"
+  scale_soak_require_restart_window "controller post-restart I/O proof"
+  scale_soak_controller_recovery_offset=$(( $(date +%s) - scale_soak_start ))
+  [ "$scale_soak_controller_recovery_offset" -le $((scale_soak_duration - scale_soak_restart_margin)) ]
+  scale_soak_controller_post_restart_read_write=true
 
   sleep 60
+  scale_soak_require_running "node-plugin restart mutation"
+  scale_soak_require_restart_window "node-plugin restart mutation"
   k -n "$namespace" delete "$scale_soak_node_pod_before" --wait=true --timeout=10m
-  scale_soak_deadline=$(( $(date +%s) + 1200 ))
   scale_soak_node_uid_after=
   while [ -z "$scale_soak_node_uid_after" ]; do
     scale_soak_node_uid_after=$(k -n "$namespace" get pods -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=node" \
@@ -1415,9 +1682,17 @@ run_scale_soak() {
           any(.status.conditions[]?; .type == "Ready" and .status == "True"))] |
         if length == 1 then .[0].metadata.uid else "" end
       ')
-    [ "$(date +%s)" -lt "$scale_soak_deadline" ] || return 1
+    scale_soak_require_running "node-plugin replacement"
+    scale_soak_require_restart_window "node-plugin replacement"
     [ -n "$scale_soak_node_uid_after" ] || sleep 3
   done
+  scale_soak_prove_post_restart_io node-plugin
+  scale_soak_require_running "completed node-plugin post-restart I/O proof"
+  scale_soak_require_restart_window "node-plugin post-restart I/O proof"
+  scale_soak_node_recovery_offset=$(( $(date +%s) - scale_soak_start ))
+  [ "$scale_soak_node_recovery_offset" -le $((scale_soak_duration - scale_soak_restart_margin)) ]
+  [ "$scale_soak_node_recovery_offset" -gt "$scale_soak_controller_recovery_offset" ]
+  scale_soak_node_post_restart_read_write=true
 
   for scale_soak_pid in $scale_soak_pids; do
     if ! wait "$scale_soak_pid"; then
@@ -1431,19 +1706,31 @@ run_scale_soak() {
   scale_soak_elapsed=$((scale_soak_end - scale_soak_start))
   [ "$scale_soak_elapsed" -ge "$scale_soak_duration" ]
 
-  scale_soak_writes=0
-  scale_soak_reads=0
+  scale_soak_same_node_writes=0
+  scale_soak_same_node_cross_reads=0
+  scale_soak_peer_node_writes=0
+  scale_soak_peer_node_cross_reads=0
   scale_soak_index=0
   while [ "$scale_soak_index" -lt 10 ]; do
     scale_soak_suffix=$(printf '%03d' "$scale_soak_index")
-    scale_soak_writer_count=$(tr -d '[:space:]' <"$evidence_dir/soak-writer-$scale_soak_suffix.count")
-    scale_soak_reader_count=$(tr -d '[:space:]' <"$evidence_dir/soak-reader-$scale_soak_suffix.count")
-    printf '%s\n' "$scale_soak_writer_count" "$scale_soak_reader_count" | grep -Eq '^[1-9][0-9]*$'
-    [ "$scale_soak_writer_count" -ge 100 ] && [ "$scale_soak_reader_count" -ge 100 ]
-    scale_soak_writes=$((scale_soak_writes + scale_soak_writer_count))
-    scale_soak_reads=$((scale_soak_reads + scale_soak_reader_count))
+    scale_soak_peer_a_result=$(tr -d '\r\n' <"$evidence_dir/soak-peer-a-$scale_soak_suffix.count")
+    scale_soak_peer_b_result=$(tr -d '\r\n' <"$evidence_dir/soak-peer-b-$scale_soak_suffix.count")
+    printf '%s\n' "$scale_soak_peer_a_result" | grep -Eq '^[1-9][0-9]* [1-9][0-9]*$'
+    printf '%s\n' "$scale_soak_peer_b_result" | grep -Eq '^[1-9][0-9]* [1-9][0-9]*$'
+    scale_soak_peer_a_writes=${scale_soak_peer_a_result%% *}
+    scale_soak_peer_a_reads=${scale_soak_peer_a_result#* }
+    scale_soak_peer_b_writes=${scale_soak_peer_b_result%% *}
+    scale_soak_peer_b_reads=${scale_soak_peer_b_result#* }
+    [ "$scale_soak_peer_a_writes" -ge 100 ] && [ "$scale_soak_peer_a_reads" -ge 100 ]
+    [ "$scale_soak_peer_b_writes" -ge 100 ] && [ "$scale_soak_peer_b_reads" -ge 100 ]
+    scale_soak_same_node_writes=$((scale_soak_same_node_writes + scale_soak_peer_a_writes))
+    scale_soak_same_node_cross_reads=$((scale_soak_same_node_cross_reads + scale_soak_peer_a_reads))
+    scale_soak_peer_node_writes=$((scale_soak_peer_node_writes + scale_soak_peer_b_writes))
+    scale_soak_peer_node_cross_reads=$((scale_soak_peer_node_cross_reads + scale_soak_peer_b_reads))
     scale_soak_index=$((scale_soak_index + 1))
   done
+  scale_soak_writes=$((scale_soak_same_node_writes + scale_soak_peer_node_writes))
+  scale_soak_reads=$((scale_soak_same_node_cross_reads + scale_soak_peer_node_cross_reads))
   trap - EXIT HUP INT TERM
 }
 
@@ -1468,6 +1755,7 @@ scenario_scale() {
       .metadata.labels["sfs-subdir-e2e-run"] == $run and
       .metadata.labels["sfs-subdir-e2e-scenario"] == "scale" and
       .status.phase == "Bound" and
+      .spec.accessModes == ["ReadWriteMany"] and
       (.metadata.uid | length) > 0 and
       (.spec.volumeName | length) > 0)
   ' "$pvc_inventory.tmp" >/dev/null
@@ -1566,8 +1854,34 @@ scenario_scale() {
     index=$((index + 1))
   done
 
+  # Inspect the live Pod specs rather than relying only on the manifests above:
+  # both peers must hold the same sampled claim read-write on distinct nodes.
+  index=0
+  while [ "$index" -lt 10 ]; do
+    suffix=$(printf '%03d' "$index")
+    claim="e2e-scale-$short_run-$suffix"
+    writer_pod="e2e-scale-writer-$short_run-$suffix"
+    reader_pod="e2e-scale-reader-$short_run-$suffix"
+    k -n "$namespace" get "pod/$writer_pod" -o json | "$JQ" -e --arg claim "$claim" --arg node "$node_a" '
+      .spec.nodeName == $node and
+      any(.spec.volumes[]?; .name == "data" and .persistentVolumeClaim.claimName == $claim and
+        (.persistentVolumeClaim.readOnly // false) == false) and
+      any(.spec.containers[]?; .name == "workload" and
+        any(.volumeMounts[]?; .name == "data" and (.readOnly // false) == false))
+    ' >/dev/null
+    k -n "$namespace" get "pod/$reader_pod" -o json | "$JQ" -e --arg claim "$claim" --arg node "$node_b" '
+      .spec.nodeName == $node and
+      any(.spec.volumes[]?; .name == "data" and .persistentVolumeClaim.claimName == $claim and
+        (.persistentVolumeClaim.readOnly // false) == false) and
+      any(.spec.containers[]?; .name == "workload" and
+        any(.volumeMounts[]?; .name == "data" and (.readOnly // false) == false))
+    ' >/dev/null
+    index=$((index + 1))
+  done
+  scale_multiwriter_mounts_read_write=true
+
   run_scale_soak
-	reader_node_id=$(node_id_for_name "$node_b")
+  reader_node_id=$(node_id_for_name "$node_b")
 
   readonly_pod="e2e-scale-readonly-$short_run"
   apply_readonly_pod "$readonly_pod" "e2e-scale-$short_run-000" "$node_b" \
@@ -1597,6 +1911,15 @@ scenario_scale() {
     --argjson regional "$regional_same_node_count" --argjson server "$server_parent_count" \
     --argjson soak_duration "$scale_soak_elapsed" --argjson soak_writes "$scale_soak_writes" \
     --argjson soak_reads "$scale_soak_reads" --arg soak_controller_before "$scale_soak_controller_uid_before" \
+    --argjson same_node_writes "$scale_soak_same_node_writes" \
+    --argjson same_node_cross_reads "$scale_soak_same_node_cross_reads" \
+    --argjson peer_node_writes "$scale_soak_peer_node_writes" \
+    --argjson peer_node_cross_reads "$scale_soak_peer_node_cross_reads" \
+    --argjson mounts_read_write "$scale_multiwriter_mounts_read_write" \
+    --argjson controller_recovery_offset "$scale_soak_controller_recovery_offset" \
+    --argjson node_recovery_offset "$scale_soak_node_recovery_offset" \
+    --argjson controller_post_restart_rw "$scale_soak_controller_post_restart_read_write" \
+    --argjson node_post_restart_rw "$scale_soak_node_post_restart_read_write" \
     --arg soak_controller_after "$scale_soak_controller_uid_after" --arg soak_node_before "$scale_soak_node_uid_before" \
     --arg soak_node_after "$scale_soak_node_uid_after" '
       {schemaVersion:"1",scenario:"one-hundred-pvc-scale",runId:$run,observedAt:$observed,
@@ -1605,9 +1928,16 @@ scenario_scale() {
        sameNodeClaimNames:$same_names,isolatedMarkerCount:$mounts,sameNodeId:$node_id,
        regionalAttachmentCount:$regional,serverFilesystemCount:$server,nodeMaxVolumesOmitted:true,sampledPvcCount:10,
        sampledClaimNames:$sampled_names,sampledReaderNodeName:$reader_node,sampledReaderNodeId:$reader_node_id,
-       successfulWriterCount:10,successfulReaderCount:10,
+       multiWriterPairCount:10,multiWriterActivePairCount:10,multiWriterMountsReadWrite:$mounts_read_write,
+       successfulWriterCount:20,successfulReaderCount:20,
        readOnlyWriteRejected:true,nodePluginsCredentialFree:true,soakDurationSeconds:$soak_duration,
+       soakSameNodeWrites:$same_node_writes,soakSameNodeCrossReads:$same_node_cross_reads,
+       soakPeerNodeWrites:$peer_node_writes,soakPeerNodeCrossReads:$peer_node_cross_reads,
        soakSuccessfulWrites:$soak_writes,soakSuccessfulReads:$soak_reads,soakChecksumFailures:0,
+       soakControllerRecoveryOffsetSeconds:$controller_recovery_offset,
+       soakNodePluginRecoveryOffsetSeconds:$node_recovery_offset,
+       soakControllerPostRestartReadWrite:$controller_post_restart_rw,
+       soakNodePluginPostRestartReadWrite:$node_post_restart_rw,
        soakControllerUidBefore:$soak_controller_before,soakControllerUidAfter:$soak_controller_after,
        soakNodePluginUidBefore:$soak_node_before,soakNodePluginUidAfter:$soak_node_after}
     ' >"$proof.tmp"

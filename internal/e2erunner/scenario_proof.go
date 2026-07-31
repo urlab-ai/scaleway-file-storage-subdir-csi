@@ -69,39 +69,50 @@ type SingleNodeWriterProof struct {
 // HundredPVCScaleProof records the bounded release-scale workload. Counts are
 // exact so unrelated run-labelled claims or partial success cannot be hidden.
 type HundredPVCScaleProof struct {
-	SchemaVersion             string   `json:"schemaVersion"`
-	Scenario                  string   `json:"scenario"`
-	RunID                     string   `json:"runId"`
-	ObservedAt                string   `json:"observedAt"`
-	PVCCount                  int      `json:"pvcCount"`
-	BoundPVCCount             int      `json:"boundPvcCount"`
-	PVCNames                  []string `json:"pvcNames"`
-	SingleParentFilesystemID  string   `json:"singleParentFilesystemId"`
-	SameNodeName              string   `json:"sameNodeName"`
-	MaxFileSystems            int      `json:"maxFileSystems"`
-	SameNodeLogicalMounts     int      `json:"sameNodeLogicalMounts"`
-	SameNodeClaimNames        []string `json:"sameNodeClaimNames"`
-	IsolatedMarkerCount       int      `json:"isolatedMarkerCount"`
-	SameNodeID                string   `json:"sameNodeId"`
-	RegionalAttachmentCount   int      `json:"regionalAttachmentCount"`
-	ServerFilesystemCount     int      `json:"serverFilesystemCount"`
-	NodeMaxVolumesOmitted     bool     `json:"nodeMaxVolumesOmitted"`
-	SampledPVCCount           int      `json:"sampledPvcCount"`
-	SampledClaimNames         []string `json:"sampledClaimNames"`
-	SampledReaderNodeName     string   `json:"sampledReaderNodeName"`
-	SampledReaderNodeID       string   `json:"sampledReaderNodeId"`
-	SuccessfulWriterCount     int      `json:"successfulWriterCount"`
-	SuccessfulReaderCount     int      `json:"successfulReaderCount"`
-	ReadOnlyWriteRejected     bool     `json:"readOnlyWriteRejected"`
-	NodePluginsCredentialFree bool     `json:"nodePluginsCredentialFree"`
-	SoakDurationSeconds       int64    `json:"soakDurationSeconds"`
-	SoakSuccessfulWrites      int      `json:"soakSuccessfulWrites"`
-	SoakSuccessfulReads       int      `json:"soakSuccessfulReads"`
-	SoakChecksumFailures      int      `json:"soakChecksumFailures"`
-	SoakControllerUIDBefore   string   `json:"soakControllerUidBefore"`
-	SoakControllerUIDAfter    string   `json:"soakControllerUidAfter"`
-	SoakNodePluginUIDBefore   string   `json:"soakNodePluginUidBefore"`
-	SoakNodePluginUIDAfter    string   `json:"soakNodePluginUidAfter"`
+	SchemaVersion                       string   `json:"schemaVersion"`
+	Scenario                            string   `json:"scenario"`
+	RunID                               string   `json:"runId"`
+	ObservedAt                          string   `json:"observedAt"`
+	PVCCount                            int      `json:"pvcCount"`
+	BoundPVCCount                       int      `json:"boundPvcCount"`
+	PVCNames                            []string `json:"pvcNames"`
+	SingleParentFilesystemID            string   `json:"singleParentFilesystemId"`
+	SameNodeName                        string   `json:"sameNodeName"`
+	MaxFileSystems                      int      `json:"maxFileSystems"`
+	SameNodeLogicalMounts               int      `json:"sameNodeLogicalMounts"`
+	SameNodeClaimNames                  []string `json:"sameNodeClaimNames"`
+	IsolatedMarkerCount                 int      `json:"isolatedMarkerCount"`
+	SameNodeID                          string   `json:"sameNodeId"`
+	RegionalAttachmentCount             int      `json:"regionalAttachmentCount"`
+	ServerFilesystemCount               int      `json:"serverFilesystemCount"`
+	NodeMaxVolumesOmitted               bool     `json:"nodeMaxVolumesOmitted"`
+	SampledPVCCount                     int      `json:"sampledPvcCount"`
+	SampledClaimNames                   []string `json:"sampledClaimNames"`
+	SampledReaderNodeName               string   `json:"sampledReaderNodeName"`
+	SampledReaderNodeID                 string   `json:"sampledReaderNodeId"`
+	MultiWriterPairCount                int      `json:"multiWriterPairCount"`
+	MultiWriterActivePairCount          int      `json:"multiWriterActivePairCount"`
+	MultiWriterMountsReadWrite          bool     `json:"multiWriterMountsReadWrite"`
+	SuccessfulWriterCount               int      `json:"successfulWriterCount"`
+	SuccessfulReaderCount               int      `json:"successfulReaderCount"`
+	ReadOnlyWriteRejected               bool     `json:"readOnlyWriteRejected"`
+	NodePluginsCredentialFree           bool     `json:"nodePluginsCredentialFree"`
+	SoakDurationSeconds                 int64    `json:"soakDurationSeconds"`
+	SoakSameNodeWrites                  int      `json:"soakSameNodeWrites"`
+	SoakSameNodeCrossReads              int      `json:"soakSameNodeCrossReads"`
+	SoakPeerNodeWrites                  int      `json:"soakPeerNodeWrites"`
+	SoakPeerNodeCrossReads              int      `json:"soakPeerNodeCrossReads"`
+	SoakSuccessfulWrites                int      `json:"soakSuccessfulWrites"`
+	SoakSuccessfulReads                 int      `json:"soakSuccessfulReads"`
+	SoakChecksumFailures                int      `json:"soakChecksumFailures"`
+	SoakControllerRecoveryOffsetSeconds int64    `json:"soakControllerRecoveryOffsetSeconds"`
+	SoakNodePluginRecoveryOffsetSeconds int64    `json:"soakNodePluginRecoveryOffsetSeconds"`
+	SoakControllerPostRestartReadWrite  bool     `json:"soakControllerPostRestartReadWrite"`
+	SoakNodePluginPostRestartReadWrite  bool     `json:"soakNodePluginPostRestartReadWrite"`
+	SoakControllerUIDBefore             string   `json:"soakControllerUidBefore"`
+	SoakControllerUIDAfter              string   `json:"soakControllerUidAfter"`
+	SoakNodePluginUIDBefore             string   `json:"soakNodePluginUidBefore"`
+	SoakNodePluginUIDAfter              string   `json:"soakNodePluginUidAfter"`
 }
 
 // ParentGrowthProof binds one exact product-size step to a fresh available
@@ -1493,7 +1504,10 @@ func (proof HundredPVCScaleProof) Validate() error {
 	if proof.RegionalAttachmentCount != 1 || proof.ServerFilesystemCount != 1 || !proof.NodeMaxVolumesOmitted {
 		return fmt.Errorf("scale physical attachment or logical MaxVolumes proof is incomplete")
 	}
-	if proof.SampledPVCCount != 10 || proof.SuccessfulWriterCount != proof.SampledPVCCount || proof.SuccessfulReaderCount != proof.SampledPVCCount {
+	if proof.SampledPVCCount != 10 || proof.MultiWriterPairCount != proof.SampledPVCCount ||
+		proof.MultiWriterActivePairCount != proof.MultiWriterPairCount ||
+		proof.SuccessfulWriterCount != proof.MultiWriterPairCount*2 ||
+		proof.SuccessfulReaderCount != proof.MultiWriterPairCount*2 || !proof.MultiWriterMountsReadWrite {
 		return fmt.Errorf("scale sampled read/write proof is incomplete")
 	}
 	if err := validateExactNames(proof.SampledClaimNames, proof.SampledPVCCount, proof.SameNodeClaimNames); err != nil {
@@ -1508,9 +1522,18 @@ func (proof HundredPVCScaleProof) Validate() error {
 	if !proof.ReadOnlyWriteRejected || !proof.NodePluginsCredentialFree {
 		return fmt.Errorf("scale read-only or node credential boundary is not proven")
 	}
+	minimumPerNodeOperations := proof.MultiWriterPairCount * 100
 	if proof.SoakDurationSeconds < 20*60 || proof.SoakDurationSeconds > 60*60 ||
-		proof.SoakSuccessfulWrites < proof.SampledPVCCount*100 ||
-		proof.SoakSuccessfulReads < proof.SampledPVCCount*100 || proof.SoakChecksumFailures != 0 {
+		proof.SoakSameNodeWrites < minimumPerNodeOperations ||
+		proof.SoakSameNodeCrossReads < minimumPerNodeOperations ||
+		proof.SoakPeerNodeWrites < minimumPerNodeOperations ||
+		proof.SoakPeerNodeCrossReads < minimumPerNodeOperations ||
+		proof.SoakSuccessfulWrites != proof.SoakSameNodeWrites+proof.SoakPeerNodeWrites ||
+		proof.SoakSuccessfulReads != proof.SoakSameNodeCrossReads+proof.SoakPeerNodeCrossReads ||
+		proof.SoakChecksumFailures != 0 || !proof.SoakControllerPostRestartReadWrite ||
+		!proof.SoakNodePluginPostRestartReadWrite || proof.SoakControllerRecoveryOffsetSeconds < 1 ||
+		proof.SoakNodePluginRecoveryOffsetSeconds <= proof.SoakControllerRecoveryOffsetSeconds ||
+		proof.SoakNodePluginRecoveryOffsetSeconds > 20*60-60 {
 		return fmt.Errorf("scale correctness soak duration, operation counts, or checksum proof is incomplete")
 	}
 	for label, podUID := range map[string]string{

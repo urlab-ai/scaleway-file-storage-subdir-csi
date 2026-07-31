@@ -85,9 +85,15 @@ func TestHundredPVCScaleProofRequiresExactLoadAndBoundedMultiplex(t *testing.T) 
 		SameNodeID: proofFirstNodeID, RegionalAttachmentCount: 1, ServerFilesystemCount: 1, NodeMaxVolumesOmitted: true,
 		SameNodeClaimNames: pvcNames[:10], SampledClaimNames: pvcNames[:10],
 		SampledReaderNodeName: "node-b", SampledReaderNodeID: proofSecondNodeID,
-		SampledPVCCount: 10, SuccessfulWriterCount: 10, SuccessfulReaderCount: 10,
+		SampledPVCCount: 10, MultiWriterPairCount: 10, MultiWriterActivePairCount: 10, MultiWriterMountsReadWrite: true,
+		SuccessfulWriterCount: 20, SuccessfulReaderCount: 20,
 		ReadOnlyWriteRejected: true, NodePluginsCredentialFree: true,
-		SoakDurationSeconds: 1200, SoakSuccessfulWrites: 1000, SoakSuccessfulReads: 1000, SoakChecksumFailures: 0,
+		SoakDurationSeconds: 1200,
+		SoakSameNodeWrites:  1000, SoakSameNodeCrossReads: 1000,
+		SoakPeerNodeWrites: 1000, SoakPeerNodeCrossReads: 1000,
+		SoakSuccessfulWrites: 2000, SoakSuccessfulReads: 2000, SoakChecksumFailures: 0,
+		SoakControllerRecoveryOffsetSeconds: 120, SoakNodePluginRecoveryOffsetSeconds: 240,
+		SoakControllerPostRestartReadWrite: true, SoakNodePluginPostRestartReadWrite: true,
 		SoakControllerUIDBefore: proofFirstNodeID[9:], SoakControllerUIDAfter: proofSecondNodeID[9:],
 		SoakNodePluginUIDBefore: "44444444-4444-4444-8444-444444444444", SoakNodePluginUIDAfter: "55555555-5555-4555-8555-555555555555",
 	}
@@ -110,10 +116,17 @@ func TestHundredPVCScaleProofRejectsShortOrCorruptSoak(t *testing.T) {
 		PVCCount: 100, BoundPVCCount: 100, PVCNames: pvcNames, SingleParentFilesystemID: "44444444-4444-4444-8444-444444444444",
 		SameNodeName: "node-a", MaxFileSystems: 2, SameNodeLogicalMounts: 10, SameNodeClaimNames: pvcNames[:10],
 		IsolatedMarkerCount: 10, SameNodeID: proofFirstNodeID, RegionalAttachmentCount: 1, ServerFilesystemCount: 1,
-		NodeMaxVolumesOmitted: true, SampledPVCCount: 10, SampledClaimNames: pvcNames[:10], SuccessfulWriterCount: 10,
+		NodeMaxVolumesOmitted: true, SampledPVCCount: 10, SampledClaimNames: pvcNames[:10],
 		SampledReaderNodeName: "node-b", SampledReaderNodeID: proofSecondNodeID,
-		SuccessfulReaderCount: 10, ReadOnlyWriteRejected: true, NodePluginsCredentialFree: true,
-		SoakDurationSeconds: 1199, SoakSuccessfulWrites: 1000, SoakSuccessfulReads: 1000,
+		MultiWriterPairCount: 10, MultiWriterActivePairCount: 10, MultiWriterMountsReadWrite: true,
+		SuccessfulWriterCount: 20, SuccessfulReaderCount: 20,
+		ReadOnlyWriteRejected: true, NodePluginsCredentialFree: true,
+		SoakDurationSeconds: 1199,
+		SoakSameNodeWrites:  1000, SoakSameNodeCrossReads: 1000,
+		SoakPeerNodeWrites: 1000, SoakPeerNodeCrossReads: 1000,
+		SoakSuccessfulWrites: 2000, SoakSuccessfulReads: 2000,
+		SoakControllerRecoveryOffsetSeconds: 120, SoakNodePluginRecoveryOffsetSeconds: 240,
+		SoakControllerPostRestartReadWrite: true, SoakNodePluginPostRestartReadWrite: true,
 		SoakControllerUIDBefore: proofFirstNodeID[9:], SoakControllerUIDAfter: proofSecondNodeID[9:],
 		SoakNodePluginUIDBefore: "44444444-4444-4444-8444-444444444444", SoakNodePluginUIDAfter: "55555555-5555-4555-8555-555555555555",
 	}
@@ -124,6 +137,36 @@ func TestHundredPVCScaleProofRejectsShortOrCorruptSoak(t *testing.T) {
 	proof.SoakChecksumFailures = 1
 	if err := proof.Validate(); err == nil {
 		t.Fatal("Validate(checksum failure) error = nil")
+	}
+	proof.SoakChecksumFailures = 0
+	proof.SoakPeerNodeWrites = 0
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(missing peer writes) error = nil")
+	}
+	proof.SoakPeerNodeWrites = 1000
+	proof.SoakSuccessfulWrites = 1999
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(inexact aggregate writes) error = nil")
+	}
+	proof.SoakSuccessfulWrites = 2000
+	proof.MultiWriterMountsReadWrite = false
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(read-only multi-writer mount) error = nil")
+	}
+	proof.MultiWriterMountsReadWrite = true
+	proof.SuccessfulWriterCount = 19
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(missing writer peer) error = nil")
+	}
+	proof.SuccessfulWriterCount = 20
+	proof.SoakNodePluginRecoveryOffsetSeconds = 1141
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(node restart outside active soak) error = nil")
+	}
+	proof.SoakNodePluginRecoveryOffsetSeconds = 240
+	proof.SoakNodePluginPostRestartReadWrite = false
+	if err := proof.Validate(); err == nil {
+		t.Fatal("Validate(missing post-restart I/O) error = nil")
 	}
 }
 
