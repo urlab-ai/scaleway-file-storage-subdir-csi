@@ -52,6 +52,44 @@ func TestAutomaticAcquisitionNeverPromotesSameHolderProvisionalMarker(t *testing
 	}
 }
 
+func TestAutomaticAcquisitionPreservesExactFreshPlanOnlyForItsHolder(t *testing.T) {
+	holder := validHolderEvidence(t)
+	snapshot := leaseWithHolder(t, holder)
+	marker, err := NewDiscoveryMarker(holder, time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Annotations, err = ApplyDiscoveryMarker(snapshot.Annotations, marker, holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := validFreshBootstrapPlan(t)
+	snapshot.Annotations, err = ApplyFreshBootstrapPlan(snapshot.Annotations, fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanAutomaticAcquisition(snapshot, holder, false)
+	if !errors.Is(err, ErrMissingLeaseRecoveryRequired) || plan.MutationAllowed {
+		t.Fatalf("PlanAutomaticAcquisition(same holder fresh plan) = %#v, %v", plan, err)
+	}
+	if resumed, present, parseErr := ParseFreshBootstrapPlan(plan.Annotations); parseErr != nil || !present || !resumed.annotationMustEqual(fresh) {
+		t.Fatalf("preserved fresh plan = %#v, present=%v, error=%v", resumed, present, parseErr)
+	}
+	snapshot.Annotations = ClearDiscoveryMarker(snapshot.Annotations)
+	plan, err = PlanAutomaticAcquisition(snapshot, holder, false)
+	if err != nil || !plan.MutationAllowed || plan.Mode != AcquisitionSameHolder {
+		t.Fatalf("PlanAutomaticAcquisition(same holder after promotion) = %#v, %v", plan, err)
+	}
+	if resumed, present, parseErr := ParseFreshBootstrapPlan(plan.Annotations); parseErr != nil || !present || !resumed.annotationMustEqual(fresh) {
+		t.Fatalf("post-promotion preserved fresh plan = %#v, present=%v, error=%v", resumed, present, parseErr)
+	}
+	changed := holder
+	changed.PodUID = "66666666-6666-4666-8666-666666666666"
+	if _, err := PlanAutomaticAcquisition(snapshot, changed, false); !errors.Is(err, ErrAbnormalTakeoverApprovalRequired) {
+		t.Fatalf("PlanAutomaticAcquisition(changed holder fresh plan) error = %v", err)
+	}
+}
+
 func TestGracefulReleaseAndOneTimeHandoff(t *testing.T) {
 	holder := validHolderEvidence(t)
 	snapshot := leaseWithHolder(t, holder)
@@ -102,6 +140,22 @@ func TestGracefulReleaseRejectsInflightCheckpointAndBootstrap(t *testing.T) {
 	}
 	if _, err := PlanGracefulRelease(snapshot, holder, requestID, now, 0, false); !errors.Is(err, ErrGracefulReleaseUnsafe) {
 		t.Fatalf("PlanGracefulRelease(bootstrap) error = %v", err)
+	}
+}
+
+func TestGracefulReleaseRejectsActiveFreshBootstrapPlan(t *testing.T) {
+	holder := validHolderEvidence(t)
+	snapshot := leaseWithHolder(t, holder)
+	var err error
+	snapshot.Annotations, err = ApplyFreshBootstrapPlan(snapshot.Annotations, validFreshBootstrapPlan(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanGracefulRelease(
+		snapshot, holder, "66666666-6666-4666-8666-666666666666",
+		time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC), 0, false,
+	); !errors.Is(err, ErrGracefulReleaseUnsafe) {
+		t.Fatalf("PlanGracefulRelease(fresh bootstrap) error = %v", err)
 	}
 }
 

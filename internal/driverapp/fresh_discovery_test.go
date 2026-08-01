@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
@@ -86,7 +88,7 @@ func (journals *recordingFreshDiscoveryJournals) BootstrapFresh(context.Context,
 	return nil
 }
 
-func TestFreshInstallationDiscoveryHandsExactSameProcessEvidenceToBootstrap(t *testing.T) {
+func TestFreshInstallationDiscoveryPersistsPlanBeforeAttachAndPromotesExactParent(t *testing.T) {
 	manager, leadership, _, filesystem, _, parentID := parentBootstrapTestManager(t)
 	discovery, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
 	if err != nil {
@@ -95,26 +97,30 @@ func TestFreshInstallationDiscoveryHandsExactSameProcessEvidenceToBootstrap(t *t
 	if err := discovery.VerifyFreshInstallation(context.Background()); err != nil {
 		t.Fatalf("VerifyFreshInstallation() error = %v", err)
 	}
-	if !slices.Equal(*leadership.events, []string{"mount", "read", "inspect-fresh", "close"}) {
+	if !slices.Equal(*leadership.events, []string{"set-fresh-plan", "set-fresh-plan", "mount", "read", "inspect-fresh", "close"}) {
 		t.Fatalf("fresh discovery events = %#v", *leadership.events)
 	}
-	observedAt, authorized := manager.freshBootstrapObservation(parentID)
-	if !authorized || observedAt.IsZero() {
-		t.Fatalf("fresh bootstrap authorization = %v, %v", observedAt, authorized)
+	plan, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations)
+	if err != nil || !present {
+		t.Fatalf("durable fresh bootstrap plan = %#v, present=%v, error=%v", plan, present, err)
+	}
+	plannedParent, present := plan.Parent(parentID)
+	if !present || plannedParent.EmptyInventoryObservedAt == "" {
+		t.Fatalf("fresh bootstrap parent authorization = %#v, present=%v", plannedParent, present)
 	}
 
-	if err := manager.EnsureClaimed(context.Background(), parentID); err != nil {
-		t.Fatalf("EnsureClaimed(after fresh discovery) error = %v", err)
+	if err := manager.EnsureAll(context.Background()); err != nil {
+		t.Fatalf("EnsureAll(after fresh discovery) error = %v", err)
 	}
-	if _, stillAuthorized := manager.freshBootstrapObservation(parentID); stillAuthorized {
-		t.Fatal("fresh bootstrap authorization was not consumed after journal CAS")
+	if _, stillPresent, parseErr := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations); parseErr != nil || stillPresent {
+		t.Fatalf("fresh bootstrap plan after parent promotion = present=%v, error=%v", stillPresent, parseErr)
 	}
-	if len(leadership.setCalls) != 1 || leadership.setCalls[0].EmptyInventoryObservedAt != observedAt.UTC().Format(time.RFC3339Nano) {
+	if len(leadership.setCalls) != 1 || leadership.setCalls[0].EmptyInventoryObservedAt != plannedParent.EmptyInventoryObservedAt {
 		t.Fatalf("bootstrap attempt did not retain discovery time: %#v", leadership.setCalls)
 	}
 	want := []string{
-		"mount", "read", "inspect-fresh", "close",
-		"set", "mount", "read", "inspect", "install", "read", "remove-temp", "clear", "layout", "close",
+		"set-fresh-plan", "set-fresh-plan", "mount", "read", "inspect-fresh", "close",
+		"promote-fresh-parent", "mount", "read", "inspect", "install", "read", "remove-temp", "clear", "layout", "close", "clear-fresh-plan",
 	}
 	if !slices.Equal(*leadership.events, want) {
 		t.Fatalf("discovery/bootstrap events = %#v, want %#v", *leadership.events, want)
@@ -179,12 +185,12 @@ func TestFreshInstallationDiscoveryRejectsPreexistingControllerAttachment(t *tes
 	if len(*leadership.events) != 0 {
 		t.Fatalf("preexisting-attachment discovery opened a parent: %#v", *leadership.events)
 	}
-	if _, authorized := manager.freshBootstrapObservation(parentID); authorized {
-		t.Fatal("preexisting attachment produced fresh bootstrap authorization")
+	if _, present, parseErr := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations); parseErr != nil || present {
+		t.Fatalf("preexisting attachment fresh plan = present=%v, error=%v", present, parseErr)
 	}
 }
 
-func TestFreshInstallationDiscoveryRetriesOnlyItsOwnObservedAttachment(t *testing.T) {
+func TestFreshInstallationDiscoveryRetriesOnlyItsDurablyPlannedAttachment(t *testing.T) {
 	manager, _, _, filesystem, _, parentID := parentBootstrapTestManager(t)
 	discovery, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
 	if err != nil {
@@ -194,23 +200,132 @@ func TestFreshInstallationDiscoveryRetriesOnlyItsOwnObservedAttachment(t *testin
 	if err := discovery.VerifyFreshInstallation(context.Background()); err == nil {
 		t.Fatal("VerifyFreshInstallation(first root failure) error = nil")
 	}
-	if _, observed := discovery.observedSnapshot()[parentID]; !observed {
-		t.Fatal("failed attach/inspection did not retain same-process empty observation")
-	}
-	if _, authorized := manager.freshBootstrapObservation(parentID); authorized {
-		t.Fatal("partial discovery authorized bootstrap")
+	plan, present, parseErr := coordination.ParseFreshBootstrapPlan(manager.leadership.Snapshot().Annotations)
+	if parseErr != nil || !present {
+		t.Fatalf("failed inspection durable plan = %#v, present=%v, error=%v", plan, present, parseErr)
 	}
 	filesystem.rootErr = nil
 	if err := discovery.VerifyFreshInstallation(context.Background()); err != nil {
 		t.Fatalf("VerifyFreshInstallation(retry exact attachment) error = %v", err)
 	}
-	if _, authorized := manager.freshBootstrapObservation(parentID); !authorized {
-		t.Fatal("complete retry did not authorize fresh bootstrap")
+	if _, planned := plan.Parent(parentID); !planned {
+		t.Fatal("durable retry plan did not retain the exact parent")
+	}
+}
+
+func TestFreshInstallationDiscoveryProcessRestartResumesAttachmentFromLeasePlan(t *testing.T) {
+	manager, leadership, _, filesystem, _, parentID := parentBootstrapTestManager(t)
+	first, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
+	if err != nil {
+		t.Fatalf("newFreshInstallationDiscovery(first) error = %v", err)
+	}
+	plan, err := first.preparePlan(context.Background(), []string{parentID})
+	if err != nil {
+		t.Fatalf("preparePlan() error = %v", err)
+	}
+	filesystem.rootErr = errors.New("injected process crash after provider attach")
+	if err := first.inspectParent(context.Background(), plan, parentID); err == nil {
+		t.Fatal("inspectParent(injected crash) error = nil")
+	}
+	if _, present, parseErr := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations); parseErr != nil || !present {
+		t.Fatalf("crash retained durable plan = present=%v, error=%v", present, parseErr)
+	}
+
+	// A new verifier object has no process-local observation from the first
+	// attempt. It can resume only because the Lease plan predates the attach.
+	filesystem.rootErr = nil
+	restarted, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
+	if err != nil {
+		t.Fatalf("newFreshInstallationDiscovery(restarted) error = %v", err)
+	}
+	if err := restarted.VerifyFreshInstallation(context.Background()); err != nil {
+		t.Fatalf("VerifyFreshInstallation(restarted) error = %v", err)
+	}
+	resumed, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations)
+	if err != nil || !present {
+		t.Fatalf("restarted durable plan = %#v, present=%v, error=%v", resumed, present, err)
+	}
+	resumedParent, present := resumed.Parent(parentID)
+	if !present || resumedParent.AttemptID != plan.Parents[0].AttemptID {
+		t.Fatalf("restarted parent authorization = %#v, present=%v", resumedParent, present)
+	}
+}
+
+func TestFreshBootstrapRetainsCompletePlanAcrossClaimAndClearsOnlyAfterStartupBarrier(t *testing.T) {
+	manager, leadership, _, filesystem, _, parentID := parentBootstrapTestManager(t)
+	discovery, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := discovery.VerifyFreshInstallation(context.Background()); err != nil {
+		t.Fatalf("VerifyFreshInstallation() error = %v", err)
+	}
+	prepared, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations)
+	if err != nil || !present {
+		t.Fatalf("prepared complete plan = %#v, present=%v, error=%v", prepared, present, err)
+	}
+	if err := manager.EnsureClaimed(context.Background(), parentID); err != nil {
+		t.Fatalf("EnsureClaimed() error = %v", err)
+	}
+	retained, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations)
+	if err != nil || !present || !reflect.DeepEqual(retained, prepared) {
+		t.Fatalf("plan after durable claim = %#v, present=%v, error=%v", retained, present, err)
+	}
+	if !filesystem.claimPresent {
+		t.Fatal("parent claim was not installed before retaining the complete plan")
+	}
+
+	// EnsureAll reads only durable Lease/filesystem state. Re-entering it models
+	// a process restart after the claim but before the final plan-clear CAS.
+	if err := manager.EnsureAll(context.Background()); err != nil {
+		t.Fatalf("EnsureAll(restart after claim) error = %v", err)
+	}
+	if _, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations); err != nil || present {
+		t.Fatalf("completed startup plan = present=%v, error=%v", present, err)
+	}
+	if !filesystem.claimPresent {
+		t.Fatal("restart replay changed the immutable parent claim")
+	}
+}
+
+func TestFreshInstallationDiscoveryProcessRestartRejectsForeignAttachmentDespiteLeasePlan(t *testing.T) {
+	manager, leadership, access, _, _, parentID := parentBootstrapTestManager(t)
+	first, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
+	if err != nil {
+		t.Fatalf("newFreshInstallationDiscovery(first) error = %v", err)
+	}
+	if _, err := first.preparePlan(context.Background(), []string{parentID}); err != nil {
+		t.Fatalf("preparePlan() error = %v", err)
+	}
+
+	provider := manager.provider.(*scaleway.FakeAPI)
+	filesystem := provider.Filesystems["fr-par/"+parentID]
+	filesystem.NumberOfAttachments = 1
+	provider.Filesystems["fr-par/"+parentID] = filesystem
+	provider.Pages[parentID+"/"] = scaleway.AttachmentPage{Attachments: []scaleway.Attachment{{
+		ID: "foreign-attachment", FilesystemID: parentID,
+		ResourceID:   "99999999-9999-4999-8999-999999999999",
+		ResourceType: scaleway.AttachmentResourceServer, Zone: manager.localTarget.Zone,
+	}}}
+
+	restarted, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
+	if err != nil {
+		t.Fatalf("newFreshInstallationDiscovery(restarted) error = %v", err)
+	}
+	err = restarted.VerifyFreshInstallation(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "attachment") {
+		t.Fatalf("VerifyFreshInstallation(foreign attachment) error = %v", err)
+	}
+	if access.calls != 0 {
+		t.Fatalf("foreign attachment reached mount path %d times", access.calls)
+	}
+	if _, present, parseErr := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations); parseErr != nil || !present {
+		t.Fatalf("foreign attachment should retain fail-closed durable plan: present=%v, error=%v", present, parseErr)
 	}
 }
 
 func TestFreshInstallationDiscoveryRetriesTransientMountInSameProcess(t *testing.T) {
-	manager, _, access, _, _, parentID := parentBootstrapTestManager(t)
+	manager, _, access, _, _, _ := parentBootstrapTestManager(t)
 	operationClock := &advancingFreshDiscoveryClock{now: time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)}
 	manager.operationClock = operationClock
 	access.failures = []error{fmt.Errorf("virtiofs endpoint is not ready: %w", mount.ErrMountUnavailable)}
@@ -224,8 +339,8 @@ func TestFreshInstallationDiscoveryRetriesTransientMountInSameProcess(t *testing
 	if access.calls != 2 || !slices.Equal(operationClock.delays, []time.Duration{time.Second}) {
 		t.Fatalf("transient mount retry calls/delays = %d/%v", access.calls, operationClock.delays)
 	}
-	if _, observed := discovery.observedSnapshot()[parentID]; !observed {
-		t.Fatal("transient mount retry lost its same-process empty observation")
+	if plan, present, parseErr := coordination.ParseFreshBootstrapPlan(manager.leadership.Snapshot().Annotations); parseErr != nil || !present {
+		t.Fatalf("transient mount retry durable plan = %#v, present=%v, error=%v", plan, present, parseErr)
 	}
 }
 
@@ -311,7 +426,7 @@ func TestFreshInstallationDiscoveryDoesNotRetryStrongSafetyFailure(t *testing.T)
 }
 
 func TestFreshInstallationDiscoveryRejectsClaimAndCloseFailure(t *testing.T) {
-	manager, _, _, filesystem, _, parentID := parentBootstrapTestManager(t)
+	manager, _, _, filesystem, _, _ := parentBootstrapTestManager(t)
 	filesystem.claimPresent = true
 	filesystem.closeErr = errors.New("close descriptor")
 	discovery, err := newTestFreshInstallationDiscovery(t, manager, &staticBootstrapAllocations{}, &staticBootstrapPVs{})
@@ -322,8 +437,8 @@ func TestFreshInstallationDiscoveryRejectsClaimAndCloseFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "immutable owner claim") || !strings.Contains(err.Error(), "close descriptor") {
 		t.Fatalf("VerifyFreshInstallation(claim and close failure) error = %v", err)
 	}
-	if _, authorized := manager.freshBootstrapObservation(parentID); authorized {
-		t.Fatal("claimed parent produced fresh bootstrap authorization")
+	if _, present, parseErr := coordination.ParseFreshBootstrapPlan(manager.leadership.Snapshot().Annotations); parseErr != nil || !present {
+		t.Fatalf("claimed parent should retain fail-closed durable plan: present=%v, error=%v", present, parseErr)
 	}
 }
 

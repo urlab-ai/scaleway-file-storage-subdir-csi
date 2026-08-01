@@ -411,6 +411,20 @@ resume their exact forward-only ownership transition. Every other detailed
 reference to an unconfigured parent remains a fail-closed reconciliation
 error. Focused tests prove all three boundaries.
 
+RC32 did not enter the fourteen-scenario candidate matrix. Its fresh run first
+installed RC31 as the required N-1 predecessor. The first controller attached
+one parent, then its container exited before installing the immutable parent
+claim and before a per-parent bootstrap attempt existed. The exact first-process
+error was not retained, so no narrower cause is claimed. The same-Pod container
+restart correctly refused to infer ownership from the surviving attachment;
+there was no PVC, PV, VolumeAttachment, logical allocation, or workload data.
+This exposed a real CSI startup durability gap: the authorization for the first
+attach existed only in process memory. RC31 and RC32 are superseded and must not
+be promoted. The closed all-parent Lease plan specified in sections 6.3 and
+10.2 now precedes every first-install attach, permits only exact same-Pod resume,
+and gives the run-owned cleanup path enough strict evidence to remove a failed
+disposable installation without adopting or deleting logical data.
+
 No candidate is a production support claim until every Linux, kind, CSI, Helm,
 real Kapsule, and final-cleanup qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
@@ -789,11 +803,51 @@ Storage `ListAttachments` API for every configured parent:
   initial empty-inventory check.
 
 The exception for the current bootstrap attempt must survive a controller
-crash without making an unrelated attachment claimable. Parent claiming is
-serialized, and the controller records at most one bootstrap attempt at a time
-in fixed annotations on the existing controller leadership Lease. After the
-empty regional and Instance inventories have been read and before calling
-`AttachServerFileSystem`, one resource-version compare-and-swap must persist:
+process crash without making an unrelated attachment claimable. Fresh
+installation discovery first proves that every configured parent's regional
+and Instance inventories are empty, before attaching any parent. It then writes
+one closed, canonical JSON plan in the fixed
+`sfs-subdir-fresh-bootstrap-plan` annotation on the existing controller
+leadership Lease. The all-parent plan contains exactly:
+
+```text
+schemaVersion = 1
+phase = Prepared
+installationID
+activeClusterUID
+holderPodUID
+controllerNodeID
+controllerInstanceID
+controllerZone
+parents[] = {
+  parentFilesystemID
+  attemptID
+  emptyInventoryObservedAt
+}
+```
+
+Parent entries are unique and sorted by filesystem ID; attempt IDs are unique.
+The plan is bound to the exact provisional holder Pod, CSI node, Instance, zone,
+installation, cluster, and complete configured parent set. Its resource-version
+compare-and-swap must complete before the first
+`AttachServerFileSystem` call. Renewal and same-Pod reacquisition preserve the
+plan. A same-Pod process restart may re-observe only zero attachments or the
+exact planned controller attachment for each planned parent. A different Pod,
+node, Instance, zone, installation, cluster, parent set, foreign attachment, or
+additional attachment fails closed under the normal fencing policy. An
+operator-approved abnormal takeover must not transfer a plan to a different
+Pod: it rejects the acquisition before its Lease CAS. A failed brand-new
+installation whose Pod identity changed must use the exact run-owned cleanup
+path below and restart discovery only from conclusive absence.
+
+After every planned parent has again passed the immutable-claim-absent and
+literal-root-empty proof, the fresh-promotion CAS clears only the provisional
+discovery marker and retains the plan. Parent claiming remains serialized. For
+each parent, one resource-version CAS installs the existing single-parent
+bootstrap attempt below alongside the unchanged complete plan. The plan remains
+complete cleanup and restart evidence throughout the bootstrap; the attempt
+identifies the sole filesystem mutation currently in progress. At most one
+single-parent attempt is active at a time:
 
 ```text
 schemaVersion
@@ -809,7 +863,12 @@ phase = Prepared
 claimTempPath = /.sfs-subdir-csi-owner.<attemptID>.tmp
 ```
 
-The record is an operation journal, not a second source of parent ownership.
+After one immutable claim is durably installed and re-read, its attempt is
+cleared while the complete plan remains. Only after every planned parent claim
+has been validated does one final resource-version CAS clear the exact plan. A
+crash before that final CAS safely replays already-installed matching claims.
+The plan and single-parent record are operation journals, not second sources of
+parent ownership.
 Scaleway attachments do not carry this local `attemptID`, so an attachment to
 the recorded Instance is evidence for resuming that attempt but is never proof
 that this installation exclusively created the provider attachment. Before
@@ -821,7 +880,8 @@ owner creation, resume is permitted only when all of the following remain true:
   exact expected attachment;
 - the recorded installation, cluster, and parent still match runtime identity;
 - the controller holds the Lease under the normal handoff or approved-takeover
-  rules from section 10.3.
+  rules from section 10.3; automatic claim resume additionally requires the
+  exact holder and controller identity recorded by the plan or attempt.
 
 When no owner record exists, the controller may resume ownership initialization
 only when the recorded node, Instance, and zone match its current runtime
@@ -5212,25 +5272,33 @@ while the marker remains active.
 
 Fresh-installation discovery requires a complete empty allocation and driver-PV
 inventory before the first attach and repeats both inventories after every
-parent has been inspected. Before attaching each parent, its complete regional
-inventory and the controller Instance inventory must both prove that the parent
-is detached. The controller records that observation only in process memory,
-then attaches and mounts the parent, revalidates that the exact current
-controller Instance is its sole available attachment, proves the immutable
-parent claim absent, and requires the literal filesystem root to be empty. A
-partial retry in the same process may recognize only an exact attachment whose
-empty observation it recorded before issuing the attach. Transient Scaleway
-inventory, `virtiofs` mount-readiness, or final Kubernetes-inventory failures
-are retried only inside that same verifier process, preserving those
-observations, with cancellation and bounded exponential backoff plus jitter up
-to the configured controller attach-readiness deadline. Deadline exhaustion,
-ownership or inventory conflict, a non-empty root, a parent claim, and every
-unclassified failure remain fail-closed without retry. The all-parent proof
-hands those process-local observations to bootstrap only after successful Lease
-promotion; bootstrap must persist the per-parent attempt journal before its
-first filesystem write. A restart loses this evidence, so a pre-attached parent
-without a matching durable journal can never be adopted as fresh and requires
-the operator-approved recovery path.
+parent has been inspected. It reads the complete regional and controller
+Instance inventories for every configured parent and requires all of them to be
+detached before atomically persisting the all-parent fresh-bootstrap plan from
+section 6.3. Only that durable plan authorizes the following attach and mount.
+The controller revalidates that every parent has either no attachment or the
+exact planned current-controller attachment, proves the immutable parent claim
+absent, and requires the literal filesystem root to be empty.
+
+A partial retry or same-Pod process restart may recognize only an exact
+attachment named by that already persisted plan. It replays the exact plan with
+a real resource-version CAS before another attach attempt; process memory is
+never attachment authority. Transient Scaleway inventory, `virtiofs`
+mount-readiness, or final Kubernetes-inventory failures are retried with
+cancellation and bounded exponential backoff plus jitter up to the configured
+controller attach-readiness deadline. Deadline exhaustion, ownership or
+inventory conflict, a non-empty root, a parent claim, changed plan identity, and
+every unclassified failure remain fail-closed without retry.
+
+The successful promotion CAS retains the plan. Startup then installs one
+per-parent bootstrap attempt at a time alongside that unchanged complete plan
+before owner or layout mutation. A crash before attach retains the plan; a crash
+after the per-parent CAS retains both the plan and single-parent attempt; a
+crash after matching owner creation follows the existing stale-attempt
+completion rule. After all exact claims have passed, a final CAS clears the
+complete plan. A pre-attached parent without either exact durable authorization
+can never be
+adopted as fresh and requires the operator-approved recovery path.
 
 - if no allocation record, ownership record, driver PV, or parent-global owner
   record exists, the separate discovery-promotion CAS establishes a fresh
@@ -6258,10 +6326,19 @@ Required unit tests:
 - a losing or stale bootstrap attempt cannot replace the fixed claim, adopt a
   foreign temporary claim, or remove a temporary claim belonging to another
   attempt;
-- first-parent claim persists its bootstrap attempt before attach; injected
-  crashes before attach, after an accepted or ambiguous attach, and before
-  owner creation resume or roll back only the exact journaled attachment, while
-  a crash after matching owner creation clears only the stale attempt;
+- fresh installation persists its exact all-parent plan before the first
+  attach; injected process restarts before attach, after an accepted or
+  ambiguous attach, before promotion, after the per-parent attempt CAS, between
+  two parent claims, and before owner creation resume only the exact
+  same-Pod/same-Instance
+  authorization, while a crash after matching owner creation clears only the
+  stale single-parent attempt;
+- the complete all-parent plan remains immutable while a single-parent attempt
+  is added and cleared, and is removed only after every exact claim is valid;
+  exact replay performs a Lease CAS, interruption between parents retains the
+  complete proof, and malformed, changed-holder, changed-parent-set, foreign,
+  or additional attachment evidence fails closed before provider or filesystem
+  mutation;
 - bootstrap replay rejects same-attempt claim from a changed Instance and
   permits only provider-fenced offline rollback there; it rejects a changed parent or
   cluster, foreign or additional attachment, existing logical state, and a
@@ -7378,11 +7455,16 @@ because the pre-Helm installation gate failed, cleanup may use the narrower
 bootstrap-abort path instead of claiming a safe uninstall. The fallback must
 prove the dedicated namespace has the exact run label; no workload Pod, PVC,
 namespace PV, driver VolumeAttachment, driver CSINode registration, or durable
-driver record exists; and both exact run-owned parents have zero provider
-attachments.
-The parent check must agree on both the filtered attachment list and each exact
-filesystem's reported attachment count. Workload/PVC absence is captured before
-normal cleanup removes anything, so the fallback cannot manufacture absence.
+logical-volume record exists. Ordinarily, both exact run-owned parents must
+have zero provider attachments. If and only if the failed first controller left
+the complete fresh-bootstrap plan from section 6.3, a run-created disposable
+cluster may instead retain attachments that match the plan's exact holder
+Instance, zone, and complete two-parent set. The parent check must agree on both
+the filtered attachment list and each exact filesystem's reported attachment
+count. Every missing or malformed plan field, reused cluster, holder mismatch,
+unplanned parent, foreign or additional attachment, and unavailable inventory
+fails closed. Workload/PVC absence is captured before normal cleanup removes
+anything, so the fallback cannot manufacture absence.
 The conclusively absent pre-Helm case additionally requires the retained,
 non-empty first-scenario failure log.
 Only then may it uninstall that exact failed release when present, or preserve
@@ -7391,8 +7473,17 @@ bootstrap-abort evidence including the observed `failed` or `absent` Helm
 status, and satisfy the cleanup barrier through `bootstrapAbortComplete`. Any
 successful scenario entry, deployed or ambiguous release, missing evidence
 file, ambiguous read, record, registration, volume object, or provider
-attachment keeps cleanup blocked and requires the normal safe-uninstall or
-operator recovery path.
+attachment outside the exact plan keeps cleanup blocked and requires the normal
+safe-uninstall or operator recovery path. A planned surviving attachment does
+not satisfy `parentAttachmentsAbsent`: the host cleanup backend must
+independently revalidate the strict evidence, run ledger, parent ownership tags,
+and live provider attachments, delete only the exact run-created node pool, and
+wait for both regional lists and filesystem counters to reach zero. Only then
+may ordinary exact-ID parent and cluster cleanup continue. This transition is
+restart-safe: conclusive node-pool absence is persisted before waiting for
+asynchronous detach, and a later cleanup invocation accepts only a monotonically
+decreasing subset of the exact planned attachments. Any added, moved,
+duplicated, or foreign attachment remains fail-closed.
 
 Cleanup must:
 

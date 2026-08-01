@@ -34,6 +34,16 @@ or deleted-Instance orphan. Stop its owner and use only the explicit offline
 detach path. A deleted Instance still present in regional inventory requires
 Scaleway support; retain exact IDs.
 
+During a brand-new installation, inspect the fixed leadership Lease before
+changing anything. A complete `sfs-subdir-fresh-bootstrap-plan` may authorize
+only same-Pod process restart on its exact recorded node, Instance, zone, and
+parents. The complete plan intentionally remains present while the current
+parent's separate bootstrap attempt is added and cleared; it disappears only
+after every parent claim is valid. Do not delete or edit either annotation
+manually. An attachment without that plan, an attachment outside it, or a
+replacement controller Pod is not an automatic-resume condition; preserve the
+Lease and provider inventories and use the documented fenced recovery path.
+
 ## Parent status or size
 
 `creating`, `updating`, or unknown is retryable but non-serving for dependent

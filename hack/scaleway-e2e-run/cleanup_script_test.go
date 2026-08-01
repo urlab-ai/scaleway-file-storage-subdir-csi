@@ -1015,6 +1015,146 @@ esac
 	}
 }
 
+func TestCleanupScriptAcceptsOnlyExactDurableFreshBootstrapAttachments(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is required for the checked-in cleanup script")
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Clean(filepath.Join(working, "..", "run-kapsule-e2e.sh"))
+	temporary := t.TempDir()
+	helmState := filepath.Join(temporary, "helm-state")
+	if err := os.WriteFile(helmState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parentA := "77777777-7777-4777-8777-777777777777"
+	parentB := "88888888-8888-4888-8888-888888888888"
+	instanceID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	attachmentState := filepath.Join(temporary, "attachment-instance")
+	if err := os.WriteFile(attachmentState, []byte(instanceID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := fmt.Sprintf(`{"schemaVersion":"1","phase":"Prepared","installationID":"11111111-1111-4111-8111-111111111111","activeClusterUID":"22222222-2222-4222-8222-222222222222","holderPodUID":"33333333-3333-4333-8333-333333333333","controllerNodeID":"fr-par-1/%s","controllerInstanceID":"%s","controllerZone":"fr-par-1","parents":[{"parentFilesystemID":"%s","attemptID":"44444444-4444-4444-8444-444444444444","emptyInventoryObservedAt":"2026-08-01T10:00:00Z"},{"parentFilesystemID":"%s","attemptID":"55555555-5555-4555-8555-555555555555","emptyInventoryObservedAt":"2026-08-01T10:00:01Z"}]}`, instanceID, instanceID, parentA, parentB)
+	lease := map[string]any{
+		"metadata": map[string]any{"annotations": map[string]string{
+			"sfs-subdir-fresh-bootstrap-plan": plan,
+			"holderPodUID":                    "33333333-3333-4333-8333-333333333333", "holderNodeName": "worker-a",
+			"holderCSINodeID": "fr-par-1/" + instanceID, "holderInstanceID": instanceID, "holderZone": "fr-par-1",
+			"holderInstallationID":   "11111111-1111-4111-8111-111111111111",
+			"holderActiveClusterUID": "22222222-2222-4222-8222-222222222222",
+		}},
+		"spec": map[string]any{"holderIdentity": "33333333-3333-4333-8333-333333333333"},
+	}
+	leaseBytes, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leasePath := filepath.Join(temporary, "lease.json")
+	if err := os.WriteFile(leasePath, leaseBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helm := writeExecutable(t, temporary, "helm", `#!/bin/sh
+case "$1" in
+  list) if [ "$(sed -n '1p' "$HELM_STATE")" = present ]; then printf '%s\n' '[{"name":"driver","status":"failed"}]'; else printf '%s\n' '[]'; fi ;;
+  status) printf '%s\n' '{"info":{"status":"failed"}}' ;;
+  get) printf '%s\n' '{"driver":{"name":"csi.example.test"}}' ;;
+  uninstall) printf '%s\n' absent >"$HELM_STATE" ;;
+  *) exit 91 ;;
+esac
+`)
+	kubectl := writeExecutable(t, temporary, "kubectl", `#!/bin/sh
+case "$*" in
+  *"get namespace driver-system -o json"*) printf '%s\n' '{"metadata":{"labels":{"sfs-subdir-e2e-run":"11111111-1111-4111-8111-111111111111"}}}' ;;
+  *"get namespace"*"--ignore-not-found"*) ;;
+  *"get pods -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111 -o json"*|*"get pvc -o json"*|*"get pv -o json"*|*"get volumeattachments -o json"*|*"get csinodes -o json"*|*"get configmaps -o json"*) printf '%s\n' '{"items":[]}' ;;
+  *"get lease/scaleway-sfs-subdir-csi-controller -o json"*) sed -n '1p' "$LEASE_PATH" ;;
+  *"get node/worker-a -o json"*) printf '%s\n' '{"metadata":{},"spec":{"providerID":"scaleway://instance/fr-par-1/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}' ;;
+  *"delete namespace"*) ;;
+  *"delete pod,pvc"*|*"delete storageclass -l sfs-subdir-e2e-run=11111111-1111-4111-8111-111111111111"*) ;;
+  *) exit 92 ;;
+esac
+`)
+	admin := writeExecutable(t, temporary, "csi-admin-unavailable", "#!/bin/sh\nexit 1\n")
+	validator := writeExecutable(t, temporary, "validator-unused", "#!/bin/sh\nexit 99\n")
+	scw := writeExecutable(t, temporary, "scw", `#!/bin/sh
+case "$*" in
+  "file attachment list region=fr-par filesystem-id=77777777-7777-4777-8777-777777777777 -o json") printf '[{"filesystem_id":"77777777-7777-4777-8777-777777777777","resource_id":"%s","resource_type":"instance_server","zone":"fr-par-1"}]\n' "$(sed -n '1p' "$ATTACHMENT_STATE")" ;;
+  "file attachment list region=fr-par filesystem-id=88888888-8888-4888-8888-888888888888 -o json") printf '%s\n' '[]' ;;
+  "file filesystem get filesystem-id=77777777-7777-4777-8777-777777777777 region=fr-par -o json") printf '%s\n' '{"number_of_attachments":1}' ;;
+  "file filesystem get filesystem-id=88888888-8888-4888-8888-888888888888 region=fr-par -o json") printf '%s\n' '{"number_of_attachments":0}' ;;
+  *) exit 95 ;;
+esac
+`)
+	evidence := filepath.Join(temporary, "evidence")
+	if err := os.MkdirAll(evidence, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidence, ".scenario-results-run-smoke.ndjson"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preconditions := filepath.Join(temporary, "preconditions.json")
+	arguments := []string{"cleanup", "--kubeconfig=/tmp/kubeconfig", "--namespace=driver-system", "--release=driver",
+		"--admin=" + admin, "--validator=" + validator, "--profile=base", "--region=fr-par", "--cluster-created-by-run=true",
+		"--run-id=11111111-1111-4111-8111-111111111111", "--parent-a=" + parentA, "--parent-b=" + parentB,
+		"--evidence-dir=" + evidence, "--preconditions=" + preconditions}
+	command := exec.Command(script, arguments...)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "HELM_STATE="+helmState, "LEASE_PATH="+leasePath, "ATTACHMENT_STATE="+attachmentState)
+	if output, err := command.CombinedOutput(); err != nil {
+		cleanupLog, _ := os.ReadFile(filepath.Join(evidence, "cleanup-kubernetes.log"))
+		bootstrapEvidence, _ := os.ReadFile(filepath.Join(evidence, "bootstrap-abort-cleanup-11111111-1111-4111-8111-111111111111.json"))
+		t.Fatalf("planned bootstrap cleanup error = %v, output = %s, cleanup log = %s, bootstrap evidence = %s", err, output, cleanupLog, bootstrapEvidence)
+	}
+	encoded, err := os.ReadFile(preconditions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed e2ecleanup.Preconditions
+	if err := json.Unmarshal(encoded, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if !observed.BootstrapAbortComplete || observed.UninstallPrepareComplete || observed.ParentAttachmentsAbsent || !observed.HelmUninstalled {
+		t.Fatalf("planned bootstrap cleanup preconditions = %#v", observed)
+	}
+	proof, err := os.ReadFile(filepath.Join(evidence, "bootstrap-abort-cleanup-11111111-1111-4111-8111-111111111111.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retained plannedBootstrapAbortEvidence
+	if err := json.Unmarshal(proof, &retained); err != nil {
+		t.Fatal(err)
+	}
+	if retained.SchemaVersion != "2" || !retained.FreshBootstrapPlanVerified || retained.PlannedParentAttachments != 1 || retained.ParentAttachmentsAbsent {
+		t.Fatalf("planned bootstrap cleanup evidence = %#v", retained)
+	}
+
+	// A durable plan is not a wildcard cleanup authorization. Repeating the
+	// same bounded path with an attachment on a different Instance must fail
+	// before uninstalling the release or emitting new cleanup preconditions.
+	if err := os.WriteFile(helmState, []byte("present\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attachmentState, []byte("99999999-9999-4999-8999-999999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	foreignPreconditions := filepath.Join(temporary, "foreign-preconditions.json")
+	foreignArguments := slices.Clone(arguments)
+	foreignArguments[len(foreignArguments)-1] = "--preconditions=" + foreignPreconditions
+	command = exec.Command(script, foreignArguments...)
+	command.Env = append(os.Environ(), "JQ="+jq, "HELM="+helm, "KUBECTL="+kubectl, "SCW="+scw, "HELM_STATE="+helmState, "LEASE_PATH="+leasePath, "ATTACHMENT_STATE="+attachmentState)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("foreign attachment was accepted by planned bootstrap cleanup: %s", output)
+	}
+	if state, err := os.ReadFile(helmState); err != nil || strings.TrimSpace(string(state)) != "present" {
+		t.Fatalf("foreign attachment cleanup changed Helm state = %q, %v", state, err)
+	}
+	if _, err := os.Stat(foreignPreconditions); !os.IsNotExist(err) {
+		t.Fatalf("foreign attachment cleanup wrote preconditions: %v", err)
+	}
+}
+
 func TestCleanupScriptUsesBoundedBootstrapAbortBeforeHelmExists(t *testing.T) {
 	jq, err := exec.LookPath("jq")
 	if err != nil {

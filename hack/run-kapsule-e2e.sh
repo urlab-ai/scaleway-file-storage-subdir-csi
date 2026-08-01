@@ -2538,7 +2538,10 @@ cleanup_cluster() {
 	      chmod 600 "$uninstall_error"
 	      rm -f "$uninstall_dry_run_tmp"
 	      bootstrap_abort_cleanup "$helm_status" "$bootstrap_result" "$initial_workload_pods" "$initial_pvcs"
-	      return
+	      # The failed csi-admin probe is the condition that selected this
+	      # bounded recovery path. Do not accidentally propagate that earlier
+	      # status after the independently validated bootstrap cleanup succeeds.
+	      return 0
 	    fi
 	    uninstall_tmp="$uninstall_result.tmp"
 	    "$admin" uninstall prepare --kubeconfig="$kubeconfig" --namespace="$namespace" --release="$release" --request-id="$request" --mode=execute --timeout=60m >"$uninstall_tmp"
@@ -2589,7 +2592,7 @@ validate_bootstrap_abort_evidence() {
 	  "$JQ" -e \
 	    --arg run "$run_id" --arg profile "$profile" --arg region "$region" \
 	    --arg namespace "$namespace" --arg release "$release" --arg parent_a "$parent_a" --arg parent_b "$parent_b" '
-	      .schemaVersion == "1" and .runId == $run and .profile == $profile and .region == $region and
+	      (.schemaVersion == "1" or .schemaVersion == "2") and .runId == $run and .profile == $profile and .region == $region and
 	      .clusterCreatedByRun == true and
 	      .namespace == $namespace and .helmRelease == $release and
 	      (.helmStatus == "failed" or .helmStatus == "absent") and
@@ -2597,8 +2600,19 @@ validate_bootstrap_abort_evidence() {
 	      .scenarioEntries == 0 and .initialWorkloadPods == 0 and .initialPVCs == 0 and
 	      .workloadPods == 0 and .pvcs == 0 and .pvs == 0 and
 	      .volumeAttachments == 0 and .driverCSINodeRegistrations == 0 and .durableRecords == 0 and
-	      .parentAAttachments == 0 and .parentBAttachments == 0 and
-	      .parentAReportedAttachments == 0 and .parentBReportedAttachments == 0 and
+	      (if .schemaVersion == "1" then
+	         .parentAAttachments == 0 and .parentBAttachments == 0 and
+	         .parentAReportedAttachments == 0 and .parentBReportedAttachments == 0 and
+	         .parentAttachmentsAbsent == true
+	       else
+	         .freshBootstrapPlanVerified == true and
+	         .plannedControllerInstanceId != "" and .plannedControllerZone != "" and
+	         .plannedParentAttachments == (.parentAAttachments + .parentBAttachments) and
+	         .plannedParentAttachments > 0 and .plannedParentAttachments <= 2 and
+	         .parentAAttachments == .parentAReportedAttachments and
+	         .parentBAttachments == .parentBReportedAttachments and
+	         .parentAttachmentsAbsent == false
+	       end) and
 	      .helmUninstalled == true and .namespaceRemoved == true
 	    ' "$file" >/dev/null
 }
@@ -2652,11 +2666,73 @@ bootstrap_abort_cleanup() {
 	  parent_b_attachments=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json | "$JQ" -er 'length')
 	  parent_a_reported=$(s file filesystem get filesystem-id="$parent_a" region="$region" -o json | "$JQ" -er '.number_of_attachments')
 	  parent_b_reported=$(s file filesystem get filesystem-id="$parent_b" region="$region" -o json | "$JQ" -er '.number_of_attachments')
+	  bootstrap_schema=1
+	  fresh_bootstrap_plan_verified=false
+	  planned_controller_instance=""
+	  planned_controller_zone=""
+	  planned_parent_attachments=0
+	  parent_attachments_absent=false
+	  if [ "$parent_a_attachments" = 0 ] && [ "$parent_b_attachments" = 0 ] &&
+	     [ "$parent_a_reported" = 0 ] && [ "$parent_b_reported" = 0 ]; then
+	    parent_attachments_absent=true
+	  elif [ "$helm_status" = failed ]; then
+	    # A first controller process may fail after the new durable plan CAS and
+	    # before its owner claim. Accept only attachments exactly named by that
+	    # plan. The Go cleanup backend will delete the exact run-owned node pool
+	    # and wait for conclusive provider detachment before deleting parents.
+	    bootstrap_lease=$(k -n "$namespace" get lease/scaleway-sfs-subdir-csi-controller -o json)
+	    fresh_plan=$(printf '%s' "$bootstrap_lease" | "$JQ" -cer '.metadata.annotations["sfs-subdir-fresh-bootstrap-plan"] | fromjson')
+	    planned_controller_instance=$(printf '%s' "$fresh_plan" | "$JQ" -er '.controllerInstanceID')
+	    planned_controller_zone=$(printf '%s' "$fresh_plan" | "$JQ" -er '.controllerZone')
+	    planned_controller_node=$(printf '%s' "$fresh_plan" | "$JQ" -er '.controllerNodeID')
+	    planned_holder_node=$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderNodeName')
+	    printf '%s' "$fresh_plan" | "$JQ" -e \
+	      --arg run "$run_id" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
+	      --arg holder "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.spec.holderIdentity')" \
+	      --arg holder_uid "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderPodUID')" \
+	      --arg holder_node_id "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderCSINodeID')" \
+	      --arg holder_instance "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderInstanceID')" \
+	      --arg holder_zone "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderZone')" \
+	      --arg holder_installation "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderInstallationID')" \
+	      --arg holder_cluster "$(printf '%s' "$bootstrap_lease" | "$JQ" -er '.metadata.annotations.holderActiveClusterUID')" '
+	        .schemaVersion == "1" and .phase == "Prepared" and
+	        .installationID == $run and .installationID == $holder_installation and
+	        .activeClusterUID == $holder_cluster and
+	        .holderPodUID == $holder and .holderPodUID == $holder_uid and
+	        .controllerNodeID == $holder_node_id and
+	        .controllerInstanceID == $holder_instance and .controllerZone == $holder_zone and
+	        ([.parents[].parentFilesystemID] | sort) == ([$parent_a,$parent_b] | sort) and
+	        (.parents | length) == 2 and
+	        ([.parents[].attemptID] | unique | length) == 2 and
+	        all(.parents[];
+	          (.attemptID | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+	          (.emptyInventoryObservedAt | type == "string" and endswith("Z")))
+	      ' >/dev/null
+	    [ "$planned_controller_node" = "$planned_controller_zone/$planned_controller_instance" ]
+	    planned_node=$(k get "node/$planned_holder_node" -o json)
+	    printf '%s' "$planned_node" | "$JQ" -e \
+	      --arg provider "scaleway://instance/$planned_controller_zone/$planned_controller_instance" '
+	        .metadata.deletionTimestamp == null and .spec.providerID == $provider
+	      ' >/dev/null
+	    parent_a_inventory=$(s file attachment list region="$region" filesystem-id="$parent_a" -o json)
+	    parent_b_inventory=$(s file attachment list region="$region" filesystem-id="$parent_b" -o json)
+	    printf '%s' "$parent_a_inventory" | "$JQ" -e --arg parent "$parent_a" --arg instance "$planned_controller_instance" --arg zone "$planned_controller_zone" '
+	      all(.[]; .filesystem_id == $parent and .resource_id == $instance and .resource_type == "instance_server" and .zone == $zone)
+	    ' >/dev/null
+	    printf '%s' "$parent_b_inventory" | "$JQ" -e --arg parent "$parent_b" --arg instance "$planned_controller_instance" --arg zone "$planned_controller_zone" '
+	      all(.[]; .filesystem_id == $parent and .resource_id == $instance and .resource_type == "instance_server" and .zone == $zone)
+	    ' >/dev/null
+	    [ "$parent_a_attachments" -le 1 ] && [ "$parent_b_attachments" -le 1 ]
+	    [ "$parent_a_attachments" = "$parent_a_reported" ] && [ "$parent_b_attachments" = "$parent_b_reported" ]
+	    planned_parent_attachments=$((parent_a_attachments + parent_b_attachments))
+	    [ "$planned_parent_attachments" -gt 0 ] && [ "$planned_parent_attachments" -le 2 ]
+	    bootstrap_schema=2
+	    fresh_bootstrap_plan_verified=true
+	  fi
 	  [ "$initial_workload_pods" = 0 ] && [ "$initial_pvcs" = 0 ] &&
 	    [ "$workload_pods" = 0 ] && [ "$pvcs" = 0 ] && [ "$pvs" = 0 ] &&
 	    [ "$volume_attachments" = 0 ] && [ "$csi_nodes" = 0 ] && [ "$durable_records" = 0 ] &&
-	    [ "$parent_a_attachments" = 0 ] && [ "$parent_b_attachments" = 0 ] &&
-	    [ "$parent_a_reported" = 0 ] && [ "$parent_b_reported" = 0 ] || {
+	    { [ "$parent_attachments_absent" = true ] || [ "$fresh_bootstrap_plan_verified" = true ]; } || {
 	      echo "bootstrap-abort cleanup found CSI state, mounts, or provider attachments" >&2
 	      return 1
 	    }
@@ -2673,7 +2749,12 @@ bootstrap_abort_cleanup() {
 	  "$JQ" -cn \
 	    --arg run "$run_id" --arg profile "$profile" --arg region "$region" \
 	    --arg namespace "$namespace" --arg release "$release" --arg helm_status "$helm_status" --arg parent_a "$parent_a" --arg parent_b "$parent_b" \
-	    '{schemaVersion:"1",runId:$run,profile:$profile,region:$region,clusterCreatedByRun:true,namespace:$namespace,helmRelease:$release,helmStatus:$helm_status,parentA:$parent_a,parentB:$parent_b,scenarioEntries:0,initialWorkloadPods:0,initialPVCs:0,workloadPods:0,pvcs:0,pvs:0,volumeAttachments:0,driverCSINodeRegistrations:0,durableRecords:0,parentAAttachments:0,parentBAttachments:0,parentAReportedAttachments:0,parentBReportedAttachments:0,helmUninstalled:true,namespaceRemoved:true}' >"$bootstrap_tmp"
+	    --arg schema "$bootstrap_schema" --arg controller_instance "$planned_controller_instance" --arg controller_zone "$planned_controller_zone" \
+	    --argjson planned_attachments "$planned_parent_attachments" \
+	    --argjson fresh_plan "$fresh_bootstrap_plan_verified" --argjson attachments_absent "$parent_attachments_absent" \
+	    --argjson parent_a_attachments "$parent_a_attachments" --argjson parent_b_attachments "$parent_b_attachments" \
+	    --argjson parent_a_reported "$parent_a_reported" --argjson parent_b_reported "$parent_b_reported" \
+	    '{schemaVersion:$schema,runId:$run,profile:$profile,region:$region,clusterCreatedByRun:true,namespace:$namespace,helmRelease:$release,helmStatus:$helm_status,parentA:$parent_a,parentB:$parent_b,scenarioEntries:0,initialWorkloadPods:0,initialPVCs:0,workloadPods:0,pvcs:0,pvs:0,volumeAttachments:0,driverCSINodeRegistrations:0,durableRecords:0,parentAAttachments:$parent_a_attachments,parentBAttachments:$parent_b_attachments,parentAReportedAttachments:$parent_a_reported,parentBReportedAttachments:$parent_b_reported,freshBootstrapPlanVerified:$fresh_plan,plannedControllerInstanceId:$controller_instance,plannedControllerZone:$controller_zone,plannedParentAttachments:$planned_attachments,parentAttachmentsAbsent:$attachments_absent,helmUninstalled:true,namespaceRemoved:true}' >"$bootstrap_tmp"
 	  chmod 600 "$bootstrap_tmp"
 	  mv "$bootstrap_tmp" "$bootstrap_result"
 	  validate_bootstrap_abort_evidence "$bootstrap_result"
@@ -2685,7 +2766,11 @@ if [ "$mode" = cleanup ]; then
 	bootstrap_result="$evidence_dir/bootstrap-abort-cleanup-$run_id.json"
 	if [ -s "$bootstrap_result" ]; then
 	  validate_bootstrap_abort_evidence "$bootstrap_result"
-	  "$JQ" -n -c '{workloadPodsRemoved:true,pvcsRemoved:true,pvsRemoved:true,volumeAttachmentsRemoved:true,unpublishAndUnstageComplete:true,publishedNodeFencesCleared:true,uninstallPrepareComplete:false,bootstrapAbortComplete:true,nodeDaemonSetStopped:true,nodeMountsAbsent:true,controllerMountsAbsent:true,parentAttachmentsAbsent:true,controllerStopped:true,helmUninstalled:true}' >"$preconditions"
+	  # The strict validator above has already proved this is a boolean. Use
+	  # normal output semantics here because jq -e intentionally maps the valid
+	  # value false to a non-zero process status.
+	  bootstrap_parent_attachments_absent=$("$JQ" -r '.parentAttachmentsAbsent' "$bootstrap_result")
+	  "$JQ" -n -c --argjson attachments_absent "$bootstrap_parent_attachments_absent" '{workloadPodsRemoved:true,pvcsRemoved:true,pvsRemoved:true,volumeAttachmentsRemoved:true,unpublishAndUnstageComplete:true,publishedNodeFencesCleared:true,uninstallPrepareComplete:false,bootstrapAbortComplete:true,nodeDaemonSetStopped:true,nodeMountsAbsent:true,controllerMountsAbsent:true,parentAttachmentsAbsent:$attachments_absent,controllerStopped:true,helmUninstalled:true}' >"$preconditions"
 	else
 	  "$JQ" -e -c '
 	    if .ready == true and .completed == true and (.blockers | length == 0) and (.audit != null)

@@ -53,6 +53,39 @@ type scalewayBackend struct {
 	maxFileSystems uint32
 }
 
+type plannedBootstrapAbortEvidence struct {
+	SchemaVersion               string `json:"schemaVersion"`
+	RunID                       string `json:"runId"`
+	Profile                     string `json:"profile"`
+	Region                      string `json:"region"`
+	ClusterCreatedByRun         bool   `json:"clusterCreatedByRun"`
+	Namespace                   string `json:"namespace"`
+	HelmRelease                 string `json:"helmRelease"`
+	HelmStatus                  string `json:"helmStatus"`
+	ParentA                     string `json:"parentA"`
+	ParentB                     string `json:"parentB"`
+	ScenarioEntries             int    `json:"scenarioEntries"`
+	InitialWorkloadPods         int    `json:"initialWorkloadPods"`
+	InitialPVCs                 int    `json:"initialPVCs"`
+	WorkloadPods                int    `json:"workloadPods"`
+	PVCs                        int    `json:"pvcs"`
+	PVs                         int    `json:"pvs"`
+	VolumeAttachments           int    `json:"volumeAttachments"`
+	DriverCSINodeRegistrations  int    `json:"driverCSINodeRegistrations"`
+	DurableRecords              int    `json:"durableRecords"`
+	ParentAAttachments          int    `json:"parentAAttachments"`
+	ParentBAttachments          int    `json:"parentBAttachments"`
+	ParentAReportedAttachments  int    `json:"parentAReportedAttachments"`
+	ParentBReportedAttachments  int    `json:"parentBReportedAttachments"`
+	FreshBootstrapPlanVerified  bool   `json:"freshBootstrapPlanVerified"`
+	PlannedControllerInstanceID string `json:"plannedControllerInstanceId"`
+	PlannedControllerZone       string `json:"plannedControllerZone"`
+	PlannedParentAttachments    int    `json:"plannedParentAttachments"`
+	ParentAttachmentsAbsent     bool   `json:"parentAttachmentsAbsent"`
+	HelmUninstalled             bool   `json:"helmUninstalled"`
+	NamespaceRemoved            bool   `json:"namespaceRemoved"`
+}
+
 func newScalewayBackend(request e2erunner.Request, plan e2eplan.Plan) (*scalewayBackend, error) {
 	client, err := newRegionalScalewayClientFromEnvironment(plan)
 	if err != nil {
@@ -736,6 +769,12 @@ func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.R
 		if err := strictjson.Decode(encoded, &inventory.Preconditions); err != nil {
 			return inventory, err
 		}
+		if inventory.Preconditions.BootstrapAbortComplete && !inventory.Preconditions.ParentAttachmentsAbsent {
+			inventory, err = backend.recoverPlannedFreshBootstrapAttachments(ctx, request, inventory, evidenceDirectory)
+			if err != nil {
+				return inventory, err
+			}
+		}
 	} else if !os.IsNotExist(err) {
 		return inventory, fmt.Errorf("inspect retained E2E kubeconfig: %w", err)
 	} else if inventory.Phase != e2ecleanup.PhaseProvisioning && inventory.Phase != e2ecleanup.PhaseComplete {
@@ -796,6 +835,237 @@ func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.R
 		return inventory, err
 	}
 	return inventory, nil
+}
+
+// recoverPlannedFreshBootstrapAttachments is a run-owned-cluster cleanup path,
+// not a driver ownership shortcut. The in-cluster proof has already bound all
+// surviving attachments to the durable pre-attach Lease plan. This method
+// independently revalidates the exact run ledger and provider attachments,
+// deletes only the run-created node pool, and waits for conclusive detachment
+// before ordinary exact-ID parent cleanup can proceed.
+func (backend *scalewayBackend) recoverPlannedFreshBootstrapAttachments(
+	ctx context.Context,
+	request e2erunner.Request,
+	inventory e2ecleanup.Inventory,
+	evidenceDirectory string,
+) (e2ecleanup.Inventory, error) {
+	proofPath := filepath.Join(evidenceDirectory, "bootstrap-abort-cleanup-"+backend.plan.RunID+".json")
+	info, err := os.Lstat(proofPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<10 {
+		return inventory, fmt.Errorf("planned bootstrap-abort evidence is unavailable or invalid: %w", err)
+	}
+	encoded, err := os.ReadFile(proofPath)
+	if err != nil {
+		return inventory, err
+	}
+	var proof plannedBootstrapAbortEvidence
+	if err := strictjson.Decode(encoded, &proof); err != nil {
+		return inventory, fmt.Errorf("decode planned bootstrap-abort evidence: %w", err)
+	}
+	if err := backend.validatePlannedBootstrapAbortEvidence(request, inventory, proof); err != nil {
+		return inventory, err
+	}
+	cluster, clusterFound := inventoryResourceByKind(inventory, e2ecleanup.ResourceKindCluster)
+	if !clusterFound || !cluster.CreatedByRun {
+		return inventory, fmt.Errorf("planned bootstrap attachment cleanup requires a run-created cluster")
+	}
+	nodePool, found := inventoryResourceByKind(inventory, e2ecleanup.ResourceKindNodePool)
+	if !found || !nodePool.CreatedByRun {
+		return inventory, fmt.Errorf("planned bootstrap attachment cleanup requires the exact run-owned node pool")
+	}
+	if err := backend.verifyPlannedBootstrapProviderAttachments(ctx, inventory, proof); err != nil {
+		return inventory, err
+	}
+	switch nodePool.State {
+	case e2ecleanup.ResourceStatePresent:
+		if err := backend.deleteExact(ctx, nodePool, inventory); err != nil {
+			return inventory, fmt.Errorf("delete exact run-owned node pool after planned bootstrap abort: %w", err)
+		}
+		for index := range inventory.Resources {
+			if inventory.Resources[index].ID == nodePool.ID {
+				inventory.Resources[index].State = e2ecleanup.ResourceStateAbsent
+			}
+		}
+		// Persist conclusive node-pool absence before waiting for asynchronous
+		// File Storage detach. If this process stops in that window, the next
+		// cleanup run can resume without repeating or broadening the deletion.
+		inventory.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		if err := backend.writeInventory(inventory); err != nil {
+			return inventory, err
+		}
+	case e2ecleanup.ResourceStateAbsent:
+		// A prior cleanup process may have deleted the exact node pool and
+		// stopped before recording the final attachment barrier. The live
+		// attachment subset was revalidated above, so waiting is safe.
+	case e2ecleanup.ResourceStateUnknown:
+		return inventory, fmt.Errorf("planned bootstrap node pool has unknown provider state")
+	default:
+		return inventory, fmt.Errorf("planned bootstrap node pool has invalid provider state %q", nodePool.State)
+	}
+	if err := backend.waitForRunParentAttachmentsAbsent(ctx, inventory); err != nil {
+		return inventory, err
+	}
+	inventory.Preconditions.ParentAttachmentsAbsent = true
+	inventory, err = backend.reconcileRunResources(ctx, inventory)
+	if err != nil {
+		return inventory, fmt.Errorf("reconcile run resources after planned bootstrap detachment: %w", err)
+	}
+	if err := backend.writeInventory(inventory); err != nil {
+		return inventory, err
+	}
+	return inventory, nil
+}
+
+// validatePlannedBootstrapAbortEvidence is kept pure so the destructive
+// cleanup boundary can be exhaustively tested without a provider mutation.
+func (backend *scalewayBackend) validatePlannedBootstrapAbortEvidence(
+	request e2erunner.Request,
+	inventory e2ecleanup.Inventory,
+	proof plannedBootstrapAbortEvidence,
+) error {
+	parents := []string{
+		resourceID(inventory, e2ecleanup.ResourceKindParent, 0),
+		resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
+	}
+	proofParents := []string{proof.ParentA, proof.ParentB}
+	slices.Sort(parents)
+	slices.Sort(proofParents)
+	if proof.SchemaVersion != "2" || proof.RunID != backend.plan.RunID || proof.Profile != backend.plan.Profile ||
+		proof.Region != backend.plan.Region || proof.Namespace != request.DriverNamespace || proof.HelmRelease != request.HelmRelease ||
+		!proof.ClusterCreatedByRun || proof.HelmStatus != "failed" || !proof.FreshBootstrapPlanVerified ||
+		proof.PlannedControllerInstanceID == "" || proof.PlannedControllerZone != request.Zone ||
+		proof.PlannedParentAttachments <= 0 || proof.PlannedParentAttachments > len(parents) ||
+		proof.ParentAAttachments < 0 || proof.ParentAAttachments > 1 ||
+		proof.ParentBAttachments < 0 || proof.ParentBAttachments > 1 ||
+		proof.ParentAttachmentsAbsent || !proof.HelmUninstalled || !proof.NamespaceRemoved ||
+		proof.ScenarioEntries != 0 || proof.InitialWorkloadPods != 0 || proof.InitialPVCs != 0 ||
+		proof.WorkloadPods != 0 || proof.PVCs != 0 || proof.PVs != 0 || proof.VolumeAttachments != 0 ||
+		proof.DriverCSINodeRegistrations != 0 || proof.DurableRecords != 0 ||
+		proof.ParentAAttachments != proof.ParentAReportedAttachments ||
+		proof.ParentBAttachments != proof.ParentBReportedAttachments ||
+		proof.PlannedParentAttachments != proof.ParentAAttachments+proof.ParentBAttachments ||
+		!slices.Equal(parents, proofParents) {
+		return fmt.Errorf("planned bootstrap-abort evidence differs from the exact run scope")
+	}
+	return nil
+}
+
+func (backend *scalewayBackend) verifyPlannedBootstrapProviderAttachments(ctx context.Context, inventory e2ecleanup.Inventory, proof plannedBootstrapAbortEvidence) error {
+	region := scw.Region(backend.plan.Region)
+	total := 0
+	expectedCounts := map[string]int{
+		proof.ParentA: proof.ParentAAttachments,
+		proof.ParentB: proof.ParentBAttachments,
+	}
+	for _, parentID := range []string{proof.ParentA, proof.ParentB} {
+		resource, found := inventoryResource(inventory, parentID)
+		if !found || resource.Kind != e2ecleanup.ResourceKindParent || !resource.CreatedByRun || resource.State != e2ecleanup.ResourceStatePresent {
+			return fmt.Errorf("planned bootstrap parent %q is absent from the exact run ledger", parentID)
+		}
+		filesystem, err := backend.file.GetFileSystem(&fileapi.GetFileSystemRequest{Region: region, FilesystemID: parentID}, scw.WithContext(ctx))
+		if err != nil || filesystem == nil || filesystem.ProjectID != backend.plan.ProjectID || filesystem.Name != resource.Name ||
+			!slices.Contains(filesystem.Tags, backend.plan.OwnershipTag) {
+			return fmt.Errorf("planned bootstrap parent %q differs from the run-owned provider resource: %w", parentID, err)
+		}
+		attachments, err := backend.file.ListAttachments(
+			&fileapi.ListAttachmentsRequest{Region: region, FilesystemID: &parentID},
+			scw.WithAllPages(), scw.WithContext(ctx),
+		)
+		if err != nil {
+			return fmt.Errorf("list planned bootstrap parent %q attachments: %w", parentID, err)
+		}
+		if attachments == nil {
+			return fmt.Errorf("planned bootstrap parent %q returned no attachment inventory", parentID)
+		}
+		if err := validatePlannedParentAttachmentSnapshot(
+			parentID, proof.PlannedControllerInstanceID, proof.PlannedControllerZone,
+			expectedCounts[parentID], filesystem.NumberOfAttachments, attachments.Attachments,
+		); err != nil {
+			return err
+		}
+		total += len(attachments.Attachments)
+	}
+	if total > proof.PlannedParentAttachments {
+		return fmt.Errorf("planned bootstrap attachment count increased from %d to %d", proof.PlannedParentAttachments, total)
+	}
+	return nil
+}
+
+// validatePlannedParentAttachmentSnapshot accepts only a monotonic subset of
+// the exact attachments retained in the pre-delete proof. Deletions may detach
+// the two parents at different times, including across cleanup-process restarts;
+// an added, moved, duplicated, or foreign attachment always fails closed.
+func validatePlannedParentAttachmentSnapshot(
+	parentID, controllerInstanceID, controllerZone string,
+	maximumCount int,
+	reportedCount uint32,
+	attachments []*fileapi.Attachment,
+) error {
+	if maximumCount < 0 || maximumCount > 1 || len(attachments) > maximumCount || uint32(len(attachments)) != reportedCount {
+		return fmt.Errorf("planned bootstrap parent %q attachment inventories exceed or disagree with the retained proof", parentID)
+	}
+	for _, attachment := range attachments {
+		if attachment == nil || attachment.Zone == nil || attachment.FilesystemID != parentID || attachment.ResourceID != controllerInstanceID ||
+			attachment.Zone.String() != controllerZone || attachment.ResourceType != fileapi.AttachmentResourceTypeInstanceServer {
+			return fmt.Errorf("planned bootstrap parent %q has a foreign or mismatched attachment", parentID)
+		}
+	}
+	return nil
+}
+
+func (backend *scalewayBackend) waitForRunParentAttachmentsAbsent(ctx context.Context, inventory e2ecleanup.Inventory) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		allAbsent := true
+		for _, parentID := range []string{
+			resourceID(inventory, e2ecleanup.ResourceKindParent, 0),
+			resourceID(inventory, e2ecleanup.ResourceKindParent, 1),
+		} {
+			filesystem, err := backend.file.GetFileSystem(
+				&fileapi.GetFileSystemRequest{Region: scw.Region(backend.plan.Region), FilesystemID: parentID},
+				scw.WithContext(ctx),
+			)
+			if err != nil {
+				if !providerObservationRetryable(ctx, err) {
+					return fmt.Errorf("read parent %q while waiting for bootstrap detachment: %w", parentID, err)
+				}
+				allAbsent = false
+				continue
+			}
+			attachments, err := backend.file.ListAttachments(
+				&fileapi.ListAttachmentsRequest{Region: scw.Region(backend.plan.Region), FilesystemID: &parentID},
+				scw.WithAllPages(), scw.WithContext(ctx),
+			)
+			if err != nil {
+				if !providerObservationRetryable(ctx, err) {
+					return fmt.Errorf("list parent %q while waiting for bootstrap detachment: %w", parentID, err)
+				}
+				allAbsent = false
+				continue
+			}
+			if filesystem == nil || attachments == nil || filesystem.NumberOfAttachments != 0 || len(attachments.Attachments) != 0 {
+				allAbsent = false
+			}
+		}
+		if allAbsent {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for planned bootstrap parent detachment: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func inventoryResourceByKind(inventory e2ecleanup.Inventory, kind string) (e2ecleanup.Resource, bool) {
+	for _, resource := range inventory.Resources {
+		if resource.Kind == kind {
+			return resource, true
+		}
+	}
+	return e2ecleanup.Resource{}, false
 }
 
 func validateAttachmentCapacity(maxFileSystems, parentCount uint32) error {

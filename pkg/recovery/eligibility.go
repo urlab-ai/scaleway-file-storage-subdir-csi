@@ -52,6 +52,13 @@ func ValidateCheckpointRecordSet(snapshot CheckpointRecordSet) error {
 	if bootstrapPresent {
 		return fmt.Errorf("checkpoint is ineligible while a bootstrap attempt is active")
 	}
+	_, freshBootstrapPresent, err := coordination.ParseFreshBootstrapPlan(snapshot.LeaseAnnotations)
+	if err != nil {
+		return fmt.Errorf("checkpoint fresh bootstrap plan: %w", err)
+	}
+	if freshBootstrapPresent {
+		return fmt.Errorf("checkpoint is ineligible while a fresh bootstrap plan is active")
+	}
 
 	configured := make(map[string]struct{}, len(snapshot.ConfiguredParentIDs))
 	for index, parentID := range snapshot.ConfiguredParentIDs {

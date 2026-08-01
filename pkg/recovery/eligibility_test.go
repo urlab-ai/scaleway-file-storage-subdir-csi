@@ -449,6 +449,36 @@ func TestValidateCheckpointRecordSetRejectsActiveBootstrap(t *testing.T) {
 	}
 }
 
+func TestValidateCheckpointRecordSetRejectsActiveFreshBootstrapPlan(t *testing.T) {
+	snapshot, _, _ := readyCheckpointRecordSet(t)
+	holder, err := coordination.NewHolderEvidence(
+		"77777777-7777-4777-8777-777777777777", "worker-a",
+		"fr-par-1/88888888-8888-4888-8888-888888888888",
+		"88888888-8888-4888-8888-888888888888", "fr-par-1",
+		eligibilityInstallation, eligibilityCluster,
+	)
+	if err != nil {
+		t.Fatalf("NewHolderEvidence() error = %v", err)
+	}
+	parent, err := coordination.NewFreshBootstrapParent(
+		eligibilityParent, "99999999-9999-4999-8999-999999999999", mustParseEligibilityTime(t),
+	)
+	if err != nil {
+		t.Fatalf("NewFreshBootstrapParent() error = %v", err)
+	}
+	plan, err := coordination.NewFreshBootstrapPlan(holder, []coordination.FreshBootstrapParent{parent})
+	if err != nil {
+		t.Fatalf("NewFreshBootstrapPlan() error = %v", err)
+	}
+	snapshot.LeaseAnnotations, err = coordination.ApplyFreshBootstrapPlan(nil, plan)
+	if err != nil {
+		t.Fatalf("ApplyFreshBootstrapPlan() error = %v", err)
+	}
+	if err := ValidateCheckpointRecordSet(snapshot); err == nil || !strings.Contains(err.Error(), "fresh bootstrap") {
+		t.Fatalf("ValidateCheckpointRecordSet(fresh bootstrap) error = %v", err)
+	}
+}
+
 func mustParseEligibilityTime(t *testing.T) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339Nano, eligibilityTimestamp)

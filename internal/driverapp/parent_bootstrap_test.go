@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ type fakeParentBootstrapLeadership struct {
 	snapshot   coordination.LeaseSnapshot
 	setCalls   []coordination.BootstrapAttempt
 	clearCalls []string
+	freshCalls []coordination.FreshBootstrapPlan
 	events     *[]string
 	err        error
 }
@@ -79,6 +82,76 @@ func (leadership *fakeParentBootstrapLeadership) ClearBootstrapAttempt(_ context
 	leadership.snapshot.Annotations = coordination.ClearBootstrapAnnotations(leadership.snapshot.Annotations)
 	leadership.clearCalls = append(leadership.clearCalls, attemptID)
 	*leadership.events = append(*leadership.events, "clear")
+	return nil
+}
+
+func (leadership *fakeParentBootstrapLeadership) SetFreshBootstrapPlan(_ context.Context, plan coordination.FreshBootstrapPlan) error {
+	if leadership.err != nil {
+		return leadership.err
+	}
+	annotations, err := coordination.ApplyFreshBootstrapPlan(leadership.snapshot.Annotations, plan)
+	if err != nil {
+		return err
+	}
+	leadership.snapshot.Annotations = annotations
+	leadership.freshCalls = append(leadership.freshCalls, plan)
+	*leadership.events = append(*leadership.events, "set-fresh-plan")
+	return nil
+}
+
+func (leadership *fakeParentBootstrapLeadership) PromoteFreshBootstrapParent(_ context.Context, parentID string) (coordination.BootstrapAttempt, error) {
+	plan, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations)
+	if err != nil || !present {
+		if err == nil {
+			err = errors.New("fresh bootstrap plan is absent")
+		}
+		return coordination.BootstrapAttempt{}, err
+	}
+	parent, present := plan.Parent(parentID)
+	if !present {
+		return coordination.BootstrapAttempt{}, errors.New("fresh bootstrap parent is absent")
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, parent.EmptyInventoryObservedAt)
+	if err != nil {
+		return coordination.BootstrapAttempt{}, err
+	}
+	attempt, err := coordination.NewBootstrapAttempt(
+		parent.AttemptID, plan.InstallationID, plan.ActiveClusterUID, parent.ParentFilesystemID,
+		plan.ControllerNodeID, plan.ControllerInstanceID, plan.ControllerZone, observedAt,
+	)
+	if err != nil {
+		return coordination.BootstrapAttempt{}, err
+	}
+	attemptAnnotations, err := attempt.Annotations()
+	if err != nil {
+		return coordination.BootstrapAttempt{}, err
+	}
+	for key, value := range attemptAnnotations {
+		leadership.snapshot.Annotations[key] = value
+	}
+	leadership.setCalls = append(leadership.setCalls, attempt)
+	*leadership.events = append(*leadership.events, "promote-fresh-parent")
+	return attempt, nil
+}
+
+func (leadership *fakeParentBootstrapLeadership) ClearFreshBootstrapPlan(_ context.Context, expected coordination.FreshBootstrapPlan) error {
+	if leadership.err != nil {
+		return leadership.err
+	}
+	current, present, err := coordination.ParseFreshBootstrapPlan(leadership.snapshot.Annotations)
+	if err != nil {
+		return err
+	}
+	if !present || !reflect.DeepEqual(current, expected) {
+		return errors.New("fresh bootstrap plan differs from expected plan")
+	}
+	if _, present, err := coordination.ParseBootstrapAttempt(leadership.snapshot.Annotations); err != nil {
+		return err
+	} else if present {
+		return errors.New("fresh bootstrap attempt is still active")
+	}
+	leadership.snapshot.Annotations = coordination.ClearFreshBootstrapPlan(leadership.snapshot.Annotations)
+	*leadership.events = append(*leadership.events, "clear-fresh-plan")
 	return nil
 }
 
@@ -237,6 +310,45 @@ func TestParentBootstrapResumesAfterProviderAttachmentBeforeOwnerClaim(t *testin
 	wantOrder := []string{"set", "mount", "read", "inspect", "install", "read", "remove-temp", "clear", "layout", "close"}
 	if !slices.Equal(*leadership.events, wantOrder) {
 		t.Fatalf("resume after provider attachment events = %#v, want %#v", *leadership.events, wantOrder)
+	}
+}
+
+func TestParentBootstrapRejectsAttemptThatDiffersFromCompleteFreshPlanBeforeProviderWork(t *testing.T) {
+	manager, leadership, access, _, _, parentID := parentBootstrapTestManager(t)
+	holder, present, err := coordination.ParseHolderEvidence(leadership.snapshot.Annotations)
+	if err != nil || !present {
+		t.Fatalf("ParseHolderEvidence() = %#v, present=%v, error=%v", holder, present, err)
+	}
+	plannedParent, err := coordination.NewFreshBootstrapParent(
+		parentID, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coordination.NewFreshBootstrapPlan(holder, []coordination.FreshBootstrapParent{plannedParent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leadership.snapshot.Annotations, err = coordination.ApplyFreshBootstrapPlan(leadership.snapshot.Annotations, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignAttempt := bootstrapAttemptForManager(t, manager, parentID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+	attemptAnnotations, err := foreignAttempt.Annotations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range attemptAnnotations {
+		leadership.snapshot.Annotations[key] = value
+	}
+
+	err = manager.EnsureAll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "differs from the complete fresh bootstrap plan") {
+		t.Fatalf("EnsureAll(mismatched fresh attempt) error = %v", err)
+	}
+	if access.calls != 0 {
+		t.Fatalf("mismatched fresh attempt reached provider/mount path %d times", access.calls)
 	}
 }
 
@@ -449,6 +561,19 @@ func parentBootstrapTestManager(t *testing.T) (*parentBootstrapManager, *fakePar
 		},
 		events: &events,
 	}
+	holder, err := coordination.NewHolderEvidence(
+		"77777777-7777-4777-8777-777777777777", "worker-a", localNodeID,
+		mustBootstrapTarget(t, localNodeID).ServerID, mustBootstrapTarget(t, localNodeID).Zone,
+		configured.Runtime.Installation.ID, "22222222-2222-4222-8222-222222222222",
+	)
+	if err != nil {
+		t.Fatalf("NewHolderEvidence() error = %v", err)
+	}
+	leadership.snapshot.HolderIdentity = holder.PodUID
+	leadership.snapshot.Annotations, err = holder.Annotations()
+	if err != nil {
+		t.Fatalf("HolderEvidence.Annotations() error = %v", err)
+	}
 	authorizations, err := newControllerNodeAuthorizations(inventory, provider, configured)
 	if err != nil {
 		t.Fatalf("newControllerNodeAuthorizations() error = %v", err)
@@ -467,6 +592,15 @@ func parentBootstrapTestManager(t *testing.T) (*parentBootstrapManager, *fakePar
 	filesystem := &fakeParentBootstrapFilesystem{events: &events}
 	manager.openFilesystem = func(string) (parentBootstrapFilesystem, error) { return filesystem, nil }
 	return manager, leadership, access, filesystem, ids, parentID
+}
+
+func mustBootstrapTarget(t *testing.T, nodeID string) scaleway.Target {
+	t.Helper()
+	target, err := scaleway.ParseNodeID(nodeID)
+	if err != nil {
+		t.Fatalf("ParseNodeID() error = %v", err)
+	}
+	return target
 }
 
 func bootstrapAttemptForManager(t *testing.T, manager *parentBootstrapManager, parentID, attemptID string) coordination.BootstrapAttempt {

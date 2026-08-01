@@ -75,6 +75,10 @@ func PlanAutomaticAcquisition(snapshot LeaseSnapshot, candidate HolderEvidence, 
 	if err != nil {
 		return AcquisitionPlan{}, err
 	}
+	freshBootstrap, freshBootstrapPresent, err := ParseFreshBootstrapPlan(snapshot.Annotations)
+	if err != nil {
+		return AcquisitionPlan{}, err
+	}
 
 	if snapshot.HolderIdentity != "" {
 		if !previousPresent || snapshot.HolderIdentity != previous.PodUID {
@@ -83,6 +87,11 @@ func PlanAutomaticAcquisition(snapshot LeaseSnapshot, candidate HolderEvidence, 
 		_, discoveryPresent, err := ParseDiscoveryMarker(snapshot.Annotations, previous)
 		if err != nil {
 			return AcquisitionPlan{}, err
+		}
+		if freshBootstrapPresent {
+			if err := freshBootstrap.ValidateForHolder(previous); err != nil {
+				return AcquisitionPlan{}, err
+			}
 		}
 		if snapshot.HolderIdentity != candidate.PodUID {
 			return AcquisitionPlan{}, ErrAbnormalTakeoverApprovalRequired
@@ -104,7 +113,7 @@ func PlanAutomaticAcquisition(snapshot LeaseSnapshot, candidate HolderEvidence, 
 	}
 
 	if releasePresent {
-		if bootstrapPresent || !previousPresent {
+		if bootstrapPresent || freshBootstrapPresent || !previousPresent {
 			return AcquisitionPlan{}, fmt.Errorf("graceful handoff requires previous holder evidence and no bootstrap attempt")
 		}
 		if err := release.ValidateHandoff(snapshot.UID, candidate.InstallationID, candidate.ActiveClusterUID, previous); err != nil {
@@ -124,6 +133,9 @@ func PlanAutomaticAcquisition(snapshot LeaseSnapshot, candidate HolderEvidence, 
 
 	if bootstrapPresent {
 		return AcquisitionPlan{}, fmt.Errorf("empty Lease contains an unconsumed bootstrap attempt")
+	}
+	if freshBootstrapPresent {
+		return AcquisitionPlan{}, fmt.Errorf("empty Lease contains an unconsumed fresh bootstrap plan")
 	}
 	// Apparent absence is not conclusive until every configured parent has also
 	// passed provider and filesystem discovery. Durable state and orphan holder
@@ -159,7 +171,11 @@ func PlanGracefulRelease(snapshot LeaseSnapshot, current HolderEvidence, request
 	if err != nil {
 		return LeaseSnapshot{}, err
 	}
-	if inflightMutations != 0 || checkpointActive || bootstrapPresent || discoveryPresent || !present || snapshot.HolderIdentity != current.PodUID || preserved != current {
+	_, freshBootstrapPresent, err := ParseFreshBootstrapPlan(snapshot.Annotations)
+	if err != nil {
+		return LeaseSnapshot{}, err
+	}
+	if inflightMutations != 0 || checkpointActive || bootstrapPresent || freshBootstrapPresent || discoveryPresent || !present || snapshot.HolderIdentity != current.PodUID || preserved != current {
 		return LeaseSnapshot{}, ErrGracefulReleaseUnsafe
 	}
 	release, err := NewGracefulRelease(current, snapshot.UID, requestID, releasedAt)

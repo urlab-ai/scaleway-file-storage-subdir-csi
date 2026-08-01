@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 	"time"
 
+	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/coordination"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/k8s"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/mount"
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/pkg/scaleway"
@@ -21,8 +21,9 @@ const (
 // freshInstallationDiscovery is the only provisional-Lease path allowed to
 // attach parents. It proves global Kubernetes absence, an initially empty
 // provider inventory, literal parent-root emptiness, and parent-claim absence.
-// Its observations are process-local so a crash can never turn an ambiguous
-// pre-existing attachment into first-claim authority.
+// Its exact all-parent attachment authorization is persisted in the existing
+// leadership Lease before the first attach, so a same-Pod process restart can
+// resume without treating an unrelated attachment as first-claim authority.
 type freshInstallationDiscovery struct {
 	manager     *parentBootstrapManager
 	allocations parentBootstrapAllocationLister
@@ -32,9 +33,7 @@ type freshInstallationDiscovery struct {
 	clusterUID  string
 	retry       freshDiscoveryRetry
 
-	gate     chan struct{}
-	mu       sync.Mutex
-	observed map[string]time.Time
+	gate chan struct{}
 }
 
 type freshDiscoveryRetry struct {
@@ -60,7 +59,7 @@ func newFreshInstallationDiscovery(manager *parentBootstrapManager, allocations 
 		manager: manager, allocations: allocations, pvs: pvs, journals: journals,
 		poolNames: slices.Clone(poolNames), clusterUID: clusterUID,
 		retry: freshDiscoveryRetry{deadline: retryDeadline, jitter: retryJitter},
-		gate:  make(chan struct{}, 1), observed: make(map[string]time.Time),
+		gate:  make(chan struct{}, 1),
 	}, nil
 }
 
@@ -129,8 +128,12 @@ func (discovery *freshInstallationDiscovery) VerifyFreshInstallation(ctx context
 }
 
 func (discovery *freshInstallationDiscovery) verifyParentsAndFinalize(ctx context.Context, parentIDs []string) error {
+	plan, err := discovery.preparePlan(ctx, parentIDs)
+	if err != nil {
+		return err
+	}
 	for _, parentID := range parentIDs {
-		if err := discovery.inspectParent(ctx, parentID); err != nil {
+		if err := discovery.inspectParent(ctx, plan, parentID); err != nil {
 			return err
 		}
 	}
@@ -140,7 +143,7 @@ func (discovery *freshInstallationDiscovery) verifyParentsAndFinalize(ctx contex
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return discovery.manager.authorizeFreshBootstrap(discovery.observedSnapshot())
+	return nil
 }
 
 func freshDiscoveryRetryable(err error) bool {
@@ -175,31 +178,89 @@ func (discovery *freshInstallationDiscovery) wait(ctx context.Context, delay tim
 	}
 }
 
-func (discovery *freshInstallationDiscovery) inspectParent(ctx context.Context, parentID string) error {
-	observation, err := discovery.manager.observeProvider(ctx, parentID)
-	if err != nil {
-		return fmt.Errorf("observe fresh parent %q provider inventory: %w", parentID, err)
+func (discovery *freshInstallationDiscovery) preparePlan(ctx context.Context, parentIDs []string) (coordination.FreshBootstrapPlan, error) {
+	snapshot := discovery.manager.leadership.Snapshot()
+	if current, present, err := coordination.ParseFreshBootstrapPlan(snapshot.Annotations); err != nil {
+		return coordination.FreshBootstrapPlan{}, fmt.Errorf("parse durable fresh bootstrap plan: %w", err)
+	} else if present {
+		if err := discovery.validatePlanParentSet(current, parentIDs); err != nil {
+			return coordination.FreshBootstrapPlan{}, err
+		}
+		if err := discovery.manager.leadership.SetFreshBootstrapPlan(ctx, current); err != nil {
+			return coordination.FreshBootstrapPlan{}, err
+		}
+		return current, nil
 	}
-	discovery.mu.Lock()
-	_, observedBefore := discovery.observed[parentID]
-	discovery.mu.Unlock()
-	if !observedBefore {
+
+	prepared := make([]coordination.FreshBootstrapParent, 0, len(parentIDs))
+	for _, parentID := range parentIDs {
+		observation, err := discovery.manager.observeProvider(ctx, parentID)
+		if err != nil {
+			return coordination.FreshBootstrapPlan{}, fmt.Errorf("observe fresh parent %q provider inventory: %w", parentID, err)
+		}
 		if !observation.emptyFor(discovery.manager.localTarget) {
-			return fmt.Errorf("fresh parent %q had a pre-existing provider attachment", parentID)
+			return coordination.FreshBootstrapPlan{}, fmt.Errorf("fresh parent %q had a pre-existing provider attachment", parentID)
 		}
 		observedAt := discovery.manager.operationClock.Now()
 		if observedAt.IsZero() {
-			return fmt.Errorf("fresh parent %q empty-inventory observation time is zero", parentID)
+			return coordination.FreshBootstrapPlan{}, fmt.Errorf("fresh parent %q empty-inventory observation time is zero", parentID)
 		}
-		// Record before attach. If the attach response is ambiguous, only this
-		// same verifier instance may recognize the exact resulting attachment.
-		discovery.mu.Lock()
-		discovery.observed[parentID] = observedAt
-		discovery.mu.Unlock()
-	} else if !observation.emptyFor(discovery.manager.localTarget) {
-		if err := observation.requireCurrentControllerOnly(discovery.manager.localTarget); err != nil {
-			return fmt.Errorf("reobserve same-process fresh parent %q: %w", parentID, err)
+		attemptID, err := discovery.manager.ids.New()
+		if err != nil {
+			return coordination.FreshBootstrapPlan{}, fmt.Errorf("generate fresh bootstrap attempt ID for parent %q: %w", parentID, err)
 		}
+		parent, err := coordination.NewFreshBootstrapParent(parentID, attemptID, observedAt)
+		if err != nil {
+			return coordination.FreshBootstrapPlan{}, err
+		}
+		prepared = append(prepared, parent)
+	}
+	holder, present, err := coordination.ParseHolderEvidence(snapshot.Annotations)
+	if err != nil {
+		return coordination.FreshBootstrapPlan{}, fmt.Errorf("parse fresh bootstrap holder: %w", err)
+	}
+	if !present || snapshot.HolderIdentity != holder.PodUID {
+		return coordination.FreshBootstrapPlan{}, fmt.Errorf("fresh bootstrap plan requires complete matching holder evidence")
+	}
+	plan, err := coordination.NewFreshBootstrapPlan(holder, prepared)
+	if err != nil {
+		return coordination.FreshBootstrapPlan{}, err
+	}
+	if err := discovery.manager.leadership.SetFreshBootstrapPlan(ctx, plan); err != nil {
+		return coordination.FreshBootstrapPlan{}, err
+	}
+	return plan, nil
+}
+
+func (discovery *freshInstallationDiscovery) validatePlanParentSet(plan coordination.FreshBootstrapPlan, parentIDs []string) error {
+	if err := discovery.manager.validateFreshPlanIdentity(plan); err != nil {
+		return err
+	}
+	planned := make([]string, 0, len(plan.Parents))
+	for _, parent := range plan.Parents {
+		planned = append(planned, parent.ParentFilesystemID)
+	}
+	if !slices.Equal(planned, parentIDs) {
+		return fmt.Errorf("fresh bootstrap plan parent set differs from current configuration")
+	}
+	return nil
+}
+
+func (discovery *freshInstallationDiscovery) inspectParent(ctx context.Context, plan coordination.FreshBootstrapPlan, parentID string) error {
+	if _, present := plan.Parent(parentID); !present {
+		return fmt.Errorf("fresh parent %q is absent from durable bootstrap plan", parentID)
+	}
+	observation, err := discovery.manager.observeProvider(ctx, parentID)
+	if err != nil {
+		return fmt.Errorf("observe planned fresh parent %q provider inventory: %w", parentID, err)
+	}
+	if err := observation.requireCurrentAttemptOnly(discovery.manager.localTarget); err != nil {
+		return fmt.Errorf("validate planned fresh parent %q attachment: %w", parentID, err)
+	}
+	// Exact replay is a real resource-version CAS. It closes the interval
+	// between provider observation and attach against Lease loss or replacement.
+	if err := discovery.manager.leadership.SetFreshBootstrapPlan(ctx, plan); err != nil {
+		return err
 	}
 
 	root, err := discovery.manager.access.EnsureMounted(ctx, parentID)
@@ -254,16 +315,6 @@ func (discovery *freshInstallationDiscovery) requireKubernetesEmpty(ctx context.
 		return fmt.Errorf("fresh installation has %d driver PersistentVolumes", len(persistentVolumes))
 	}
 	return nil
-}
-
-func (discovery *freshInstallationDiscovery) observedSnapshot() map[string]time.Time {
-	discovery.mu.Lock()
-	defer discovery.mu.Unlock()
-	result := make(map[string]time.Time, len(discovery.observed))
-	for parentID, observedAt := range discovery.observed {
-		result[parentID] = observedAt
-	}
-	return result
 }
 
 func (discovery *freshInstallationDiscovery) lock(ctx context.Context) error {

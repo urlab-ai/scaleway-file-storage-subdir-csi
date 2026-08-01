@@ -61,8 +61,9 @@ type ApprovalFenceVerifier interface {
 	VerifyMissingLeaseRecovery(ctx context.Context, approval OperatorApproval) error
 }
 
-// FreshInstallationVerifier repeats the complete read-only absence proof
-// immediately before the CAS that promotes a provisional discovery holder.
+// FreshInstallationVerifier repeats the complete absence proof immediately
+// before promotion. Its only durable mutation is the closed fresh-bootstrap
+// plan CAS that must precede every provider attachment.
 type FreshInstallationVerifier interface {
 	VerifyFreshInstallation(ctx context.Context) error
 }
@@ -231,6 +232,20 @@ func (runtime *LeaseRuntime) AcquireApproved(ctx context.Context, approval Opera
 		if !present || current.HolderIdentity == "" || current.HolderIdentity != previous.PodUID || current.HolderIdentity == runtime.holder.PodUID {
 			return AcquisitionResult{}, fmt.Errorf("abnormal takeover requires a different non-empty exact previous holder")
 		}
+		if freshPlan, present, err := ParseFreshBootstrapPlan(current.Annotations); err != nil {
+			return AcquisitionResult{}, err
+		} else if present {
+			if err := freshPlan.ValidateForHolder(previous); err != nil {
+				return AcquisitionResult{}, err
+			}
+			// The fresh plan is deliberately bound to the exact Pod UID that
+			// proved every parent detached. Transferring the Lease while retaining
+			// that plan would create an internally inconsistent generation: the
+			// new holder could neither resume it nor safely replace it. A fresh
+			// installation interrupted by Pod replacement must use the bounded
+			// run-owned cleanup path and start again from conclusive absence.
+			return AcquisitionResult{}, fmt.Errorf("abnormal takeover cannot transfer an active fresh bootstrap plan")
+		}
 		if _, provisional, err := ParseDiscoveryMarker(current.Annotations, previous); err != nil {
 			return AcquisitionResult{}, err
 		} else if provisional {
@@ -278,6 +293,11 @@ func (runtime *LeaseRuntime) AcquireApproved(ctx context.Context, approval Opera
 			return AcquisitionResult{}, err
 		} else if bootstrapPresent {
 			return AcquisitionResult{}, fmt.Errorf("missing-Lease approval cannot promote an active bootstrap attempt")
+		}
+		if _, freshBootstrapPresent, err := ParseFreshBootstrapPlan(current.Annotations); err != nil {
+			return AcquisitionResult{}, err
+		} else if freshBootstrapPresent {
+			return AcquisitionResult{}, fmt.Errorf("missing-Lease approval cannot promote an active fresh bootstrap plan")
 		}
 		if err := fence.VerifyMissingLeaseRecovery(ctx, approval); err != nil {
 			return AcquisitionResult{}, fmt.Errorf("verify missing-Lease recovery fence: %w", err)
@@ -331,7 +351,8 @@ func (runtime *LeaseRuntime) AcquireApproved(ctx context.Context, approval Opera
 // PromoteFreshInstallation converts only the exact active provisional holder
 // into mutation leadership after a fresh complete verifier proves that no
 // allocation, PV, ownership, or parent claim exists. Provisional renewal stays
-// active during the read-only proof, then drains before the marker-clear CAS.
+// active during the proof and its pre-attach plan CAS, then drains before the
+// marker-clear CAS.
 func (runtime *LeaseRuntime) PromoteFreshInstallation(ctx context.Context, verifier FreshInstallationVerifier) (AcquisitionResult, error) {
 	if verifier == nil {
 		return AcquisitionResult{}, fmt.Errorf("fresh installation verifier is nil")
@@ -401,6 +422,16 @@ func (runtime *LeaseRuntime) PromoteFreshInstallation(ctx context.Context, verif
 		return AcquisitionResult{}, err
 	} else if present {
 		return AcquisitionResult{}, fmt.Errorf("fresh promotion is forbidden during parent bootstrap")
+	}
+	freshPlan, present, err := ParseFreshBootstrapPlan(current.Annotations)
+	if err != nil {
+		return AcquisitionResult{}, err
+	}
+	if !present {
+		return AcquisitionResult{}, fmt.Errorf("fresh promotion requires a durable fresh bootstrap plan")
+	}
+	if err := freshPlan.ValidateForHolder(holder); err != nil {
+		return AcquisitionResult{}, err
 	}
 	promotedAt := runtime.clock.Now()
 	next := cloneLeaseSnapshot(current)
@@ -690,6 +721,14 @@ func (session *LeadershipSession) RequireActiveLeadership(ctx context.Context) e
 	if !session.mutationAllowed {
 		return ErrLeadershipNotActive
 	}
+	return session.requireActiveSession(ctx)
+}
+
+// requireActiveSession proves that the renewal loop is running and the Lease
+// has not been lost without granting ordinary mutation authority. The sole
+// caller allowed to use it on a provisional session is the closed fresh-plan
+// CAS performed before any provider attachment.
+func (session *LeadershipSession) requireActiveSession(ctx context.Context) error {
 	select {
 	case <-session.started:
 	default:
@@ -863,6 +902,11 @@ func (session *LeadershipSession) SetBootstrapAttempt(ctx context.Context, attem
 	if present && existing != attempt {
 		return fmt.Errorf("bootstrap attempt %q is already active for parent %q", existing.AttemptID, existing.ParentFilesystemID)
 	}
+	if _, freshPresent, err := ParseFreshBootstrapPlan(current.Annotations); err != nil {
+		return fmt.Errorf("parse current fresh bootstrap plan: %w", err)
+	} else if freshPresent && !present {
+		return fmt.Errorf("a fresh bootstrap plan must be converted atomically before setting a parent attempt")
+	}
 	next := cloneLeaseSnapshot(current)
 	if next.Annotations == nil {
 		next.Annotations = make(map[string]string, len(annotations))
@@ -909,6 +953,179 @@ func (session *LeadershipSession) ClearBootstrapAttempt(ctx context.Context, att
 	next.Annotations = ClearBootstrapAnnotations(next.Annotations)
 	if err := session.commitLeaseUpdate(ctx, current, next, session.clock.Now()); err != nil {
 		return fmt.Errorf("clear bootstrap attempt %q: %w", attemptID, err)
+	}
+	return session.RequireActiveLeadership(ctx)
+}
+
+// SetFreshBootstrapPlan is the only durable write accepted through a
+// provisional session. It stores or exactly replays the closed all-parent plan
+// while the matching discovery marker is still present. No provider attach is
+// authorized until this CAS has completed and been read back coherently.
+func (session *LeadershipSession) SetFreshBootstrapPlan(ctx context.Context, plan FreshBootstrapPlan) error {
+	if session.mutationAllowed {
+		return fmt.Errorf("fresh bootstrap plan requires provisional leadership")
+	}
+	if err := plan.ValidateForHolder(session.holder); err != nil {
+		return err
+	}
+	if err := session.requireActiveSession(ctx); err != nil {
+		return err
+	}
+	if err := session.lockLeaseUpdate(ctx); err != nil {
+		return err
+	}
+	defer session.unlockLeaseUpdate()
+	if err := session.requireActiveSession(ctx); err != nil {
+		return err
+	}
+
+	current := session.Snapshot()
+	if _, present, err := ParseDiscoveryMarker(current.Annotations, session.holder); err != nil {
+		return fmt.Errorf("parse provisional discovery marker: %w", err)
+	} else if !present {
+		return fmt.Errorf("fresh bootstrap plan requires the matching provisional discovery marker")
+	}
+	if _, present, err := ParseBootstrapAttempt(current.Annotations); err != nil {
+		return fmt.Errorf("parse parent bootstrap journal: %w", err)
+	} else if present {
+		return fmt.Errorf("fresh bootstrap plan cannot coexist with a parent bootstrap attempt")
+	}
+	annotations, err := ApplyFreshBootstrapPlan(current.Annotations, plan)
+	if err != nil {
+		return err
+	}
+	next := cloneLeaseSnapshot(current)
+	next.Annotations = annotations
+	if err := session.commitLeaseUpdate(ctx, current, next, session.clock.Now()); err != nil {
+		return fmt.Errorf("persist fresh bootstrap plan: %w", err)
+	}
+	return session.requireActiveSession(ctx)
+}
+
+// PromoteFreshBootstrapParent adds the existing single-parent journal while
+// retaining the complete immutable plan. Keeping both records is deliberate:
+// the plan remains complete cleanup/restart evidence until every parent claim
+// has succeeded, while the attempt identifies the one mutation in progress.
+func (session *LeadershipSession) PromoteFreshBootstrapParent(ctx context.Context, parentID string) (BootstrapAttempt, error) {
+	if err := volume.ValidateParentFilesystemID(parentID); err != nil {
+		return BootstrapAttempt{}, err
+	}
+	if err := session.RequireActiveLeadership(ctx); err != nil {
+		return BootstrapAttempt{}, err
+	}
+	if err := session.lockLeaseUpdate(ctx); err != nil {
+		return BootstrapAttempt{}, err
+	}
+	defer session.unlockLeaseUpdate()
+	if err := session.RequireActiveLeadership(ctx); err != nil {
+		return BootstrapAttempt{}, err
+	}
+
+	current := session.Snapshot()
+	if _, present, err := ParseDiscoveryMarker(current.Annotations, session.holder); err != nil {
+		return BootstrapAttempt{}, err
+	} else if present {
+		return BootstrapAttempt{}, fmt.Errorf("fresh parent promotion requires completed fresh-installation discovery")
+	}
+	if _, present, err := ParseBootstrapAttempt(current.Annotations); err != nil {
+		return BootstrapAttempt{}, err
+	} else if present {
+		return BootstrapAttempt{}, fmt.Errorf("another parent bootstrap attempt is already active")
+	}
+	plan, present, err := ParseFreshBootstrapPlan(current.Annotations)
+	if err != nil {
+		return BootstrapAttempt{}, err
+	}
+	if !present {
+		return BootstrapAttempt{}, fmt.Errorf("fresh bootstrap plan is absent")
+	}
+	if err := plan.ValidateForHolder(session.holder); err != nil {
+		return BootstrapAttempt{}, err
+	}
+	parent, present := plan.Parent(parentID)
+	if !present {
+		return BootstrapAttempt{}, fmt.Errorf("parent %q is absent from fresh bootstrap plan", parentID)
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, parent.EmptyInventoryObservedAt)
+	if err != nil {
+		return BootstrapAttempt{}, err
+	}
+	attempt, err := NewBootstrapAttempt(
+		parent.AttemptID, plan.InstallationID, plan.ActiveClusterUID, parent.ParentFilesystemID,
+		plan.ControllerNodeID, plan.ControllerInstanceID, plan.ControllerZone, observedAt,
+	)
+	if err != nil {
+		return BootstrapAttempt{}, err
+	}
+	next := cloneLeaseSnapshot(current)
+	attemptAnnotations, err := attempt.Annotations()
+	if err != nil {
+		return BootstrapAttempt{}, err
+	}
+	for key, value := range attemptAnnotations {
+		next.Annotations[key] = value
+	}
+	if err := session.commitLeaseUpdate(ctx, current, next, session.clock.Now()); err != nil {
+		return BootstrapAttempt{}, fmt.Errorf("promote fresh bootstrap parent %q: %w", parentID, err)
+	}
+	if err := session.RequireActiveLeadership(ctx); err != nil {
+		return BootstrapAttempt{}, err
+	}
+	return attempt, nil
+}
+
+// ClearFreshBootstrapPlan removes the exact complete plan only after the
+// caller has validated every parent claim and no single-parent attempt remains.
+// A crash before this CAS retains the complete plan and merely replays the
+// already-installed immutable claims on the next same-Pod start.
+func (session *LeadershipSession) ClearFreshBootstrapPlan(ctx context.Context, expected FreshBootstrapPlan) error {
+	if err := expected.ValidateForHolder(session.holder); err != nil {
+		return err
+	}
+	if err := session.RequireActiveLeadership(ctx); err != nil {
+		return err
+	}
+	if err := session.lockLeaseUpdate(ctx); err != nil {
+		return err
+	}
+	defer session.unlockLeaseUpdate()
+	if err := session.RequireActiveLeadership(ctx); err != nil {
+		return err
+	}
+
+	current := session.Snapshot()
+	if _, present, err := ParseDiscoveryMarker(current.Annotations, session.holder); err != nil {
+		return err
+	} else if present {
+		return fmt.Errorf("fresh bootstrap plan cannot clear during provisional discovery")
+	}
+	if _, present, err := ParseBootstrapAttempt(current.Annotations); err != nil {
+		return err
+	} else if present {
+		return fmt.Errorf("fresh bootstrap plan cannot clear during a parent bootstrap attempt")
+	}
+	plan, present, err := ParseFreshBootstrapPlan(current.Annotations)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return fmt.Errorf("fresh bootstrap plan is absent")
+	}
+	currentValue, err := plan.annotationValue()
+	if err != nil {
+		return err
+	}
+	expectedValue, err := expected.annotationValue()
+	if err != nil {
+		return err
+	}
+	if currentValue != expectedValue {
+		return fmt.Errorf("fresh bootstrap plan differs from the completed plan")
+	}
+	next := cloneLeaseSnapshot(current)
+	next.Annotations = ClearFreshBootstrapPlan(next.Annotations)
+	if err := session.commitLeaseUpdate(ctx, current, next, session.clock.Now()); err != nil {
+		return fmt.Errorf("clear completed fresh bootstrap plan: %w", err)
 	}
 	return session.RequireActiveLeadership(ctx)
 }
@@ -1113,6 +1330,11 @@ func validateReleasedSnapshot(snapshot LeaseSnapshot, holder HolderEvidence, req
 		return err
 	} else if bootstrapPresent {
 		return fmt.Errorf("graceful Lease release retained a bootstrap attempt")
+	}
+	if _, freshBootstrapPresent, err := ParseFreshBootstrapPlan(snapshot.Annotations); err != nil {
+		return err
+	} else if freshBootstrapPresent {
+		return fmt.Errorf("graceful Lease release retained a fresh bootstrap plan")
 	}
 	if _, provisional, err := ParseDiscoveryMarker(snapshot.Annotations, holder); err != nil {
 		return err

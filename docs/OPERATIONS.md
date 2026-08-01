@@ -316,9 +316,19 @@ remain errors, while successful cleanup preconditions are derived from the
 completed structured safe-uninstall audit. A failed first Helm install, or a
 conclusively absent release after the pre-Helm gate fails, may use the run-bound
 bootstrap-abort proof only on a cluster created by that run and only when no
-scenario entry, CSI object, durable record, CSINode registration, or provider
-parent attachment exists;
-this path never represents a successful smoke test. After a provisioning error,
+scenario entry, CSI object, logical durable record, or CSINode registration
+exists. Zero parent attachments remains the ordinary requirement. If a failed
+first controller process left a valid fresh-bootstrap Lease plan, the abort
+path may instead accept only attachments that match that plan's exact holder
+Instance, zone, and run-created parent set. It uninstalls the failed release,
+deletes the exact run-owned node pool through the retained cleanup ledger, and
+waits for both regional and filesystem attachment counts to reach conclusive
+zero before parent deletion. Node-pool absence is persisted before that wait;
+after interruption, cleanup accepts only a decreasing subset of the previously
+proved exact attachments and resumes the same bounded wait. A missing/malformed
+plan, reused cluster, changed holder, unplanned parent, foreign/additional
+attachment, or unavailable inventory remains fail-closed; this path never
+represents a successful smoke test. After a provisioning error,
 several stable successful discovery reads are required before a partial resource
 prefix can become complete.
 

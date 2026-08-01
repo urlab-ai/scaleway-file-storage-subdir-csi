@@ -32,13 +32,20 @@ type fakeApprovalFenceVerifier struct {
 }
 
 type fakeFreshInstallationVerifier struct {
-	err   error
-	calls int
+	err     error
+	prepare func(context.Context) error
+	calls   int
 }
 
-func (verifier *fakeFreshInstallationVerifier) VerifyFreshInstallation(context.Context) error {
+func (verifier *fakeFreshInstallationVerifier) VerifyFreshInstallation(ctx context.Context) error {
 	verifier.calls++
-	return verifier.err
+	if verifier.err != nil {
+		return verifier.err
+	}
+	if verifier.prepare != nil {
+		return verifier.prepare(ctx)
+	}
+	return nil
 }
 
 type blockingFreshInstallationVerifier struct {
@@ -149,7 +156,56 @@ func acquireFreshTestLeadership(leaseRuntime *LeaseRuntime) (AcquisitionResult, 
 	if provisional.Session == nil || provisional.MutationAllowed {
 		return AcquisitionResult{}, errors.New("empty Lease acquisition returned invalid provisional session")
 	}
-	return leaseRuntime.PromoteFreshInstallation(context.Background(), &fakeFreshInstallationVerifier{})
+	runResult := make(chan error, 1)
+	go func() { runResult <- provisional.Session.Run(context.Background()) }()
+	<-provisional.Session.started
+	plan, err := testFreshBootstrapPlan()
+	if err != nil {
+		return AcquisitionResult{}, err
+	}
+	promoted, err := leaseRuntime.PromoteFreshInstallation(context.Background(), &fakeFreshInstallationVerifier{
+		prepare: func(ctx context.Context) error { return provisional.Session.SetFreshBootstrapPlan(ctx, plan) },
+	})
+	if err != nil {
+		return AcquisitionResult{}, err
+	}
+	if err := <-runResult; err != nil {
+		return AcquisitionResult{}, err
+	}
+	// Most runtime tests begin after parent bootstrap has completed. Model that
+	// later startup boundary directly; focused fresh-plan tests below exercise
+	// the real transition CAS independently.
+	promoted.Session.mu.Lock()
+	promoted.Session.snapshot.Annotations = ClearFreshBootstrapPlan(promoted.Session.snapshot.Annotations)
+	promoted.Session.mu.Unlock()
+	if store, ok := leaseRuntime.store.(*fakeLeaseRuntimeStore); ok {
+		store.mu.Lock()
+		store.snapshot.Annotations = ClearFreshBootstrapPlan(store.snapshot.Annotations)
+		store.mu.Unlock()
+	}
+	return promoted, nil
+}
+
+func testFreshBootstrapPlan() (FreshBootstrapPlan, error) {
+	return testFreshBootstrapPlanForParents([]FreshBootstrapParent{{
+		ParentFilesystemID:       "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		AttemptID:                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		EmptyInventoryObservedAt: time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+	}})
+}
+
+func testFreshBootstrapPlanForParents(parents []FreshBootstrapParent) (FreshBootstrapPlan, error) {
+	holder, err := NewHolderEvidence(
+		"11111111-1111-4111-8111-111111111111", "worker-a",
+		"fr-par-1/22222222-2222-4222-8222-222222222222",
+		"22222222-2222-4222-8222-222222222222", "fr-par-1",
+		"33333333-3333-4333-8333-333333333333",
+		"44444444-4444-4444-8444-444444444444",
+	)
+	if err != nil {
+		return FreshBootstrapPlan{}, err
+	}
+	return NewFreshBootstrapPlan(holder, parents)
 }
 
 func TestLeaseTimingRequiresClosedOrdering(t *testing.T) {
@@ -239,6 +295,10 @@ func TestLeaseRuntimeFreshPromotionKeepsRenewalUntilProofThenDrainsBeforeCAS(t *
 	runResult := make(chan error, 1)
 	go func() { runResult <- provisional.Session.Run(context.Background()) }()
 	<-provisional.Session.started
+	plan, err := testFreshBootstrapPlan()
+	if err != nil {
+		t.Fatalf("testFreshBootstrapPlan() error = %v", err)
+	}
 	verifier := &fakeFreshInstallationVerifier{err: errors.New("parent claim exists")}
 	store.mu.Lock()
 	updatesBeforeFailedProof := store.updates
@@ -258,6 +318,7 @@ func TestLeaseRuntimeFreshPromotionKeepsRenewalUntilProofThenDrainsBeforeCAS(t *
 	default:
 	}
 	verifier.err = nil
+	verifier.prepare = func(ctx context.Context) error { return provisional.Session.SetFreshBootstrapPlan(ctx, plan) }
 	promoted, err := leaseRuntime.PromoteFreshInstallation(context.Background(), verifier)
 	if err != nil {
 		t.Fatalf("PromoteFreshInstallation() error = %v", err)
@@ -336,6 +397,164 @@ func TestLeaseRuntimeSameHolderReacquisitionPreservesProvisionalMode(t *testing.
 	}
 	if err := second.Session.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop(second provisional) error = %v", err)
+	}
+}
+
+func TestLeaseRuntimeSameHolderRestartResumesDurableFreshPlan(t *testing.T) {
+	initial := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	store := newFakeLeaseRuntimeStore()
+	leaseRuntime := newTestLeaseRuntime(t, store, clock.NewManual(initial), make(chan error, 1))
+	first, err := leaseRuntime.Acquire(context.Background(), false)
+	if !errors.Is(err, ErrMissingLeaseRecoveryRequired) || first.Session == nil {
+		t.Fatalf("Acquire(first provisional) = %#v, %v", first, err)
+	}
+	firstRun := make(chan error, 1)
+	go func() { firstRun <- first.Session.Run(context.Background()) }()
+	<-first.Session.started
+	plan, err := testFreshBootstrapPlan()
+	if err != nil {
+		t.Fatalf("testFreshBootstrapPlan() error = %v", err)
+	}
+	if err := first.Session.SetFreshBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SetFreshBootstrapPlan() error = %v", err)
+	}
+	if err := first.Session.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop(first provisional) error = %v", err)
+	}
+	if err := <-firstRun; err != nil {
+		t.Fatalf("first provisional Run() error = %v", err)
+	}
+
+	second, err := leaseRuntime.Acquire(context.Background(), false)
+	if !errors.Is(err, ErrMissingLeaseRecoveryRequired) || second.Session == nil || second.MutationAllowed {
+		t.Fatalf("Acquire(restarted provisional) = %#v, %v", second, err)
+	}
+	resumed, present, err := ParseFreshBootstrapPlan(second.Session.Snapshot().Annotations)
+	if err != nil || !present || !resumed.annotationMustEqual(plan) {
+		t.Fatalf("restarted fresh plan = %#v, present=%v, error=%v", resumed, present, err)
+	}
+	secondRun := make(chan error, 1)
+	go func() { secondRun <- second.Session.Run(context.Background()) }()
+	<-second.Session.started
+	promoted, err := leaseRuntime.PromoteFreshInstallation(context.Background(), &fakeFreshInstallationVerifier{
+		prepare: func(ctx context.Context) error { return second.Session.SetFreshBootstrapPlan(ctx, resumed) },
+	})
+	if err != nil {
+		t.Fatalf("PromoteFreshInstallation(restarted) error = %v", err)
+	}
+	if err := <-secondRun; err != nil {
+		t.Fatalf("second provisional Run() error = %v", err)
+	}
+	promotedRun := make(chan error, 1)
+	go func() { promotedRun <- promoted.Session.Run(context.Background()) }()
+	<-promoted.Session.started
+	attempt, err := promoted.Session.PromoteFreshBootstrapParent(context.Background(), plan.Parents[0].ParentFilesystemID)
+	if err != nil {
+		t.Fatalf("PromoteFreshBootstrapParent() error = %v", err)
+	}
+	if attempt.AttemptID != plan.Parents[0].AttemptID {
+		t.Fatalf("promoted attempt = %#v", attempt)
+	}
+	snapshot := promoted.Session.Snapshot()
+	if current, present, err := ParseFreshBootstrapPlan(snapshot.Annotations); err != nil || !present || !current.annotationMustEqual(plan) {
+		t.Fatalf("complete fresh plan after parent promotion = %#v, present=%v, error=%v", current, present, err)
+	}
+	if current, present, err := ParseBootstrapAttempt(snapshot.Annotations); err != nil || !present || current != attempt {
+		t.Fatalf("parent journal after atomic promotion = %#v, present=%v, error=%v", current, present, err)
+	}
+	if err := promoted.Session.ClearFreshBootstrapPlan(context.Background(), plan); err == nil {
+		t.Fatal("ClearFreshBootstrapPlan(active attempt) error = nil")
+	}
+	if err := promoted.Session.ClearBootstrapAttempt(context.Background(), attempt.AttemptID); err != nil {
+		t.Fatalf("ClearBootstrapAttempt() error = %v", err)
+	}
+	if err := promoted.Session.ClearFreshBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("ClearFreshBootstrapPlan(completed) error = %v", err)
+	}
+	if err := promoted.Session.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop(promoted) error = %v", err)
+	}
+	if err := <-promotedRun; err != nil {
+		t.Fatalf("promoted Run() error = %v", err)
+	}
+}
+
+func TestLeadershipSessionPromotesFreshParentsOneAtATimeWithoutDurabilityGap(t *testing.T) {
+	initial := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	store := newFakeLeaseRuntimeStore()
+	leaseRuntime := newTestLeaseRuntime(t, store, clock.NewManual(initial), make(chan error, 1))
+	provisional, err := leaseRuntime.Acquire(context.Background(), false)
+	if !errors.Is(err, ErrMissingLeaseRecoveryRequired) || provisional.Session == nil {
+		t.Fatalf("Acquire(provisional) = %#v, %v", provisional, err)
+	}
+	run := make(chan error, 1)
+	go func() { run <- provisional.Session.Run(context.Background()) }()
+	<-provisional.Session.started
+	parents := []FreshBootstrapParent{
+		{ParentFilesystemID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", AttemptID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", EmptyInventoryObservedAt: initial.Format(time.RFC3339Nano)},
+		{ParentFilesystemID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", AttemptID: "55555555-5555-4555-8555-555555555555", EmptyInventoryObservedAt: initial.Add(time.Second).Format(time.RFC3339Nano)},
+	}
+	plan, err := testFreshBootstrapPlanForParents(parents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := leaseRuntime.PromoteFreshInstallation(context.Background(), &fakeFreshInstallationVerifier{
+		prepare: func(ctx context.Context) error { return provisional.Session.SetFreshBootstrapPlan(ctx, plan) },
+	})
+	if err != nil {
+		t.Fatalf("PromoteFreshInstallation() error = %v", err)
+	}
+	if err := <-run; err != nil {
+		t.Fatalf("provisional Run() error = %v", err)
+	}
+	promotedRun := make(chan error, 1)
+	go func() { promotedRun <- promoted.Session.Run(context.Background()) }()
+	<-promoted.Session.started
+
+	first, err := promoted.Session.PromoteFreshBootstrapParent(context.Background(), parents[0].ParentFilesystemID)
+	if err != nil || first.AttemptID != parents[0].AttemptID {
+		t.Fatalf("PromoteFreshBootstrapParent(first) = %#v, %v", first, err)
+	}
+	retained, present, err := ParseFreshBootstrapPlan(promoted.Session.Snapshot().Annotations)
+	if err != nil || !present || !retained.annotationMustEqual(plan) {
+		t.Fatalf("complete retained fresh plan = %#v, present=%v, error=%v", retained, present, err)
+	}
+	if active, present, err := ParseBootstrapAttempt(promoted.Session.Snapshot().Annotations); err != nil || !present || active != first {
+		t.Fatalf("first active attempt = %#v, present=%v, error=%v", active, present, err)
+	}
+	if _, err := promoted.Session.PromoteFreshBootstrapParent(context.Background(), parents[1].ParentFilesystemID); err == nil {
+		t.Fatal("second parent promotion succeeded while the first attempt was active")
+	}
+	if err := promoted.Session.ClearBootstrapAttempt(context.Background(), first.AttemptID); err != nil {
+		t.Fatalf("ClearBootstrapAttempt(first) error = %v", err)
+	}
+	second, err := promoted.Session.PromoteFreshBootstrapParent(context.Background(), parents[1].ParentFilesystemID)
+	if err != nil || second.AttemptID != parents[1].AttemptID {
+		t.Fatalf("PromoteFreshBootstrapParent(second) = %#v, %v", second, err)
+	}
+	if retained, present, err := ParseFreshBootstrapPlan(promoted.Session.Snapshot().Annotations); err != nil || !present || !retained.annotationMustEqual(plan) {
+		t.Fatalf("complete fresh plan after second promotion = %#v, present=%v, error=%v", retained, present, err)
+	}
+	if active, present, err := ParseBootstrapAttempt(promoted.Session.Snapshot().Annotations); err != nil || !present || active != second {
+		t.Fatalf("second active attempt = %#v, present=%v, error=%v", active, present, err)
+	}
+	if err := promoted.Session.ClearFreshBootstrapPlan(context.Background(), plan); err == nil {
+		t.Fatal("ClearFreshBootstrapPlan(second active attempt) error = nil")
+	}
+	if err := promoted.Session.ClearBootstrapAttempt(context.Background(), second.AttemptID); err != nil {
+		t.Fatalf("ClearBootstrapAttempt(second) error = %v", err)
+	}
+	if err := promoted.Session.ClearFreshBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("ClearFreshBootstrapPlan(all completed) error = %v", err)
+	}
+	if _, present, err := ParseFreshBootstrapPlan(promoted.Session.Snapshot().Annotations); err != nil || present {
+		t.Fatalf("cleared complete fresh plan = present=%v, error=%v", present, err)
+	}
+	if err := promoted.Session.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop(promoted) error = %v", err)
+	}
+	if err := <-promotedRun; err != nil {
+		t.Fatalf("promoted Run() error = %v", err)
 	}
 }
 
@@ -659,8 +878,8 @@ func TestLeadershipSessionLeaseUpdateGateSerializesRenewalAndHonorsCancellation(
 	store.mu.Lock()
 	updatesWhileHeld := store.updates
 	store.mu.Unlock()
-	if updatesWhileHeld != 2 {
-		t.Fatalf("renewal crossed held update gate: updates = %d, want provisional acquisition plus promotion", updatesWhileHeld)
+	if updatesWhileHeld != 3 {
+		t.Fatalf("renewal crossed held update gate: updates = %d, want provisional acquisition, fresh plan, plus promotion", updatesWhileHeld)
 	}
 
 	holder := validHolderEvidence(t)
@@ -680,7 +899,7 @@ func TestLeadershipSessionLeaseUpdateGateSerializesRenewalAndHonorsCancellation(
 	waitRuntimeCondition(t, func() bool {
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		return store.updates == 3
+		return store.updates == 4
 	})
 
 	cancelRun()
@@ -810,8 +1029,8 @@ func TestLeaseRuntimeSerializesConcurrentReacquisition(t *testing.T) {
 	store.mu.Lock()
 	updates := store.updates
 	store.mu.Unlock()
-	if updates != 3 {
-		t.Fatalf("concurrent reacquisition CAS count = %d, want 3 total", updates)
+	if updates != 4 {
+		t.Fatalf("concurrent reacquisition CAS count = %d, want 4 total", updates)
 	}
 	if err := acquired.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop(acquired) error = %v", err)
@@ -1022,6 +1241,40 @@ func TestLeaseRuntimeApprovedAbnormalTakeoverConsumesApprovalInAcquisitionCAS(t 
 	}
 	if fence.abnormalCalls != 1 {
 		t.Fatalf("reused approval repeated provider fence %d times", fence.abnormalCalls)
+	}
+}
+
+func TestLeaseRuntimeApprovedAbnormalTakeoverRejectsActiveFreshPlanBeforeCAS(t *testing.T) {
+	now := time.Date(2026, 7, 13, 15, 30, 0, 0, time.UTC)
+	previous := validHolderEvidence(t)
+	candidate := previous
+	candidate.PodUID = "99999999-9999-4999-8999-999999999999"
+	store := newFakeLeaseRuntimeStore()
+	store.snapshot = leaseWithHolder(t, previous)
+	plan, err := testFreshBootstrapPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.snapshot.Annotations, err = ApplyFreshBootstrapPlan(store.snapshot.Annotations, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseRuntime, err := NewLeaseRuntime(store, candidate, DefaultLeaseTiming(), clock.NewManual(now), func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence := &fakeApprovalFenceVerifier{}
+	_, err = leaseRuntime.AcquireApproved(
+		context.Background(), validAbnormalApproval(t), time.Date(2026, 7, 13, 14, 59, 0, 0, time.UTC), "", "", fence,
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot transfer an active fresh bootstrap plan") {
+		t.Fatalf("AcquireApproved(active fresh plan) error = %v", err)
+	}
+	if fence.abnormalCalls != 0 || store.updates != 0 {
+		t.Fatalf("rejected fresh-plan takeover fence/CAS calls = %d/%d", fence.abnormalCalls, store.updates)
+	}
+	if store.snapshot.HolderIdentity != previous.PodUID {
+		t.Fatalf("rejected fresh-plan takeover changed holder to %q", store.snapshot.HolderIdentity)
 	}
 }
 

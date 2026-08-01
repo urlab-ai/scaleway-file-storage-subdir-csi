@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
@@ -24,6 +23,9 @@ type parentBootstrapLeadership interface {
 	Snapshot() coordination.LeaseSnapshot
 	SetBootstrapAttempt(ctx context.Context, attempt coordination.BootstrapAttempt) error
 	ClearBootstrapAttempt(ctx context.Context, attemptID string) error
+	SetFreshBootstrapPlan(ctx context.Context, plan coordination.FreshBootstrapPlan) error
+	PromoteFreshBootstrapParent(ctx context.Context, parentID string) (coordination.BootstrapAttempt, error)
+	ClearFreshBootstrapPlan(ctx context.Context, plan coordination.FreshBootstrapPlan) error
 }
 
 type parentBootstrapAccess interface {
@@ -78,13 +80,6 @@ type parentBootstrapManager struct {
 	ids                 internaluuid.Generator
 	openFilesystem      parentBootstrapFilesystemFactory
 	gate                chan struct{}
-
-	// freshBootstrap is process-local evidence produced only by a complete
-	// provisional discovery proof. It deliberately does not survive a restart:
-	// after a crash, an attachment without a durable bootstrap journal must be
-	// recovered through the operator-approved missing-Lease path.
-	freshBootstrapMu sync.Mutex
-	freshBootstrap   map[string]time.Time
 }
 
 func newParentBootstrapManager(
@@ -139,7 +134,7 @@ func newParentBootstrapManager(
 		openFilesystem: func(parentRoot string) (parentBootstrapFilesystem, error) {
 			return parentfs.OpenBootstrapFilesystem(parentRoot)
 		},
-		gate: make(chan struct{}, 1), freshBootstrap: make(map[string]time.Time),
+		gate: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -151,19 +146,48 @@ func (manager *parentBootstrapManager) EnsureAll(ctx context.Context) error {
 		return err
 	}
 	defer manager.unlock()
-	attempt, present, err := coordination.ParseBootstrapAttempt(manager.leadership.Snapshot().Annotations)
+	attempt, attemptPresent, err := coordination.ParseBootstrapAttempt(manager.leadership.Snapshot().Annotations)
 	if err != nil {
 		return fmt.Errorf("parse startup bootstrap journal: %w", err)
 	}
-	processed := ""
-	if present {
+	processed := make(map[string]struct{})
+	if attemptPresent {
 		if _, configured := manager.parents[attempt.ParentFilesystemID]; !configured {
 			return fmt.Errorf("active bootstrap attempt %q references unconfigured parent %q", attempt.AttemptID, attempt.ParentFilesystemID)
 		}
 		if err := manager.ensureClaimed(ctx, manager.parents[attempt.ParentFilesystemID]); err != nil {
 			return err
 		}
-		processed = attempt.ParentFilesystemID
+		processed[attempt.ParentFilesystemID] = struct{}{}
+	}
+	freshPlan, freshPlanPresent, err := coordination.ParseFreshBootstrapPlan(manager.leadership.Snapshot().Annotations)
+	if err != nil {
+		return fmt.Errorf("parse startup fresh bootstrap plan: %w", err)
+	}
+	if freshPlanPresent {
+		if err := manager.validateFreshPlanIdentity(freshPlan); err != nil {
+			return err
+		}
+		if attemptPresent {
+			if err := manager.validateFreshPlanAttempt(freshPlan, attempt); err != nil {
+				return err
+			}
+		}
+		// Planned parents always drain before ordinary configured-parent work.
+		// This prevents a configuration change from opening a second bootstrap
+		// operation while the crash-recovery authorization is still active.
+		for _, planned := range freshPlan.Parents {
+			if _, alreadyProcessed := processed[planned.ParentFilesystemID]; alreadyProcessed {
+				continue
+			}
+			if err := manager.ensureClaimed(ctx, manager.parents[planned.ParentFilesystemID]); err != nil {
+				return err
+			}
+			processed[planned.ParentFilesystemID] = struct{}{}
+		}
+		if err := manager.leadership.ClearFreshBootstrapPlan(ctx, freshPlan); err != nil {
+			return err
+		}
 	}
 	parentIDs := make([]string, 0, len(manager.parents))
 	for parentID := range manager.parents {
@@ -171,7 +195,7 @@ func (manager *parentBootstrapManager) EnsureAll(ctx context.Context) error {
 	}
 	slices.Sort(parentIDs)
 	for _, parentID := range parentIDs {
-		if parentID == processed {
+		if _, alreadyProcessed := processed[parentID]; alreadyProcessed {
 			continue
 		}
 		if err := manager.ensureClaimed(ctx, manager.parents[parentID]); err != nil {
@@ -278,6 +302,22 @@ func (manager *parentBootstrapManager) ensureClaimed(ctx context.Context, parent
 			return fmt.Errorf("bootstrap attempt %q cannot resume while parent %q has allocation or PersistentVolume references", journaled.AttemptID, parent.id)
 		}
 	}
+	freshPlan, freshPlanPresent, err := coordination.ParseFreshBootstrapPlan(manager.leadership.Snapshot().Annotations)
+	if err != nil {
+		return fmt.Errorf("parse fresh bootstrap plan: %w", err)
+	}
+	var freshParent coordination.FreshBootstrapParent
+	if freshPlanPresent {
+		if err := manager.validateFreshPlanIdentity(freshPlan); err != nil {
+			return err
+		}
+		if journalPresent {
+			if err := manager.validateFreshPlanAttempt(freshPlan, journaled); err != nil {
+				return err
+			}
+		}
+		freshParent, _ = freshPlan.Parent(parent.id)
+	}
 
 	observation, err := manager.observeProvider(ctx, parent.id)
 	if err != nil {
@@ -294,6 +334,23 @@ func (manager *parentBootstrapManager) ensureClaimed(ctx context.Context, parent
 		}
 		return manager.completeBootstrap(ctx, parent, journaled)
 	}
+	if freshParent.ParentFilesystemID != "" {
+		if err := observation.requireCurrentAttemptOnly(manager.localTarget); err != nil {
+			return fmt.Errorf("resume fresh bootstrap parent %q: %w", parent.id, err)
+		}
+		hasReferences, err := manager.evidence.HasDurableReferences(ctx, parent.id)
+		if err != nil {
+			return fmt.Errorf("read fresh bootstrap references for parent %q: %w", parent.id, err)
+		}
+		if hasReferences {
+			return fmt.Errorf("fresh bootstrap parent %q acquired an allocation or PersistentVolume reference", parent.id)
+		}
+		attempt, err := manager.leadership.PromoteFreshBootstrapParent(ctx, parent.id)
+		if err != nil {
+			return err
+		}
+		return manager.completeBootstrap(ctx, parent, attempt)
+	}
 	if observation.emptyFor(manager.localTarget) {
 		hasReferences, err := manager.evidence.HasDurableReferences(ctx, parent.id)
 		if err != nil {
@@ -305,25 +362,12 @@ func (manager *parentBootstrapManager) ensureClaimed(ctx context.Context, parent
 			// validation and must never be overwritten by a new bootstrap claim.
 			return manager.validateExistingClaim(ctx, parent)
 		}
-		return manager.beginBootstrap(ctx, parent, manager.operationClock.Now(), false)
-	}
-	if observedAt, authorized := manager.freshBootstrapObservation(parent.id); authorized {
-		if err := observation.requireCurrentControllerOnly(manager.localTarget); err != nil {
-			return fmt.Errorf("fresh-discovery bootstrap parent %q: %w", parent.id, err)
-		}
-		hasReferences, err := manager.evidence.HasDurableReferences(ctx, parent.id)
-		if err != nil {
-			return fmt.Errorf("read parent %q durable references after fresh discovery: %w", parent.id, err)
-		}
-		if hasReferences {
-			return fmt.Errorf("fresh-discovery bootstrap parent %q acquired a durable Kubernetes reference", parent.id)
-		}
-		return manager.beginBootstrap(ctx, parent, observedAt, true)
+		return manager.beginBootstrap(ctx, parent, manager.operationClock.Now())
 	}
 	return manager.validateExistingClaim(ctx, parent)
 }
 
-func (manager *parentBootstrapManager) beginBootstrap(ctx context.Context, parent configuredBootstrapParent, observedAt time.Time, consumeFresh bool) error {
+func (manager *parentBootstrapManager) beginBootstrap(ctx context.Context, parent configuredBootstrapParent, observedAt time.Time) error {
 	attemptID, err := manager.ids.New()
 	if err != nil {
 		return fmt.Errorf("generate parent bootstrap attempt ID: %w", err)
@@ -339,46 +383,7 @@ func (manager *parentBootstrapManager) beginBootstrap(ctx context.Context, paren
 	if err := manager.leadership.SetBootstrapAttempt(ctx, attempt); err != nil {
 		return err
 	}
-	if consumeFresh {
-		manager.consumeFreshBootstrap(parent.id, observedAt)
-	}
 	return manager.completeBootstrap(ctx, parent, attempt)
-}
-
-// authorizeFreshBootstrap installs an all-parent, same-process handoff from
-// provisional read-only discovery to the first mutating bootstrap journal.
-// Partial discovery can never authorize a claim.
-func (manager *parentBootstrapManager) authorizeFreshBootstrap(observed map[string]time.Time) error {
-	if len(observed) != len(manager.parents) {
-		return fmt.Errorf("fresh discovery observed %d parents, want %d", len(observed), len(manager.parents))
-	}
-	next := make(map[string]time.Time, len(observed))
-	for parentID := range manager.parents {
-		observedAt, present := observed[parentID]
-		if !present || observedAt.IsZero() {
-			return fmt.Errorf("fresh discovery has no empty-inventory observation for parent %q", parentID)
-		}
-		next[parentID] = observedAt
-	}
-	manager.freshBootstrapMu.Lock()
-	manager.freshBootstrap = next
-	manager.freshBootstrapMu.Unlock()
-	return nil
-}
-
-func (manager *parentBootstrapManager) freshBootstrapObservation(parentID string) (time.Time, bool) {
-	manager.freshBootstrapMu.Lock()
-	defer manager.freshBootstrapMu.Unlock()
-	observedAt, present := manager.freshBootstrap[parentID]
-	return observedAt, present
-}
-
-func (manager *parentBootstrapManager) consumeFreshBootstrap(parentID string, observedAt time.Time) {
-	manager.freshBootstrapMu.Lock()
-	if current, present := manager.freshBootstrap[parentID]; present && current.Equal(observedAt) {
-		delete(manager.freshBootstrap, parentID)
-	}
-	manager.freshBootstrapMu.Unlock()
 }
 
 func (manager *parentBootstrapManager) completeBootstrap(ctx context.Context, parent configuredBootstrapParent, attempt coordination.BootstrapAttempt) (returnErr error) {
@@ -518,6 +523,56 @@ func (manager *parentBootstrapManager) validateAttemptIdentity(attempt coordinat
 		attempt.ControllerNodeID != manager.localNodeID || attempt.ControllerInstanceID != manager.localTarget.ServerID ||
 		attempt.ControllerZone != manager.localTarget.Zone {
 		return fmt.Errorf("bootstrap attempt %q belongs to another controller runtime identity", attempt.AttemptID)
+	}
+	return nil
+}
+
+func (manager *parentBootstrapManager) validateFreshPlanIdentity(plan coordination.FreshBootstrapPlan) error {
+	snapshot := manager.leadership.Snapshot()
+	holder, present, err := coordination.ParseHolderEvidence(snapshot.Annotations)
+	if err != nil {
+		return err
+	}
+	if !present || snapshot.HolderIdentity != holder.PodUID {
+		return fmt.Errorf("fresh bootstrap plan lacks matching Lease holder evidence")
+	}
+	if err := plan.ValidateForHolder(holder); err != nil {
+		return err
+	}
+	if plan.InstallationID != manager.installationID || plan.ActiveClusterUID != manager.clusterUID ||
+		plan.ControllerNodeID != manager.localNodeID || plan.ControllerInstanceID != manager.localTarget.ServerID ||
+		plan.ControllerZone != manager.localTarget.Zone {
+		return fmt.Errorf("fresh bootstrap plan belongs to another controller runtime identity")
+	}
+	if len(plan.Parents) != len(manager.parents) {
+		return fmt.Errorf("fresh bootstrap plan parent set differs from current configuration")
+	}
+	for _, parent := range plan.Parents {
+		if _, configured := manager.parents[parent.ParentFilesystemID]; !configured {
+			return fmt.Errorf("fresh bootstrap plan references unconfigured parent %q", parent.ParentFilesystemID)
+		}
+	}
+	return nil
+}
+
+func (manager *parentBootstrapManager) validateFreshPlanAttempt(plan coordination.FreshBootstrapPlan, attempt coordination.BootstrapAttempt) error {
+	parent, present := plan.Parent(attempt.ParentFilesystemID)
+	if !present {
+		return fmt.Errorf("bootstrap attempt %q is absent from the complete fresh bootstrap plan", attempt.AttemptID)
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, parent.EmptyInventoryObservedAt)
+	if err != nil {
+		return err
+	}
+	expected, err := coordination.NewBootstrapAttempt(
+		parent.AttemptID, plan.InstallationID, plan.ActiveClusterUID, parent.ParentFilesystemID,
+		plan.ControllerNodeID, plan.ControllerInstanceID, plan.ControllerZone, observedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if attempt != expected {
+		return fmt.Errorf("bootstrap attempt %q differs from the complete fresh bootstrap plan", attempt.AttemptID)
 	}
 	return nil
 }
