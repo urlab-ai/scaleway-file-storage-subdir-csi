@@ -44,6 +44,16 @@ manually. An attachment without that plan, an attachment outside it, or a
 replacement controller Pod is not an automatic-resume condition; preserve the
 Lease and provider inventories and use the documented fenced recovery path.
 
+On an empty/recreated Lease, check the fixed immutable
+`sfs-subdir-checkpoint` Secret before interpreting startup logs. Its conclusive
+absence selects only fresh discovery; its validated presence selects only the
+offline missing-Lease recovery procedure. A fresh-discovery error must never be
+followed by a recovery attachment. If an older release reports both errors in
+one startup attempt, preserve the Lease and exact attachment inventory, stop
+retrying that release, and use the run-owned cleanup or fenced recovery
+procedure appropriate to the retained evidence. Do not manufacture a
+checkpoint Secret or detach the parent manually.
+
 ## Parent status or size
 
 `creating`, `updating`, or unknown is retryable but non-serving for dependent

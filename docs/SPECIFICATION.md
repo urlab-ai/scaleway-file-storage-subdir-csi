@@ -5125,13 +5125,26 @@ Helm never creates or owns `sfs-subdir-checkpoint`. During restore, the
 operator recreates it in the driver namespace from the completed package before
 starting the controller. It is an `Opaque`, `immutable: true` Secret with the
 single data key `checkpoint.json`; unknown or missing data keys are rejected.
-The controller may only get this exact Secret by name; it verifies the canonical
-manifest SHA-256, schema, request ID, identity/object hashes, and parent
-inventories before recovery discovery. A manifest with any other Lease name is
-incompatible and rejected before provisional acquisition. The controller cannot create, update,
-patch, or delete it. A normal startup with a valid live Lease does not consume a
-stale checkpoint Secret. The operations guide requires deleting the Secret
-after a successful recovery and retaining the external backup package.
+The controller may only get this exact Secret by name. Before recovery
+discovery it verifies the immutable canonical envelope, manifest SHA-256,
+schema, request ID, driver/installation/cluster identity, fixed Lease name, and
+exact configured-parent set. After read-only discovery, but before waiting for
+or consuming approval, it verifies the complete restored Kubernetes-object and
+parent inventory aggregates plus the chart and rendered-image commitments. A
+manifest with any other Lease name is incompatible and rejected before
+provisional recovery discovery. While an empty or recreated Lease is held
+provisionally, this fixed Secret is also the sole
+fresh-versus-recovery discriminator: a conclusive Kubernetes `NotFound` selects
+fresh-installation discovery, while a present, completely valid, identity-bound
+checkpoint selects missing-Lease recovery. An unavailable, forbidden,
+timed-out, malformed, mutable, foreign, or otherwise ambiguous Secret read
+authorizes neither path and fails before any recovery attachment. Failure of
+fresh discovery never falls through to recovery discovery; it retains any
+durable fresh-bootstrap plan and fails closed for an exact same-Pod restart.
+The controller cannot create, update, patch, or delete the checkpoint Secret. A
+normal startup with a valid live Lease does not consume a stale checkpoint
+Secret. The operations guide requires deleting the Secret after a successful
+recovery and retaining the external backup package.
 
 The in-cluster checkpoint manifest is intentionally O(number of parents plus
 images), not O(number of volumes). Per-object entries stay in the external
@@ -6333,6 +6346,11 @@ Required unit tests:
   same-Pod/same-Instance
   authorization, while a crash after matching owner creation clears only the
   stale single-parent attempt;
+- provisional startup selects fresh discovery only after conclusive absence of
+  the fixed checkpoint Secret and selects read-only missing-Lease recovery only
+  after that Secret is present, immutable, canonical, and bound to the exact
+  runtime identity; an ambiguous or invalid read and every fresh-discovery
+  failure make zero recovery attachment calls;
 - the complete all-parent plan remains immutable while a single-parent attempt
   is added and cleared, and is removed only after every exact claim is valid;
   exact replay performs a Lease CAS, interruption between parents retains the

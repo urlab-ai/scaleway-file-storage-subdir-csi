@@ -561,47 +561,44 @@ func buildControllerRuntime(
 	approvedMissingLeaseRecovery := false
 	if !acquired.MutationAllowed {
 		provisionalDrained := false
-		discovery, err := newFreshInstallationDiscovery(
-			bootstrap, allocations, volumeAttachments, reservationJournals, configuredPoolNames, clusterUID,
-			configured.Controller.AttachReadyDeadline, scaleway.RandomJitter{},
+		checkpoint, promoted, recoveryDeclared, err := runProvisionalParentDiscovery(
+			func() (missingLeaseRecoveryCheckpoint, bool, error) {
+				return readMissingLeaseRecoveryCheckpoint(
+					coldStartCtx, client, startup.Config.ControllerNamespace,
+					configured.DriverName, configured.Installation.ID, clusterUID, parentIDs,
+				)
+			},
+			func() (coordination.AcquisitionResult, error) {
+				discovery, discoveryErr := newFreshInstallationDiscovery(
+					bootstrap, allocations, volumeAttachments, reservationJournals, configuredPoolNames, clusterUID,
+					configured.Controller.AttachReadyDeadline, scaleway.RandomJitter{},
+				)
+				if discoveryErr != nil {
+					return coordination.AcquisitionResult{}, discoveryErr
+				}
+				promoted, discoveryErr := leaseRuntime.PromoteFreshInstallation(ctx, discovery)
+				if discoveryErr != nil {
+					return coordination.AcquisitionResult{}, fmt.Errorf("fresh installation discovery: %w", discoveryErr)
+				}
+				return promoted, nil
+			},
+			func() error {
+				recoveryAuthorization, recoveryErr := newProvisionalRecoveryAuthorization(
+					acquired.Mode, acquired.MutationAllowed, acquired.Session, holder,
+				)
+				if recoveryErr != nil {
+					return fmt.Errorf("authorize read-only missing-Lease recovery discovery: %w", recoveryErr)
+				}
+				if recoveryErr := bootstrap.DiscoverExistingReadOnly(coldStartCtx, recoveryAuthorization); recoveryErr != nil {
+					return fmt.Errorf("read-only missing-Lease recovery discovery: %w", recoveryErr)
+				}
+				return nil
+			},
 		)
 		if err != nil {
 			return nil, err
 		}
-		promoted, err := leaseRuntime.PromoteFreshInstallation(ctx, discovery)
-		if err != nil {
-			if acquired.Session.Context().Err() != nil {
-				return nil, fmt.Errorf("promote fresh controller installation after provisional session stopped: %w", err)
-			}
-			recoveryAuthorization, recoveryErr := newProvisionalRecoveryAuthorization(
-				acquired.Mode, acquired.MutationAllowed, acquired.Session, holder,
-			)
-			if recoveryErr != nil {
-				return nil, errors.Join(
-					fmt.Errorf("fresh installation discovery: %w", err),
-					fmt.Errorf("authorize read-only missing-Lease recovery discovery: %w", recoveryErr),
-				)
-			}
-			if recoveryErr := bootstrap.DiscoverExistingReadOnly(coldStartCtx, recoveryAuthorization); recoveryErr != nil {
-				return nil, errors.Join(
-					fmt.Errorf("fresh installation discovery: %w", err),
-					fmt.Errorf("read-only missing-Lease recovery discovery: %w", recoveryErr),
-				)
-			}
-			checkpointSecret, recoveryErr := k8s.ReadCheckpointSecret(coldStartCtx, client.CoreV1(), startup.Config.ControllerNamespace)
-			if recoveryErr != nil {
-				return nil, fmt.Errorf("read missing-Lease recovery checkpoint: %w", recoveryErr)
-			}
-			manifest, manifestSHA256, recoveryErr := recovery.ValidateCheckpointSecret(recovery.CheckpointSecret{
-				Name: checkpointSecret.Name, Type: checkpointSecret.Type,
-				Immutable: checkpointSecret.Immutable, Data: checkpointSecret.Data,
-			})
-			if recoveryErr != nil {
-				return nil, fmt.Errorf("validate missing-Lease recovery checkpoint: %w", recoveryErr)
-			}
-			if recoveryErr := validateRecoveryCheckpointIdentity(manifest, configured.DriverName, configured.Installation.ID, clusterUID, parentIDs); recoveryErr != nil {
-				return nil, recoveryErr
-			}
+		if recoveryDeclared {
 			recoveryInventory, recoveryErr := newStartupInventoryReader(
 				bootstrap.parents, configured.DriverName, configured.Installation.ID, clusterUID,
 				startup.Config.ControllerNamespace, startup.Config.HelmReleaseName,
@@ -635,7 +632,7 @@ func buildControllerRuntime(
 			for _, rendered := range startup.Config.RenderedImages {
 				images = append(images, recovery.ImageDigest{Name: rendered.Name, Digest: rendered.Digest})
 			}
-			if recoveryErr := recovery.VerifyRestoredCheckpoint(manifest, recovery.RestoredCheckpointState{
+			if recoveryErr := recovery.VerifyRestoredCheckpoint(checkpoint.manifest, recovery.RestoredCheckpointState{
 				DriverName: configured.DriverName, InstallationID: configured.Installation.ID,
 				ActiveClusterUID: clusterUID, ChartVersion: startup.Config.ChartVersion,
 				Images: images, KubernetesObjects: objectSummary, Parents: parentSummaries,
@@ -670,7 +667,7 @@ func buildControllerRuntime(
 			provisionalDrained = true
 			promoted, recoveryErr = leaseRuntime.AcquireApproved(
 				ctx, approval, conditionObservedAt,
-				manifest.CheckpointRequestID, manifestSHA256, approvalFence,
+				checkpoint.manifest.CheckpointRequestID, checkpoint.manifestSHA256, approvalFence,
 			)
 			if recoveryErr != nil {
 				return nil, fmt.Errorf("consume missing-Lease recovery approval: %w", recoveryErr)
@@ -1278,6 +1275,67 @@ func validateRecoveryCheckpointIdentity(manifest recovery.CheckpointManifest, dr
 		return fmt.Errorf("checkpoint configured-parent set differs from runtime")
 	}
 	return nil
+}
+
+type missingLeaseRecoveryCheckpoint struct {
+	manifest       recovery.CheckpointManifest
+	manifestSHA256 string
+}
+
+// runProvisionalParentDiscovery makes the fresh and recovery attachment paths
+// mutually exclusive. In particular, a fresh-discovery failure is returned to
+// the caller and can never fall through to recovery attachment.
+func runProvisionalParentDiscovery(
+	readCheckpoint func() (missingLeaseRecoveryCheckpoint, bool, error),
+	fresh func() (coordination.AcquisitionResult, error),
+	recoverExisting func() error,
+) (missingLeaseRecoveryCheckpoint, coordination.AcquisitionResult, bool, error) {
+	if readCheckpoint == nil || fresh == nil || recoverExisting == nil {
+		return missingLeaseRecoveryCheckpoint{}, coordination.AcquisitionResult{}, false, fmt.Errorf("provisional parent discovery callback is nil")
+	}
+	checkpoint, recoveryDeclared, err := readCheckpoint()
+	if err != nil {
+		return missingLeaseRecoveryCheckpoint{}, coordination.AcquisitionResult{}, false, err
+	}
+	if recoveryDeclared {
+		return checkpoint, coordination.AcquisitionResult{}, true, recoverExisting()
+	}
+	promoted, err := fresh()
+	return missingLeaseRecoveryCheckpoint{}, promoted, false, err
+}
+
+// readMissingLeaseRecoveryCheckpoint makes the externally restored immutable
+// checkpoint the sole discriminator between a genuinely fresh installation
+// and missing-Lease recovery. A conclusive NotFound selects fresh discovery;
+// every ambiguous read or invalid checkpoint fails closed before recovery is
+// allowed to attach a parent for read-only inspection.
+func readMissingLeaseRecoveryCheckpoint(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, driverName, installationID, clusterUID string,
+	parentIDs []string,
+) (missingLeaseRecoveryCheckpoint, bool, error) {
+	if client == nil {
+		return missingLeaseRecoveryCheckpoint{}, false, fmt.Errorf("missing-Lease recovery Kubernetes client is nil")
+	}
+	checkpointSecret, err := k8s.ReadCheckpointSecret(ctx, client.CoreV1(), namespace)
+	if errors.Is(err, k8s.ErrNotFound) {
+		return missingLeaseRecoveryCheckpoint{}, false, nil
+	}
+	if err != nil {
+		return missingLeaseRecoveryCheckpoint{}, false, fmt.Errorf("read missing-Lease recovery checkpoint before parent discovery: %w", err)
+	}
+	manifest, manifestSHA256, err := recovery.ValidateCheckpointSecret(recovery.CheckpointSecret{
+		Name: checkpointSecret.Name, Type: checkpointSecret.Type,
+		Immutable: checkpointSecret.Immutable, Data: checkpointSecret.Data,
+	})
+	if err != nil {
+		return missingLeaseRecoveryCheckpoint{}, false, fmt.Errorf("validate missing-Lease recovery checkpoint before parent discovery: %w", err)
+	}
+	if err := validateRecoveryCheckpointIdentity(manifest, driverName, installationID, clusterUID, parentIDs); err != nil {
+		return missingLeaseRecoveryCheckpoint{}, false, err
+	}
+	return missingLeaseRecoveryCheckpoint{manifest: manifest, manifestSHA256: manifestSHA256}, true, nil
 }
 
 type controllerServeTask struct {

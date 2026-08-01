@@ -15,8 +15,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/clock"
 	internaluuid "github.com/urlab-ai/scaleway-file-storage-subdir-csi/internal/uuid"
@@ -446,8 +448,8 @@ func TestWaitForOperatorApprovalRequiresExactModeAndRuntimeIdentity(t *testing.T
 	}
 }
 
-func TestValidateRecoveryCheckpointIdentityRequiresExactParentsAndInstallation(t *testing.T) {
-	manifest := recovery.CheckpointManifest{
+func validControllerRecoveryCheckpointManifest() recovery.CheckpointManifest {
+	return recovery.CheckpointManifest{
 		SchemaVersion:       volume.SchemaVersionV1,
 		CheckpointRequestID: "11111111-1111-4111-8111-111111111111",
 		DriverName:          "file-storage-subdir.csi.urlab.ai", BackupTimestamp: "2026-07-13T10:00:00Z",
@@ -471,6 +473,10 @@ func TestValidateRecoveryCheckpointIdentityRequiresExactParentsAndInstallation(t
 			AggregateSHA256:    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		}},
 	}
+}
+
+func TestValidateRecoveryCheckpointIdentityRequiresExactParentsAndInstallation(t *testing.T) {
+	manifest := validControllerRecoveryCheckpointManifest()
 	if err := validateRecoveryCheckpointIdentity(
 		manifest, manifest.DriverName, "33333333-3333-4333-8333-333333333333",
 		manifest.ActiveClusterUID, []string{"77777777-7777-4777-8777-777777777777"},
@@ -483,4 +489,131 @@ func TestValidateRecoveryCheckpointIdentityRequiresExactParentsAndInstallation(t
 	); err == nil {
 		t.Fatal("validateRecoveryCheckpointIdentity(wrong parents) error = nil")
 	}
+}
+
+func TestReadMissingLeaseRecoveryCheckpointUsesConclusiveSecretPresence(t *testing.T) {
+	manifest := validControllerRecoveryCheckpointManifest()
+	parentIDs := []string{manifest.Parents[0].ParentFilesystemID}
+	installationID := manifest.HolderEvidence.InstallationID
+
+	t.Run("absent selects fresh discovery", func(t *testing.T) {
+		checkpoint, declared, err := readMissingLeaseRecoveryCheckpoint(
+			context.Background(), fake.NewSimpleClientset(), "driver-system",
+			manifest.DriverName, installationID, manifest.ActiveClusterUID, parentIDs,
+		)
+		if err != nil || declared || checkpoint.manifestSHA256 != "" {
+			t.Fatalf("readMissingLeaseRecoveryCheckpoint(absent) = %#v, declared=%v, error=%v", checkpoint, declared, err)
+		}
+	})
+
+	t.Run("invalid present secret fails closed", func(t *testing.T) {
+		immutable := true
+		client := fake.NewSimpleClientset(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: coordination.CheckpointSecretNameV1, Namespace: "driver-system",
+			UID: types.UID("88888888-8888-4888-8888-888888888888"),
+		}, Type: corev1.SecretTypeOpaque, Immutable: &immutable, Data: map[string][]byte{"checkpoint.json": []byte("not-json")}})
+		if _, declared, err := readMissingLeaseRecoveryCheckpoint(
+			context.Background(), client, "driver-system",
+			manifest.DriverName, installationID, manifest.ActiveClusterUID, parentIDs,
+		); err == nil || declared {
+			t.Fatalf("readMissingLeaseRecoveryCheckpoint(invalid) declared=%v, error=%v", declared, err)
+		}
+	})
+
+	t.Run("ambiguous read fails closed", func(t *testing.T) {
+		client := fake.NewSimpleClientset()
+		client.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("injected ambiguous API response")
+		})
+		if _, declared, err := readMissingLeaseRecoveryCheckpoint(
+			context.Background(), client, "driver-system",
+			manifest.DriverName, installationID, manifest.ActiveClusterUID, parentIDs,
+		); !errors.Is(err, k8s.ErrUnavailable) || declared {
+			t.Fatalf("readMissingLeaseRecoveryCheckpoint(ambiguous) declared=%v, error=%v", declared, err)
+		}
+	})
+
+	t.Run("valid present secret selects recovery", func(t *testing.T) {
+		encoded, err := recovery.EncodeCheckpointManifest(manifest)
+		if err != nil {
+			t.Fatalf("EncodeCheckpointManifest() error = %v", err)
+		}
+		immutable := true
+		client := fake.NewSimpleClientset(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: coordination.CheckpointSecretNameV1, Namespace: "driver-system",
+			UID: types.UID("88888888-8888-4888-8888-888888888888"),
+		}, Type: corev1.SecretTypeOpaque, Immutable: &immutable, Data: map[string][]byte{"checkpoint.json": encoded}})
+		checkpoint, declared, err := readMissingLeaseRecoveryCheckpoint(
+			context.Background(), client, "driver-system",
+			manifest.DriverName, installationID, manifest.ActiveClusterUID, parentIDs,
+		)
+		if err != nil || !declared || checkpoint.manifest.CheckpointRequestID != manifest.CheckpointRequestID || checkpoint.manifestSHA256 == "" {
+			t.Fatalf("readMissingLeaseRecoveryCheckpoint(valid) = %#v, declared=%v, error=%v", checkpoint, declared, err)
+		}
+	})
+}
+
+func TestRunProvisionalParentDiscoveryNeverFallsThroughBetweenPaths(t *testing.T) {
+	t.Run("fresh failure makes zero recovery calls", func(t *testing.T) {
+		freshErr := errors.New("injected fresh discovery failure before durable plan")
+		freshCalls, recoveryCalls := 0, 0
+		_, _, recoveryDeclared, err := runProvisionalParentDiscovery(
+			func() (missingLeaseRecoveryCheckpoint, bool, error) {
+				return missingLeaseRecoveryCheckpoint{}, false, nil
+			},
+			func() (coordination.AcquisitionResult, error) {
+				freshCalls++
+				return coordination.AcquisitionResult{}, freshErr
+			},
+			func() error {
+				recoveryCalls++
+				return nil
+			},
+		)
+		if !errors.Is(err, freshErr) || recoveryDeclared || freshCalls != 1 || recoveryCalls != 0 {
+			t.Fatalf("fresh route error=%v, declared=%v, fresh calls=%d, recovery calls=%d", err, recoveryDeclared, freshCalls, recoveryCalls)
+		}
+	})
+
+	t.Run("declared recovery makes zero fresh calls", func(t *testing.T) {
+		freshCalls, recoveryCalls := 0, 0
+		checkpoint := missingLeaseRecoveryCheckpoint{manifestSHA256: "sha256:recovery"}
+		observed, _, recoveryDeclared, err := runProvisionalParentDiscovery(
+			func() (missingLeaseRecoveryCheckpoint, bool, error) {
+				return checkpoint, true, nil
+			},
+			func() (coordination.AcquisitionResult, error) {
+				freshCalls++
+				return coordination.AcquisitionResult{}, nil
+			},
+			func() error {
+				recoveryCalls++
+				return nil
+			},
+		)
+		if err != nil || !recoveryDeclared || observed.manifestSHA256 != checkpoint.manifestSHA256 || freshCalls != 0 || recoveryCalls != 1 {
+			t.Fatalf("recovery route error=%v, declared=%v, checkpoint=%#v, fresh calls=%d, recovery calls=%d", err, recoveryDeclared, observed, freshCalls, recoveryCalls)
+		}
+	})
+
+	t.Run("checkpoint error makes zero discovery calls", func(t *testing.T) {
+		checkpointErr := errors.New("injected ambiguous checkpoint read")
+		freshCalls, recoveryCalls := 0, 0
+		_, _, recoveryDeclared, err := runProvisionalParentDiscovery(
+			func() (missingLeaseRecoveryCheckpoint, bool, error) {
+				return missingLeaseRecoveryCheckpoint{}, false, checkpointErr
+			},
+			func() (coordination.AcquisitionResult, error) {
+				freshCalls++
+				return coordination.AcquisitionResult{}, nil
+			},
+			func() error {
+				recoveryCalls++
+				return nil
+			},
+		)
+		if !errors.Is(err, checkpointErr) || recoveryDeclared || freshCalls != 0 || recoveryCalls != 0 {
+			t.Fatalf("checkpoint-error route error=%v, declared=%v, fresh calls=%d, recovery calls=%d", err, recoveryDeclared, freshCalls, recoveryCalls)
+		}
+	})
 }
