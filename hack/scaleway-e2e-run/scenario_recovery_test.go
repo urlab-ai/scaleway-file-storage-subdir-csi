@@ -216,11 +216,212 @@ func TestCheckpointRecoveryReplayRequiresDurablyPreparedArchive(t *testing.T) {
 	for _, phase := range []string{
 		checkpointPhasePrepared,
 		checkpointPhaseNamespaceDeleted,
-		checkpointPhaseControllerRestored,
 	} {
 		if !checkpointRecoveryCanReplay(phase) {
 			t.Fatalf("checkpointRecoveryCanReplay(%q) = false after durable preparation", phase)
 		}
+	}
+	if checkpointRecoveryCanReplay(checkpointPhaseControllerRestored) {
+		t.Fatal("controller-restored checkpoint was accepted for stale replay")
+	}
+	if checkpointRecoveryCanReplay(checkpointPhaseFullReleaseArmed) {
+		t.Fatal("full-release-armed checkpoint retained replay-detach authority")
+	}
+}
+
+func TestCheckpointReplayPhaseClosesNamespaceDeletionCrashWindow(t *testing.T) {
+	phase, persist, err := checkpointReplayPhaseAfterNamespaceDeletion(checkpointPhasePrepared)
+	if err != nil || phase != checkpointPhaseNamespaceDeleted || !persist {
+		t.Fatalf("prepared replay phase = (%q, %t, %v)", phase, persist, err)
+	}
+	phase, persist, err = checkpointReplayPhaseAfterNamespaceDeletion(checkpointPhaseNamespaceDeleted)
+	if err != nil || phase != checkpointPhaseNamespaceDeleted || persist {
+		t.Fatalf("idempotent replay phase = (%q, %t, %v)", phase, persist, err)
+	}
+	for _, unsafe := range []string{checkpointPhaseFullReleaseArmed, checkpointPhaseControllerRestored} {
+		if _, _, err := checkpointReplayPhaseAfterNamespaceDeletion(unsafe); err == nil {
+			t.Fatalf("phase %q reacquired replay-detach authority", unsafe)
+		}
+	}
+}
+
+func TestCheckpointFullReleaseAdmissionIsCompleteAndDurable(t *testing.T) {
+	plan := recoveryTestPlan(t)
+	journal := preparedCheckpointRecoveryJournal(t, plan)
+	backend := &scalewayBackend{}
+	armed, err := backend.armCheckpointFullRelease(
+		plan, journal,
+		"11111111-1111-4111-8111-111111111112",
+		"22222222-2222-4222-8222-222222222223",
+		"33333333-3333-4333-8333-333333333334",
+		"44444444-4444-4444-8444-444444444445",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if armed.Phase != checkpointPhaseFullReleaseArmed || armed.SchemaVersion != checkpointRecoverySchemaVersion {
+		t.Fatalf("armed journal phase/schema = %q/%q", armed.Phase, armed.SchemaVersion)
+	}
+	written, err := backend.readCheckpointRecoveryJournal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.Phase != checkpointPhaseFullReleaseArmed || written.ApprovalSecretUID != armed.ApprovalSecretUID {
+		t.Fatalf("durable full-release admission differs: %#v", written)
+	}
+	broken := written
+	broken.ApprovalSecretUID = ""
+	if err := broken.validate(plan); err == nil {
+		t.Fatal("partial full-release admission authority was accepted")
+	}
+	if _, err := backend.armCheckpointFullRelease(
+		plan, written,
+		armed.ProvisionalPodUID, armed.ProvisionalLeaseUID,
+		armed.ApprovalRequestID, armed.ApprovalSecretUID,
+	); err == nil {
+		t.Fatal("already-armed full release reacquired replay-detach authority")
+	}
+}
+
+func TestCheckpointRecoveryPersistsSafetyBoundariesBeforeMutation(t *testing.T) {
+	tests := []struct {
+		file     string
+		function string
+		before   string
+		after    string
+	}{
+		{
+			file: "checkpoint_recovery_journal.go", function: "func (backend *scalewayBackend) replayCheckpointForCleanup(",
+			before: "retain deleted-namespace checkpoint replay state", after: "replacePreRecoveryKapsuleNodes(",
+		},
+		{
+			file: "checkpoint_recovery.go", function: "func (backend *scalewayBackend) runCheckpointRecoveryScenarios(",
+			before: "armCheckpointFullRelease(", after: "installFullRecoveredRelease(",
+		},
+		{
+			file: "checkpoint_recovery_journal.go", function: "func (backend *scalewayBackend) replayCheckpointForCleanup(",
+			before: "armCheckpointFullRelease(", after: "installFullRecoveredRelease(",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.file+test.before, func(t *testing.T) {
+			body := sourceFunctionBody(t, test.file, test.function)
+			before := strings.Index(body, test.before)
+			after := strings.Index(body, test.after)
+			if before < 0 || after < 0 || before >= after {
+				t.Fatalf("safety boundary %q must precede mutation %q", test.before, test.after)
+			}
+		})
+	}
+}
+
+func TestCheckpointReplayRevalidatesAttachmentAtDetachBoundary(t *testing.T) {
+	body := sourceFunctionBody(
+		t, "checkpoint_replay_attachment.go",
+		"func (backend *scalewayBackend) recoverInterruptedProvisionalAttachment(",
+	)
+	detach := strings.Index(body, "DetachServerFileSystem(")
+	if detach < 0 {
+		t.Fatal("replay detach call is missing")
+	}
+	finalObservation := strings.LastIndex(body[:detach], "observeInterruptedProvisionalAttachment(")
+	mountProof := strings.Index(body, "proveCheckpointReplayNodeMountsAbsent(")
+	pool := strings.LastIndex(body[:detach], "waitForKapsuleNodeSet(")
+	replayedNode := strings.LastIndex(body[:detach], "requireCheckpointReplayNode(")
+	namespace := strings.LastIndex(body[:detach], "exactRunNamespacePresent(")
+	if finalObservation < 0 || mountProof < 0 || pool < 0 || replayedNode < 0 || namespace < 0 ||
+		pool <= mountProof || replayedNode <= pool || finalObservation <= replayedNode ||
+		finalObservation <= namespace || finalObservation >= detach {
+		t.Fatal("exact attachment identity is not the final provider observation before detach")
+	}
+}
+
+func TestCheckpointRecoveryJournalScopesReplayAttachmentAuthority(t *testing.T) {
+	plan := recoveryTestPlan(t)
+	journal := preparedCheckpointRecoveryJournal(t, plan)
+	journal.SchemaVersion = checkpointRecoverySchemaVersionV1
+	if err := journal.validate(plan); err != nil {
+		t.Fatalf("retained v1 journal without replay authority: %v", err)
+	}
+
+	replay := checkpointReplayAttachment{
+		AttachmentID:  "11111111-1111-4111-8111-111111111112",
+		ParentID:      "22222222-2222-4222-8222-222222222223",
+		InstanceID:    "33333333-3333-4333-8333-333333333334",
+		KapsuleNodeID: "44444444-4444-4444-8444-444444444445",
+		Zone:          "fr-par-1",
+	}
+	journal.ReplayAttachment = &replay
+	if err := journal.validate(plan); err == nil {
+		t.Fatal("v1 journal accepted v2 replay authority")
+	}
+
+	journal.SchemaVersion = checkpointRecoverySchemaVersion
+	if err := journal.validate(plan); err != nil {
+		t.Fatalf("exact v2 replay authority: %v", err)
+	}
+
+	tests := map[string]func(*checkpointRecoveryJournal){
+		"wrong phase": func(candidate *checkpointRecoveryJournal) {
+			candidate.Phase = checkpointPhaseControllerRestored
+		},
+		"old Instance": func(candidate *checkpointRecoveryJournal) {
+			candidate.ReplayAttachment.InstanceID = candidate.OldInstanceIDs[0]
+		},
+		"invalid zone": func(candidate *checkpointRecoveryJournal) {
+			candidate.ReplayAttachment.Zone = "fr-par-1/foreign"
+		},
+		"invalid attachment": func(candidate *checkpointRecoveryJournal) {
+			candidate.ReplayAttachment.AttachmentID = "not-an-id"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := journal
+			replayCopy := *journal.ReplayAttachment
+			candidate.ReplayAttachment = &replayCopy
+			mutate(&candidate)
+			if err := candidate.validate(plan); err == nil {
+				t.Fatal("unsafe replay authority was accepted")
+			}
+		})
+	}
+}
+
+func TestCheckpointRecoveryJournalDurableWriteUpgradesV1(t *testing.T) {
+	plan := recoveryTestPlan(t)
+	journal := preparedCheckpointRecoveryJournal(t, plan)
+	journal.SchemaVersion = checkpointRecoverySchemaVersionV1
+	backend := &scalewayBackend{}
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		t.Fatal(err)
+	}
+	written, err := backend.readCheckpointRecoveryJournal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.SchemaVersion != checkpointRecoverySchemaVersion {
+		t.Fatalf("durable schema = %q, want %q", written.SchemaVersion, checkpointRecoverySchemaVersion)
+	}
+}
+
+func TestExactRunNamespaceObservationTreatsTerminatingAsPresent(t *testing.T) {
+	plan := recoveryTestPlan(t)
+	request := e2erunner.Request{HelmRelease: "driver-release"}
+	namespace := "driver-system"
+	encoded := []byte(`{"metadata":{"deletionTimestamp":"2026-08-01T12:00:00Z","labels":{"sfs-subdir-e2e-run":"` +
+		plan.RunID + `","app.kubernetes.io/instance":"driver-release"}}}`)
+	present, err := validateExactRunNamespaceObservation(encoded, request, plan, namespace)
+	if err != nil || !present {
+		t.Fatalf("terminating namespace = (%t, %v), want still present", present, err)
+	}
+	present, err = validateExactRunNamespaceObservation(nil, request, plan, namespace)
+	if err != nil || present {
+		t.Fatalf("absent namespace = (%t, %v), want absent", present, err)
+	}
+	foreign := []byte(`{"metadata":{"labels":{"sfs-subdir-e2e-run":"foreign","app.kubernetes.io/instance":"driver-release"}}}`)
+	if _, err := validateExactRunNamespaceObservation(foreign, request, plan, namespace); err == nil {
+		t.Fatal("foreign namespace was accepted")
 	}
 }
 
@@ -396,4 +597,63 @@ func TestCheckpointRecoveryArtifactsRejectReplacement(t *testing.T) {
 	if err := validateCheckpointRecoveryArtifacts(journal); err == nil {
 		t.Fatal("replaced checkpoint Helm values were accepted")
 	}
+}
+
+func preparedCheckpointRecoveryJournal(t *testing.T, plan e2eplan.Plan) checkpointRecoveryJournal {
+	t.Helper()
+	journal := newCheckpointRecoveryJournal(plan)
+	journal.Phase = checkpointPhaseNamespaceDeleted
+	journal.PersistentVolume = "pv-checkpoint"
+	journal.WorkloadStoppedBeforeNamespaceDeletion = true
+	journal.ValuesPath = filepath.Join(
+		filepath.Dir(plan.CleanupInventoryPath), "checkpoint-release-values-"+plan.RunID+".yaml",
+	)
+	journal.ValuesSHA256 = "sha256:" + strings.Repeat("c", 64)
+	journal.CheckpointRequestID = "99999999-9999-4999-8999-999999999999"
+	journal.ArchivePath = filepath.Join(
+		filepath.Dir(plan.CleanupInventoryPath), "checkpoint-"+journal.CheckpointRequestID+".tar",
+	)
+	journal.ArchiveSHA256 = "sha256:" + strings.Repeat("a", 64)
+	journal.ManifestSHA256 = "sha256:" + strings.Repeat("b", 64)
+	journal.ArchiveBytes = 4096
+	journal.OldInstanceIDs = []string{
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	}
+	journal.NodeRetirements = []checkpointNodeRetirement{
+		{
+			KapsuleNodeID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+			NodeName:      "worker-a",
+			InstanceID:    journal.OldInstanceIDs[0],
+			RootVolumeID:  "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+		},
+		{
+			KapsuleNodeID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+			NodeName:      "worker-b",
+			InstanceID:    journal.OldInstanceIDs[1],
+			RootVolumeID:  "ffffffff-ffff-4fff-8fff-ffffffffffff",
+		},
+	}
+	if err := journal.validate(plan); err != nil {
+		t.Fatalf("prepared checkpoint recovery journal: %v", err)
+	}
+	return journal
+}
+
+func sourceFunctionBody(t *testing.T, file, signature string) string {
+	t.Helper()
+	encoded, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(encoded)
+	start := strings.Index(contents, signature)
+	if start < 0 {
+		t.Fatalf("source function %q is missing from %s", signature, file)
+	}
+	body := contents[start:]
+	if next := strings.Index(body[len(signature):], "\nfunc "); next >= 0 {
+		body = body[:len(signature)+next]
+	}
+	return body
 }

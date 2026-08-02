@@ -5356,6 +5356,13 @@ same configured parents in `available` state and no other File Storage. Any old,
 unknown, duplicate, cross-zone, transitional, missing, or contradictory entry
 keeps recovery non-serving. This check covers every configured parent and never
 uses the historical checkpoint holder as the recovery fence scope.
+The regional File Storage inventory and the zonal Instance filesystem inventory
+are independent eventually consistent views and need not change atomically. An
+explicitly transitional or temporarily missing expected entry is therefore
+re-observed only inside the existing bounded attach-readiness loop while the
+controller remains non-serving. It never satisfies the recovery barrier. A
+foreign, malformed, duplicated, wrong-scope, or otherwise contradictory entry
+still fails immediately rather than being classified as provider lag.
 
 ### 10.3 Concurrent Provisioning
 
@@ -7052,19 +7059,86 @@ Kapsule matrix must:
     volume absent. If Kapsule remains stuck at `deleting`, reuse the same
     exact-ID, ownership-validated, lost-response-safe Instance/root retirement
     used by controller-failure recovery; never infer a root volume after its
-    Instance has disappeared. Restore the exact pool to its planned two-node
-    size and wait for a fresh Ready generation before processing the next old
-    worker. The pool therefore retains at least one Ready node and is never
+    Instance has disappeared. The still-running Instance must expose exactly
+    the journaled sole root immediately before a new stop request. Once that
+    Instance is conclusively stopped inside the journaled retirement
+    transition, replay may observe an empty Instance volume topology because
+    Kapsule can detach the durable root before removing the Instance object.
+    This observation cannot authorize Instance deletion: the exact Kapsule node
+    must separately enter its required deletion state first.
+    Any non-empty topology must still contain only the exact journaled root;
+    the Block API remains authoritative for that root's exact Project, zone,
+    references, detach, and eventual absence. Restore the exact pool to its
+    planned two-node size and wait for a fresh Ready generation before
+    processing the next old worker. The pool therefore retains at least one
+    Ready node and is never
     intentionally reduced to zero. A retry derives progress from the fsynced
     identities and exact provider state: it re-proves already absent resources
     and restores an `N-1` pool before any later deletion. After both
     replacements, require the planned number of Ready nodes with no
     pre-recovery Instance ID and zero parent attachments before restoring the
-    immutable checkpoint Secret. Require the missing-Lease controller to remain
-    non-serving until exact all-Instance fencing and one-time approval, restore
-    the external Deployment to one replica only after the full release is
-    healthy, then verify the original marker, new provisioning, archive/delete,
-    and tombstone inventory;
+    immutable checkpoint Secret. Because the regional File Storage and zonal
+    Instance views do not converge atomically, this zero-attachment barrier and
+    the later provisional-controller attachment barrier require two consecutive
+    complete agreeing observations within one bounded ten-minute window. A
+    well-formed attachment to an exact retired or replacement Instance, an
+    `updating` parent, or a missing/`attaching`/`detaching` expected Instance
+    filesystem is pending only within that window. An attachment outside the
+    closed journaled Instance set, a reattached decommissioned parent, an extra
+    filesystem, or any malformed, foreign, duplicated, wrong-zone, or
+    contradictory entry fails immediately. A fresh scenario must never detach
+    an attachment to a replacement Instance at this barrier. An interrupted
+    diagnostic or cleanup replay may encounter the single active-parent
+    attachment left by its own earlier controller-only recovery Pod after that
+    Pod's namespace was deleted. Only that replay may remove the residue, and
+    only after two stable complete regional and Instance observations identify
+    exactly one attachment to one exact current run-owned replacement node,
+    every other current replacement Instance reports both parents absent, the
+    historical parent remains detached, and the exact driver namespace is
+    conclusively absent. Before detach, the replay fsyncs the attachment,
+    parent, Instance, Kapsule node, and zone in its recovery journal, then
+    revalidates the unchanged current pool and namespace immediately before the
+    exact detach. It clears that durable record only after both provider views
+    stably prove absence. Immediately before detach, the replay also re-proves
+    the preserved Deployment is scaled to zero with no Pod or
+    `VolumeAttachment`, then runs one run-owned, credential-free, privileged
+    host-PID mount inspector on every exact current replacement node. Each
+    inspector reads and parses PID 1's bounded `mountinfo`; any mount at or below
+    the fixed node parent root, or any `virtiofs` parent/descendant mount sourced
+    from either exact parent ID anywhere in the host namespace, blocks detach.
+    Inspector Pods have no service
+    account token, use the immutable workload image, are bound to exact node
+    names, and are deleted through exact run/scenario/name selectors. The
+    harness re-reads and validates each admitted Pod, then binds its wait,
+    successful terminal state, and logs to that exact Pod UID, and rechecks the
+    UID immediately before final deletion. Init/ephemeral containers, hooks,
+    probes, arguments, environment inputs, volumes, interactive input, or any
+    alternate runtime or termination-log mount, or any other executable or
+    evidence-substituting admission mutation fail closed, as does a same-name
+    Pod replacement. After all inspectors complete, the harness re-reads the exact
+    Kapsule pool and refuses any replacement-Instance drift before the final
+    provider observation. This closes
+    compatibility with retained journals written before the full-release
+    admission phase existed. The controller mount itself is private,
+    non-propagated `emptyDir` state destroyed with the namespace. This authority
+    is not a normal controller shutdown or CSI detach path. A second attachment,
+    the historical parent, any foreign filesystem,
+    Instance, node, zone, namespace, or identity drift remains an immediate
+    fail-closed error. Immediately before the first Helm operation that may
+    install the node DaemonSet, fsync a `full-release-armed` recovery phase with
+    the exact provisional Pod UID, Lease UID, approval request ID, and approval
+    Secret UID. From that point onward replay-detach authority is permanently
+    unavailable: a retry with the exact namespace still present may idempotently
+    complete the full Helm release and verify the same Pod, Lease, and approval
+    consumption, while an absent namespace fails closed. The phase advances to
+    `controller-restored` only after those checks. A later disappearance of a
+    fully restored namespace must not replay the older checkpoint because node
+    mounts may have existed and workload state may be newer than that archive.
+    Require the missing-Lease controller
+    to remain non-serving until exact all-Instance fencing and one-time approval,
+    restore the external Deployment to one replica only after the full release
+    is healthy, then verify the original marker, new provisioning,
+    archive/delete, and tombstone inventory;
 14. verify the managed Scaleway File Storage CSI remains installed but idle and
     that its CSIDriver, StorageClass, RBAC, sidecars, and node DaemonSet coexist
     without default-class or object collisions;
@@ -7080,7 +7154,10 @@ conditions: Scaleway transient/locked states, HTTP 408/429/5xx responses, and
 transport errors while the enclosing operation context remains live.
 Authorization, validation, not-found, conflict, quota, precondition, malformed
 response, cancellation, and exhausted-deadline failures remain immediate and
-fail closed.
+fail closed. The checkpoint cross-view barriers additionally classify only the
+closed, well-formed transitional inventory states defined above as pending;
+they do not reinterpret those observations as success and require stable exact
+agreement before continuing.
 
 The numbered matrix defines required coverage; the harness retains one explicit
 execution order and rejects every other ordering. The N/N-1 proof is necessarily
@@ -7356,13 +7433,22 @@ candidate artifacts, predecessor artifacts, ready exact-ID inventory, and
 process-only credentials; revalidates current resource ownership and the live
 commercial-type attachment capability; and completes any exact journaled
 transition using the same fail-closed recovery order as cleanup before starting
-the requested phase. The first phase requires retained pre/provider evidence;
-each later phase requires the exact non-qualifying result of its predecessor.
+the requested phase. A phase normally requires the exact non-qualifying result
+of its predecessor. When that diagnostic predecessor does not exist, the phase
+may instead begin at the first incomplete block of an interrupted full run only
+after the executor revalidates the complete global scenario prefix through the
+immediately preceding required scenario. That bridge requires the exact ordered
+scenario names, regular non-aliased result and proof files, matching file and
+compact-proof SHA-256 digests, the same run ID, candidate images, predecessor
+identity, and every scenario-specific semantic validator. A present but invalid
+diagnostic predecessor never falls back to full-run evidence. Missing, invalid,
+out-of-order, mixed-run, or incomplete prefix evidence blocks the phase, so this
+mechanism skips only repeated execution and never skips an unproved scenario.
 Every phase verifies its fixed scenario names and structured proofs, and writes
-`releaseQualified=false`. This mode cannot create a cluster, skip a phase,
-emit final qualification evidence, or promote a release. After diagnostics
-pass, one fresh uninterrupted execution of the complete ordered matrix,
-including the full soak and exact cleanup, remains mandatory release evidence.
+`releaseQualified=false`. This mode cannot create a cluster, emit final
+qualification evidence, or promote a release. After diagnostics pass, one fresh
+uninterrupted execution of the complete ordered matrix, including the full soak
+and exact cleanup, remains mandatory release evidence.
 
 Cleanup inventory schema v2 is mandatory for every new run. It adds the
 disposable Instance root volume without invalidating schema-v1 cleanup of an
@@ -7466,6 +7552,21 @@ normal safe uninstall. Any missing, symlinked, replaced, mismatched, or
 unreadable artifact, label, identity, attachment, or provider read fails closed
 and leaves the journal intact. No recovery journal may contain a credential or
 expand authority beyond the closed request and retained inventory.
+
+Checkpoint recovery journal schema v2 adds only the exact replay-attachment
+record and full-release admission boundary required by the interrupted
+controller-only transition above. Readers remain compatible with a retained
+schema-v1 journal that has no such authority; the next durable rewrite upgrades
+it to v2. A replay-attachment record is valid only in the
+`namespace-deleted` phase and must not name a pre-recovery Instance. The
+`full-release-armed` phase requires all four exact admission identities and can
+never carry replay-detach authority. These fields contain no credential and do
+not authorize discovery by name, deletion of an Instance or node, detachment of
+the historical parent, or cleanup during normal CSI operation. If namespace
+deletion completes while the durable phase is still `prepared`, replay first
+fsyncs `namespace-deleted` before any worker or provider mutation. A
+`controller-restored` journal with an absent driver namespace is not eligible
+for stale checkpoint replay and fails closed for operator recovery.
 
 If the first install scenario fails before producing any successful scenario
 entry and the exact Helm release is either `failed` or conclusively absent

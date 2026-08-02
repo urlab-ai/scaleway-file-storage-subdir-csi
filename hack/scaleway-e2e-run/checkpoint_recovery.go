@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
-	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
@@ -196,6 +194,11 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	if err != nil {
 		return nil, err
 	}
+	if err := backend.waitForCheckpointParentsDetached(
+		ctx, request, plan, parentIDs, oldNodes.InstanceIDs, replacementNodes,
+	); err != nil {
+		return nil, err
+	}
 	if err := backend.createRecoveryNamespaceAndSecrets(ctx, request, plan); err != nil {
 		return nil, err
 	}
@@ -276,6 +279,13 @@ func (backend *scalewayBackend) runCheckpointRecoveryScenarios(
 	}
 	approvalRequestID, approvalUID, err := backend.createMissingLeaseApproval(
 		ctx, request, plan, checkpointRequestID, prepared.Receipt.ManifestSHA256, provisionalLease,
+	)
+	if err != nil {
+		return nil, err
+	}
+	journal, err = backend.armCheckpointFullRelease(
+		plan, journal, provisional.Metadata.UID, provisionalLease.Metadata.UID,
+		approvalRequestID, approvalUID,
 	)
 	if err != nil {
 		return nil, err
@@ -724,47 +734,15 @@ func (backend *scalewayBackend) verifyOnlyProvisionalParentAttachment(ctx contex
 	if len(parentIDs) != 2 {
 		return fmt.Errorf("provisional recovery requires the exact retained two-parent inventory")
 	}
-	parentID := parentIDs[0]
 	nodeID := lease.Metadata.Annotations["holderCSINodeID"]
 	instanceID := lease.Metadata.Annotations["holderInstanceID"]
 	zone := lease.Metadata.Annotations["holderZone"]
-	if !slices.Contains(replacementIDs, instanceID) || !strings.HasSuffix(nodeID, "/"+instanceID) {
+	if !slices.Contains(replacementIDs, instanceID) || !strings.HasSuffix(nodeID, "/"+instanceID) || zone != request.Zone {
 		return fmt.Errorf("provisional controller is outside the exact replacement pool")
 	}
-	listed, err := backend.file.ListAttachments(&fileapi.ListAttachmentsRequest{Region: scw.Region(backend.plan.Region), FilesystemID: &parentID}, scw.WithAllPages(), scw.WithContext(ctx))
-	if err != nil {
-		return err
-	}
-	parent, err := backend.file.GetFileSystem(&fileapi.GetFileSystemRequest{Region: scw.Region(backend.plan.Region), FilesystemID: parentID}, scw.WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("configured recovery parent is not authoritatively available: %w", err)
-	}
-	if parent == nil || parent.Status != fileapi.FileSystemStatusAvailable || parent.NumberOfAttachments != 1 {
-		return fmt.Errorf("configured recovery parent is not authoritatively available")
-	}
-	if listed == nil || len(listed.Attachments) != 1 || listed.Attachments[0] == nil || listed.Attachments[0].ResourceID != instanceID ||
-		listed.Attachments[0].FilesystemID != parentID || listed.Attachments[0].ResourceType != fileapi.AttachmentResourceTypeInstanceServer ||
-		listed.Attachments[0].Zone == nil || listed.Attachments[0].Zone.String() != zone {
-		return fmt.Errorf("configured parent is not attached only to the provisional controller Instance")
-	}
-	serverResponse, err := backend.instance.GetServer(&instanceapi.GetServerRequest{Zone: scw.Zone(zone), ServerID: instanceID}, scw.WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("read provisional controller Instance inventory: %w", err)
-	}
-	if serverResponse == nil || serverResponse.Server == nil || serverResponse.Server.Project != backend.plan.ProjectID ||
-		serverResponse.Server.State != instanceapi.ServerStateRunning || len(serverResponse.Server.Filesystems) != 1 ||
-		serverResponse.Server.Filesystems[0] == nil || serverResponse.Server.Filesystems[0].FilesystemID != parentID ||
-		serverResponse.Server.Filesystems[0].State != instanceapi.ServerFilesystemStateAvailable {
-		return fmt.Errorf("provisional controller Instance inventory does not exactly match the configured parent")
-	}
-	decommissioned, err := backend.file.ListAttachments(&fileapi.ListAttachmentsRequest{Region: scw.Region(backend.plan.Region), FilesystemID: &parentIDs[1]}, scw.WithAllPages(), scw.WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("historical decommissioned parent was reattached during recovery: %w", err)
-	}
-	if decommissioned == nil || len(decommissioned.Attachments) != 0 {
-		return fmt.Errorf("historical decommissioned parent was reattached during recovery")
-	}
-	return nil
+	return backend.waitForOnlyProvisionalParentAttachment(
+		ctx, request, backend.plan, parentIDs, instanceID, replacementIDs,
+	)
 }
 
 func (backend *scalewayBackend) verifyCheckpointSecretImmutable(ctx context.Context, request e2erunner.Request) (bool, error) {

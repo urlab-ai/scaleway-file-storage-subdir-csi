@@ -202,6 +202,50 @@ func TestPrepareControllerInstanceForDeletionIsIdempotentAfterPoweroffOrArchive(
 	}
 }
 
+func TestPrepareControllerInstanceForDeletionAcceptsJournaledRootAlreadyDetached(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	server.Volumes = nil
+	server.State = instanceapi.ServerStateStopped
+	api := &fakeControllerRetirementInstanceAPI{}
+
+	absent, err := prepareControllerInstanceForDeletion(context.Background(), api, plan, journal, server)
+	if err != nil || absent {
+		t.Fatalf("detached journaled root replay = absent:%t error:%v", absent, err)
+	}
+	if api.actionCalls != 0 {
+		t.Fatal("already powered-off Instance requested another provider action")
+	}
+
+	foreign := *server
+	foreign.Volumes = map[string]*instanceapi.VolumeServer{
+		"0": {ID: "77777777-7777-4777-8777-777777777777", VolumeType: instanceapi.VolumeServerVolumeType("sbs_5k")},
+	}
+	if _, err := prepareControllerInstanceForDeletion(
+		context.Background(), api, plan, journal, &foreign,
+	); err == nil {
+		t.Fatal("stopped Instance with a foreign replacement root was accepted")
+	}
+
+	extra := *server
+	extra.Volumes = map[string]*instanceapi.VolumeServer{
+		"0": {ID: journal.OldRootVolumeID, VolumeType: instanceapi.VolumeServerVolumeType("sbs_5k")},
+		"1": {ID: "88888888-8888-4888-8888-888888888888", VolumeType: instanceapi.VolumeServerVolumeType("sbs_5k")},
+	}
+	if _, err := prepareControllerInstanceForDeletion(
+		context.Background(), api, plan, journal, &extra,
+	); err == nil {
+		t.Fatal("stopped Instance with an additional volume was accepted")
+	}
+
+	withoutAuthority := journal
+	withoutAuthority.OldRootVolumeID = ""
+	if _, err := prepareControllerInstanceForDeletion(
+		context.Background(), api, plan, withoutAuthority, server,
+	); err == nil {
+		t.Fatal("empty root topology without durable root authority was accepted")
+	}
+}
+
 func TestControllerNodeRootDeletionRequiresDetachedExactVolume(t *testing.T) {
 	plan, journal, _, volume := controllerRetirementFixture()
 	volume.Status = blockapi.VolumeStatusAvailable

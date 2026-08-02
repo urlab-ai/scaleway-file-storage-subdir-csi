@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -102,7 +103,7 @@ func (backend *scalewayBackend) runDiagnosticPhase(
 		return "", fmt.Errorf("unsupported diagnostic phase %q", phase)
 	}
 	evidenceDirectory := filepath.Dir(plan.CleanupInventoryPath)
-	if err := requireDiagnosticPrerequisite(evidenceDirectory, plan.RunID, phase); err != nil {
+	if err := requireDiagnosticPrerequisite(evidenceDirectory, request, plan, phase); err != nil {
 		return "", err
 	}
 
@@ -183,25 +184,31 @@ func validateDiagnosticScenarioNames(phase string, results []e2erunner.ScenarioR
 	return nil
 }
 
-func requireDiagnosticPrerequisite(evidenceDirectory, runID, phase string) error {
-	if phase == diagnosticPhaseDestructive {
-		for _, name := range []string{
-			"scenario-results-run-pre.json",
-			"provider-attach-detach.json",
-			"parent-growth.json",
-		} {
-			if err := requireExactDiagnosticFile(filepath.Join(evidenceDirectory, name)); err != nil {
-				return fmt.Errorf("diagnostic phase %q prerequisite %q: %w", phase, name, err)
-			}
-		}
-		return nil
-	}
+func requireDiagnosticPrerequisite(
+	evidenceDirectory string,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	phase string,
+) error {
 	previous := map[string]string{
 		diagnosticPhaseMid:      diagnosticPhaseDestructive,
 		diagnosticPhaseRecovery: diagnosticPhaseMid,
 		diagnosticPhasePost:     diagnosticPhaseRecovery,
 	}[phase]
+	if previous == "" {
+		return requireDiagnosticFullRunPrefix(evidenceDirectory, request, plan, phase)
+	}
 	path := filepath.Join(evidenceDirectory, "diagnostic-results-"+previous+".json")
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return requireDiagnosticFullRunPrefix(evidenceDirectory, request, plan, phase)
+		}
+		return fmt.Errorf("inspect diagnostic phase %q prerequisite %q: %w", phase, previous, err)
+	}
+	return validateDiagnosticEvidenceFile(path, plan.RunID, phase, previous)
+}
+
+func validateDiagnosticEvidenceFile(path, runID, phase, previous string) error {
 	if err := requireExactDiagnosticFile(path); err != nil {
 		return fmt.Errorf("diagnostic phase %q requires completed phase %q: %w", phase, previous, err)
 	}
@@ -223,6 +230,109 @@ func requireDiagnosticPrerequisite(evidenceDirectory, runID, phase string) error
 		return err
 	}
 	return e2erunner.ValidateAvailableScenarioProofsForRun(evidence.Scenarios, runID)
+}
+
+// requireDiagnosticFullRunPrefix permits a diagnostic to begin at the first
+// incomplete scenario block of an interrupted full run. It does not trust file
+// presence: every retained result and proof is rehashed, decoded, semantically
+// validated, bound to this run and candidate, and required in the exact global
+// order. A present but invalid diagnostic predecessor never falls back here.
+func requireDiagnosticFullRunPrefix(
+	evidenceDirectory string,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	phase string,
+) error {
+	prefixLength := map[string]int{
+		diagnosticPhaseDestructive: 7,
+		diagnosticPhaseMid:         9,
+		diagnosticPhaseRecovery:    10,
+		diagnosticPhasePost:        12,
+	}[phase]
+	if prefixLength == 0 || prefixLength > len(e2erunner.RequiredScenarios) {
+		return fmt.Errorf("diagnostic phase %q has no closed full-run prefix", phase)
+	}
+	pre, err := loadRetainedScenarioResultsFile(
+		evidenceDirectory, "scenario-results-run-pre.json", plan.RunID,
+	)
+	if err != nil {
+		return fmt.Errorf("diagnostic phase %q full-run prefix: %w", phase, err)
+	}
+	results := slices.Clone(pre)
+	for _, name := range e2erunner.RequiredScenarios[5:min(prefixLength, 9)] {
+		result, err := loadRetainedScenarioProof(evidenceDirectory, name)
+		if err != nil {
+			return fmt.Errorf("diagnostic phase %q full-run prefix scenario %q: %w", phase, name, err)
+		}
+		results = append(results, result)
+	}
+	if prefixLength >= 10 {
+		mid, err := loadRetainedScenarioResultsFile(
+			evidenceDirectory, "scenario-results-run-mid.json", plan.RunID,
+		)
+		if err != nil {
+			return fmt.Errorf("diagnostic phase %q full-run prefix: %w", phase, err)
+		}
+		results = append(results, mid...)
+	}
+	for _, name := range e2erunner.RequiredScenarios[10:prefixLength] {
+		result, err := loadRetainedScenarioProof(evidenceDirectory, name)
+		if err != nil {
+			return fmt.Errorf("diagnostic phase %q full-run prefix scenario %q: %w", phase, name, err)
+		}
+		results = append(results, result)
+	}
+	if err := validateDiagnosticFullRunPrefixNames(results, prefixLength); err != nil {
+		return err
+	}
+	if request.Predecessor == nil {
+		return fmt.Errorf("diagnostic full-run prefix lacks its exact predecessor identity")
+	}
+	if err := e2erunner.ValidatePredecessorScenario(pre, *request.Predecessor); err != nil {
+		return fmt.Errorf("diagnostic full-run predecessor proof: %w", err)
+	}
+	if err := e2erunner.ValidateCandidateScenarioImages(plan.Profile, pre, plan.Artifacts.Images); err != nil {
+		return fmt.Errorf("diagnostic full-run candidate image proof: %w", err)
+	}
+	return e2erunner.ValidateAvailableScenarioProofsForRun(results, plan.RunID)
+}
+
+func validateDiagnosticFullRunPrefixNames(results []e2erunner.ScenarioResult, prefixLength int) error {
+	if prefixLength <= 0 || prefixLength > len(e2erunner.RequiredScenarios) || len(results) != prefixLength {
+		return fmt.Errorf("diagnostic full-run prefix has %d scenarios, want %d", len(results), prefixLength)
+	}
+	for index := range results {
+		if results[index].Name != e2erunner.RequiredScenarios[index] {
+			return fmt.Errorf(
+				"diagnostic full-run prefix scenario %d is %q, want %q",
+				index+1, results[index].Name, e2erunner.RequiredScenarios[index],
+			)
+		}
+	}
+	return nil
+}
+
+func loadRetainedScenarioProof(evidenceDirectory, name string) (e2erunner.ScenarioResult, error) {
+	if !slices.Contains(e2erunner.RequiredScenarios, name) {
+		return e2erunner.ScenarioResult{}, fmt.Errorf("retained scenario proof name %q is outside the closed release matrix", name)
+	}
+	result := e2erunner.ScenarioResult{
+		Name: name, Succeeded: true, EvidenceFile: name + ".json",
+	}
+	evidencePath := filepath.Join(evidenceDirectory, result.EvidenceFile)
+	if err := requireExactDiagnosticFile(evidencePath); err != nil {
+		return e2erunner.ScenarioResult{}, err
+	}
+	digest, err := fileSHA256(evidencePath)
+	if err != nil {
+		return e2erunner.ScenarioResult{}, err
+	}
+	result.EvidenceSHA = digest
+	results := []e2erunner.ScenarioResult{result}
+	if err := hydrateRetainedScenarioResults(evidenceDirectory, results); err != nil {
+		return e2erunner.ScenarioResult{}, err
+	}
+	return results[0], nil
 }
 
 func requireExactDiagnosticFile(path string) error {

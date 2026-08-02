@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	fileapi "github.com/scaleway/scaleway-sdk-go/api/file/v1alpha1"
 	instanceapi "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	k8sapi "github.com/scaleway/scaleway-sdk-go/api/k8s/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
@@ -145,17 +144,6 @@ func (backend *scalewayBackend) replacePreRecoveryKapsuleNodes(
 		}
 	}
 
-	for _, parentID := range parentIDs {
-		listed, err := backend.file.ListAttachments(&fileapi.ListAttachmentsRequest{
-			Region: scw.Region(plan.Region), FilesystemID: &parentID,
-		}, scw.WithAllPages(), scw.WithContext(ctx))
-		if err != nil {
-			return kapsuleNodeSet{}, fmt.Errorf("list parent %s attachments after checkpoint worker replacement: %w", parentID, err)
-		}
-		if listed == nil || len(listed.Attachments) != 0 {
-			return kapsuleNodeSet{}, fmt.Errorf("parent %s retains an old or unknown attachment after checkpoint worker replacement", parentID)
-		}
-	}
 	return current, nil
 }
 
@@ -321,13 +309,22 @@ func stopCheckpointKapsuleInstance(
 	if response == nil || response.Server == nil {
 		return false, fmt.Errorf("read exact checkpoint Kapsule Instance: provider returned an empty response")
 	}
-	if _, err := validateControllerNodeServerIdentity(response.Server, plan, journal); err != nil {
+	if err := validateControllerNodeServerScope(response.Server, plan, journal); err != nil {
 		return false, err
 	}
 	switch response.Server.State {
 	case instanceapi.ServerStateStopped, instanceapi.ServerStateStoppedInPlace, controllerInstanceArchivedState:
+		if err := validateControllerNodeRetirementIdentity(response.Server, plan, journal); err != nil {
+			return false, err
+		}
 		return false, nil
 	case instanceapi.ServerStateRunning:
+		// Before the stop boundary, the root must still be visibly attached.
+		// An empty topology is accepted only on an already stopped retirement
+		// replay, never as authority to initiate a new destructive transition.
+		if _, err := validateControllerNodeServerIdentity(response.Server, plan, journal); err != nil {
+			return false, err
+		}
 	default:
 		return false, fmt.Errorf(
 			"checkpoint Kapsule Instance state %q is not safe for exact retirement",
@@ -355,7 +352,7 @@ func stopCheckpointKapsuleInstance(
 			"revalidate stopped checkpoint Kapsule Instance: provider returned an empty response",
 		))
 	}
-	if _, err := validateControllerNodeServerIdentity(observed.Server, plan, journal); err != nil {
+	if err := validateControllerNodeRetirementIdentity(observed.Server, plan, journal); err != nil {
 		return false, errors.Join(actionErr, err)
 	}
 	if observed.Server.State != instanceapi.ServerStateStopped &&

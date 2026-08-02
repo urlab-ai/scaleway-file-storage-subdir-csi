@@ -661,11 +661,32 @@ func (backend *scalewayBackend) scenarioArguments(
 }
 
 func (backend *scalewayBackend) runScenarioPhase(ctx context.Context, evidenceDirectory, phase string, common []string) ([]e2erunner.ScenarioResult, error) {
-	resultsPath := filepath.Join(evidenceDirectory, "scenario-results-"+phase+".json")
+	resultsFile := "scenario-results-" + phase + ".json"
+	resultsPath := filepath.Join(evidenceDirectory, resultsFile)
 	arguments := append([]string{phase}, common...)
 	arguments = append(arguments, "--results="+resultsPath)
 	if err := backend.runScenarioCommand(ctx, arguments...); err != nil {
 		return nil, err
+	}
+	return loadRetainedScenarioResultsFile(evidenceDirectory, resultsFile, backend.plan.RunID)
+}
+
+// loadRetainedScenarioResultsFile revalidates an already completed scenario
+// phase exactly as a newly executed phase. This is the only safe bridge from a
+// retained full-run prefix into diagnostic mode: filenames remain basenames,
+// every evidence digest is rehashed, JSON proofs are re-embedded, and semantic
+// proof validation is repeated for the exact run ID.
+func loadRetainedScenarioResultsFile(
+	evidenceDirectory string,
+	resultsFile string,
+	runID string,
+) ([]e2erunner.ScenarioResult, error) {
+	if resultsFile == "" || filepath.Base(resultsFile) != resultsFile {
+		return nil, fmt.Errorf("scenario results filename is not an exact basename")
+	}
+	resultsPath := filepath.Join(evidenceDirectory, resultsFile)
+	if err := requireExactDiagnosticFile(resultsPath); err != nil {
+		return nil, fmt.Errorf("scenario results %q: %w", resultsFile, err)
 	}
 	encoded, err := os.ReadFile(resultsPath)
 	if err != nil {
@@ -675,39 +696,46 @@ func (backend *scalewayBackend) runScenarioPhase(ctx context.Context, evidenceDi
 	if err := strictjson.Decode(encoded, &results); err != nil {
 		return nil, err
 	}
+	if err := hydrateRetainedScenarioResults(evidenceDirectory, results); err != nil {
+		return nil, err
+	}
+	if err := e2erunner.ValidateAvailableScenarioProofsForRun(results, runID); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func hydrateRetainedScenarioResults(evidenceDirectory string, results []e2erunner.ScenarioResult) error {
 	// Validate basenames before joining any backend-controlled output with the
 	// retained evidence directory. This keeps a compromised scenario process
 	// from turning evidence verification into an arbitrary file read.
 	if err := e2erunner.ValidateScenarioSubset(results); err != nil {
-		return nil, err
+		return err
 	}
 	for index := range results {
 		result := &results[index]
 		evidencePath := filepath.Join(evidenceDirectory, result.EvidenceFile)
 		info, err := os.Lstat(evidencePath)
 		if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 16<<20 {
-			return nil, fmt.Errorf("scenario evidence %q must be an exact regular file of 1 to 16 MiB: %w", result.EvidenceFile, err)
+			return fmt.Errorf("scenario evidence %q must be an exact regular file of 1 to 16 MiB: %w", result.EvidenceFile, err)
 		}
 		digest, err := fileSHA256(evidencePath)
 		if err != nil || digest != result.EvidenceSHA {
-			return nil, fmt.Errorf("scenario evidence %q digest mismatch: %w", result.EvidenceFile, err)
+			return fmt.Errorf("scenario evidence %q digest mismatch: %w", result.EvidenceFile, err)
 		}
 		if filepath.Ext(result.EvidenceFile) == ".json" {
 			proof, err := os.ReadFile(evidencePath)
 			if err != nil {
-				return nil, fmt.Errorf("read scenario proof %q: %w", result.EvidenceFile, err)
+				return fmt.Errorf("read scenario proof %q: %w", result.EvidenceFile, err)
 			}
 			result.Proof = bytes.TrimSpace(proof)
 			result.ProofSHA256, err = e2erunner.CompactScenarioProofDigest(result.Proof)
 			if err != nil {
-				return nil, fmt.Errorf("digest scenario proof %q: %w", result.EvidenceFile, err)
+				return fmt.Errorf("digest scenario proof %q: %w", result.EvidenceFile, err)
 			}
 		}
 	}
-	if err := e2erunner.ValidateAvailableScenarioProofsForRun(results, backend.plan.RunID); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return nil
 }
 
 func (backend *scalewayBackend) Cleanup(ctx context.Context, request e2erunner.Request, inventory e2ecleanup.Inventory) (e2ecleanup.Inventory, error) {

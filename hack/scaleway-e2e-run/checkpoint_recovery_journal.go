@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,15 +21,31 @@ import (
 )
 
 const (
-	checkpointRecoverySchemaVersion   = "1"
+	checkpointRecoverySchemaVersionV1 = "1"
+	checkpointRecoverySchemaVersion   = "2"
 	checkpointPhaseWorkloadCreating   = "workload-creating"
 	checkpointPhaseWorkloadReady      = "workload-ready"
 	checkpointPhaseWorkloadStopped    = "workload-stopped"
 	checkpointPhasePreparing          = "preparing"
 	checkpointPhasePrepared           = "prepared"
 	checkpointPhaseNamespaceDeleted   = "namespace-deleted"
+	checkpointPhaseFullReleaseArmed   = "full-release-armed"
 	checkpointPhaseControllerRestored = "controller-restored"
 )
+
+// checkpointReplayAttachment durably closes the only provider mutation needed
+// to recover a failed provisional-controller attempt. Namespace deletion
+// destroys the controller's private, non-propagated emptyDir mount namespace,
+// but Scaleway intentionally retains the Instance attachment. The exact
+// attachment, parent, replacement Instance, Kapsule node, and zone are fsynced
+// here before replay detaches anything.
+type checkpointReplayAttachment struct {
+	AttachmentID  string `json:"attachmentId"`
+	ParentID      string `json:"parentId"`
+	InstanceID    string `json:"instanceId"`
+	KapsuleNodeID string `json:"kapsuleNodeId"`
+	Zone          string `json:"zone"`
+}
 
 // checkpointNodeRetirement normally binds one pre-recovery Kapsule node to the
 // exact run-owned Instance and provider-created root volume that may have to be
@@ -54,24 +71,29 @@ type checkpointNodeRetirement struct {
 // cloud and Kubernetes authority continues to come from the closed request and
 // exact-ID cleanup inventory.
 type checkpointRecoveryJournal struct {
-	SchemaVersion                          string                     `json:"schemaVersion"`
-	RunID                                  string                     `json:"runId"`
-	Phase                                  string                     `json:"phase"`
-	WorkloadNamespace                      string                     `json:"workloadNamespace"`
-	WorkloadClaim                          string                     `json:"workloadClaim"`
-	WorkloadDeployment                     string                     `json:"workloadDeployment"`
-	Marker                                 string                     `json:"marker"`
-	PersistentVolume                       string                     `json:"persistentVolume,omitempty"`
-	WorkloadStoppedBeforeNamespaceDeletion bool                       `json:"workloadStoppedBeforeNamespaceDeletion,omitempty"`
-	ValuesPath                             string                     `json:"valuesPath,omitempty"`
-	ValuesSHA256                           string                     `json:"valuesSha256,omitempty"`
-	CheckpointRequestID                    string                     `json:"checkpointRequestId,omitempty"`
-	ArchivePath                            string                     `json:"archivePath,omitempty"`
-	ArchiveSHA256                          string                     `json:"archiveSha256,omitempty"`
-	ArchiveBytes                           uint64                     `json:"archiveBytes,omitempty"`
-	ManifestSHA256                         string                     `json:"manifestSha256,omitempty"`
-	OldInstanceIDs                         []string                   `json:"oldInstanceIds,omitempty"`
-	NodeRetirements                        []checkpointNodeRetirement `json:"nodeRetirements,omitempty"`
+	SchemaVersion                          string                      `json:"schemaVersion"`
+	RunID                                  string                      `json:"runId"`
+	Phase                                  string                      `json:"phase"`
+	WorkloadNamespace                      string                      `json:"workloadNamespace"`
+	WorkloadClaim                          string                      `json:"workloadClaim"`
+	WorkloadDeployment                     string                      `json:"workloadDeployment"`
+	Marker                                 string                      `json:"marker"`
+	PersistentVolume                       string                      `json:"persistentVolume,omitempty"`
+	WorkloadStoppedBeforeNamespaceDeletion bool                        `json:"workloadStoppedBeforeNamespaceDeletion,omitempty"`
+	ValuesPath                             string                      `json:"valuesPath,omitempty"`
+	ValuesSHA256                           string                      `json:"valuesSha256,omitempty"`
+	CheckpointRequestID                    string                      `json:"checkpointRequestId,omitempty"`
+	ArchivePath                            string                      `json:"archivePath,omitempty"`
+	ArchiveSHA256                          string                      `json:"archiveSha256,omitempty"`
+	ArchiveBytes                           uint64                      `json:"archiveBytes,omitempty"`
+	ManifestSHA256                         string                      `json:"manifestSha256,omitempty"`
+	OldInstanceIDs                         []string                    `json:"oldInstanceIds,omitempty"`
+	NodeRetirements                        []checkpointNodeRetirement  `json:"nodeRetirements,omitempty"`
+	ReplayAttachment                       *checkpointReplayAttachment `json:"replayAttachment,omitempty"`
+	ProvisionalPodUID                      string                      `json:"provisionalPodUid,omitempty"`
+	ProvisionalLeaseUID                    string                      `json:"provisionalLeaseUid,omitempty"`
+	ApprovalRequestID                      string                      `json:"approvalRequestId,omitempty"`
+	ApprovalSecretUID                      string                      `json:"approvalSecretUid,omitempty"`
 }
 
 func newCheckpointRecoveryJournal(plan e2eplan.Plan) checkpointRecoveryJournal {
@@ -92,7 +114,8 @@ func (backend *scalewayBackend) checkpointRecoveryPath(plan e2eplan.Plan) string
 
 func (journal checkpointRecoveryJournal) validate(plan e2eplan.Plan) error {
 	expected := newCheckpointRecoveryJournal(plan)
-	if journal.SchemaVersion != checkpointRecoverySchemaVersion || journal.RunID != plan.RunID ||
+	if (journal.SchemaVersion != checkpointRecoverySchemaVersionV1 && journal.SchemaVersion != checkpointRecoverySchemaVersion) ||
+		journal.RunID != plan.RunID ||
 		journal.WorkloadNamespace != expected.WorkloadNamespace || journal.WorkloadClaim != expected.WorkloadClaim ||
 		journal.WorkloadDeployment != expected.WorkloadDeployment || journal.Marker != expected.Marker {
 		return fmt.Errorf("checkpoint recovery journal envelope is invalid")
@@ -129,7 +152,8 @@ func (journal checkpointRecoveryJournal) validate(plan e2eplan.Plan) error {
 		if err := volume.ValidateOperationID(journal.CheckpointRequestID); err != nil {
 			return err
 		}
-	case checkpointPhasePrepared, checkpointPhaseNamespaceDeleted, checkpointPhaseControllerRestored:
+	case checkpointPhasePrepared, checkpointPhaseNamespaceDeleted,
+		checkpointPhaseFullReleaseArmed, checkpointPhaseControllerRestored:
 		if !safeKubernetesObjectName(journal.PersistentVolume) ||
 			!safeEvidencePath(plan, journal.ValuesPath, "checkpoint-release-values-"+plan.RunID+".yaml") ||
 			!validRecoveryDigest(journal.ValuesSHA256) ||
@@ -168,6 +192,62 @@ func (journal checkpointRecoveryJournal) validate(plan e2eplan.Plan) error {
 	}
 	if err := validateCheckpointNodeRetirements(journal.OldInstanceIDs, journal.NodeRetirements); err != nil {
 		return err
+	}
+	if journal.ReplayAttachment != nil {
+		if journal.SchemaVersion != checkpointRecoverySchemaVersion || journal.Phase != checkpointPhaseNamespaceDeleted {
+			return fmt.Errorf("checkpoint replay attachment requires a v2 namespace-deleted journal")
+		}
+		if err := journal.ReplayAttachment.validate(journal.OldInstanceIDs); err != nil {
+			return err
+		}
+	}
+	admissionIDs := []string{
+		journal.ProvisionalPodUID,
+		journal.ProvisionalLeaseUID,
+		journal.ApprovalRequestID,
+		journal.ApprovalSecretUID,
+	}
+	admissionFields := 0
+	for _, id := range admissionIDs {
+		if id != "" {
+			admissionFields++
+		}
+	}
+	if journal.Phase == checkpointPhaseFullReleaseArmed {
+		if journal.SchemaVersion != checkpointRecoverySchemaVersion || admissionFields != len(admissionIDs) {
+			return fmt.Errorf("checkpoint full-release admission requires complete v2 durable authority")
+		}
+	} else if admissionFields != 0 &&
+		(journal.Phase != checkpointPhaseControllerRestored || admissionFields != len(admissionIDs)) {
+		return fmt.Errorf("checkpoint recovery journal contains partial or out-of-phase admission authority")
+	}
+	for _, id := range admissionIDs {
+		if id != "" {
+			if err := volume.ValidateOperationID(id); err != nil {
+				return fmt.Errorf("checkpoint recovery admission identity: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (attachment checkpointReplayAttachment) validate(oldInstanceIDs []string) error {
+	for label, id := range map[string]string{
+		"attachment":   attachment.AttachmentID,
+		"parent":       attachment.ParentID,
+		"Instance":     attachment.InstanceID,
+		"Kapsule node": attachment.KapsuleNodeID,
+	} {
+		if err := volume.ValidateOperationID(id); err != nil {
+			return fmt.Errorf("checkpoint replay %s identity: %w", label, err)
+		}
+	}
+	if attachment.Zone == "" || strings.TrimSpace(attachment.Zone) != attachment.Zone ||
+		strings.ContainsAny(attachment.Zone, "\x00\r\n\t /") {
+		return fmt.Errorf("checkpoint replay attachment zone is invalid")
+	}
+	if slices.Contains(oldInstanceIDs, attachment.InstanceID) {
+		return fmt.Errorf("checkpoint replay attachment names a pre-recovery Instance")
 	}
 	return nil
 }
@@ -247,6 +327,10 @@ func validRecoveryDigest(value string) bool {
 }
 
 func (backend *scalewayBackend) writeCheckpointRecoveryJournal(plan e2eplan.Plan, journal checkpointRecoveryJournal) error {
+	// Every durable rewrite upgrades a retained v1 journal before adding v2
+	// replay authority. The reader remains compatible with the exact v1 file
+	// already retained by an interrupted older runner.
+	journal.SchemaVersion = checkpointRecoverySchemaVersion
 	if err := journal.validate(plan); err != nil {
 		return err
 	}
@@ -255,6 +339,29 @@ func (backend *scalewayBackend) writeCheckpointRecoveryJournal(plan e2eplan.Plan
 		return err
 	}
 	return replaceDurableFile(backend.checkpointRecoveryPath(plan), append(encoded, '\n'), 0o600)
+}
+
+func (backend *scalewayBackend) armCheckpointFullRelease(
+	plan e2eplan.Plan,
+	journal checkpointRecoveryJournal,
+	provisionalPodUID string,
+	provisionalLeaseUID string,
+	approvalRequestID string,
+	approvalSecretUID string,
+) (checkpointRecoveryJournal, error) {
+	if journal.Phase != checkpointPhaseNamespaceDeleted || journal.ReplayAttachment != nil {
+		return journal, fmt.Errorf("checkpoint full release cannot be armed outside clean namespace-deleted recovery")
+	}
+	journal.SchemaVersion = checkpointRecoverySchemaVersion
+	journal.Phase = checkpointPhaseFullReleaseArmed
+	journal.ProvisionalPodUID = provisionalPodUID
+	journal.ProvisionalLeaseUID = provisionalLeaseUID
+	journal.ApprovalRequestID = approvalRequestID
+	journal.ApprovalSecretUID = approvalSecretUID
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return journal, fmt.Errorf("retain checkpoint full-release admission boundary: %w", err)
+	}
+	return journal, nil
 }
 
 func (backend *scalewayBackend) readCheckpointRecoveryJournal(plan e2eplan.Plan) (checkpointRecoveryJournal, error) {
@@ -329,6 +436,12 @@ func (backend *scalewayBackend) recoverInterruptedCheckpoint(
 	if err != nil {
 		return err
 	}
+	if journal.Phase == checkpointPhaseFullReleaseArmed {
+		if !driverNamespacePresent {
+			return fmt.Errorf("driver namespace disappeared after full-release admission; refuse replay detach")
+		}
+		return backend.resumeArmedCheckpointForCleanup(ctx, request, plan, journal)
+	}
 	if journal.Phase == checkpointPhaseControllerRestored && driverNamespacePresent {
 		if err := backend.cleanupCheckpointNamespace(ctx, request, journal); err != nil {
 			return err
@@ -358,6 +471,9 @@ func (backend *scalewayBackend) recoverInterruptedCheckpoint(
 		return backend.removeCheckpointRecoveryJournal(plan)
 	}
 	if !checkpointRecoveryCanReplay(journal.Phase) {
+		if journal.Phase == checkpointPhaseControllerRestored {
+			return fmt.Errorf("driver namespace disappeared after checkpoint recovery; refuse stale checkpoint replay")
+		}
 		// The driver namespace disappeared before a complete checkpoint was
 		// durably retained. There is no safe automated reconstruction.
 		return fmt.Errorf("driver namespace disappeared before a complete checkpoint was retained")
@@ -365,10 +481,65 @@ func (backend *scalewayBackend) recoverInterruptedCheckpoint(
 	return backend.replayCheckpointForCleanup(ctx, request, plan, inventory, journal)
 }
 
+func (backend *scalewayBackend) resumeArmedCheckpointForCleanup(
+	ctx context.Context,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	journal checkpointRecoveryJournal,
+) error {
+	if journal.Phase != checkpointPhaseFullReleaseArmed {
+		return fmt.Errorf("checkpoint full-release resume lacks its durable admission phase")
+	}
+	if err := backend.installFullRecoveredRelease(ctx, request, journal.ValuesPath); err != nil {
+		return err
+	}
+	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace,
+		"rollout", "status", "deployment", "-l",
+		"app.kubernetes.io/instance="+request.HelmRelease+","+controllerSelector, "--timeout=30m",
+	); err != nil {
+		return err
+	}
+	recovered, err := backend.singularPod(ctx, request, controllerSelector, "")
+	if err != nil {
+		return fmt.Errorf("read armed checkpoint controller identity: %w", err)
+	}
+	if recovered.Metadata.UID != journal.ProvisionalPodUID || !podReady(recovered) {
+		return fmt.Errorf("armed checkpoint controller identity did not recover")
+	}
+	recoveredLease, err := backend.readControllerLease(ctx, request)
+	if err != nil {
+		return err
+	}
+	if recoveredLease.Metadata.UID != journal.ProvisionalLeaseUID ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionSecretUID"] != journal.ApprovalSecretUID ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionRequestID"] != journal.ApprovalRequestID ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionMode"] != "missing-lease-recovery" ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionPodUID"] != journal.ProvisionalPodUID {
+		return fmt.Errorf("armed checkpoint recovery lacks exact approval consumption")
+	}
+	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace,
+		"delete", "secret/sfs-subdir-controller-approval", "--ignore-not-found", "--wait=true", "--timeout=5m",
+	); err != nil {
+		return err
+	}
+	journal.Phase = checkpointPhaseControllerRestored
+	if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+		return err
+	}
+	if err := backend.cleanupCheckpointNamespace(ctx, request, journal); err != nil {
+		return err
+	}
+	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace,
+		"delete", "secret/sfs-subdir-checkpoint", "--ignore-not-found", "--wait=true", "--timeout=5m",
+	); err != nil {
+		return err
+	}
+	return backend.removeCheckpointRecoveryJournal(plan)
+}
+
 func checkpointRecoveryCanReplay(phase string) bool {
 	return phase == checkpointPhasePrepared ||
-		phase == checkpointPhaseNamespaceDeleted ||
-		phase == checkpointPhaseControllerRestored
+		phase == checkpointPhaseNamespaceDeleted
 }
 
 func (backend *scalewayBackend) replayCheckpointForCleanup(
@@ -408,8 +579,27 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 	if err := backend.deleteExactRunNamespaceIfPresent(ctx, request, plan); err != nil {
 		return err
 	}
+	nextPhase, persistPhase, err := checkpointReplayPhaseAfterNamespaceDeletion(journal.Phase)
+	if err != nil {
+		return err
+	}
+	if persistPhase {
+		// Namespace deletion is the safety boundary after which worker fencing
+		// and provider mutation may begin. Close the crash window by persisting
+		// it before replacing any Kapsule node.
+		journal.Phase = nextPhase
+		if err := backend.writeCheckpointRecoveryJournal(plan, journal); err != nil {
+			return fmt.Errorf("retain deleted-namespace checkpoint replay state: %w", err)
+		}
+	}
 	replacement, err := backend.replacePreRecoveryKapsuleNodes(
 		ctx, plan, clusterID, poolID, parentIDs, journal.NodeRetirements,
+	)
+	if err != nil {
+		return err
+	}
+	journal, err = backend.recoverInterruptedProvisionalAttachment(
+		ctx, request, plan, clusterID, poolID, parentIDs, replacement, journal,
 	)
 	if err != nil {
 		return err
@@ -442,7 +632,7 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 	if err := backend.installRecoveryControllerOnly(ctx, request, journal.ValuesPath); err != nil {
 		return err
 	}
-	_, provisionalLease, err := backend.waitForProvisionalRecovery(ctx, request)
+	provisional, provisionalLease, err := backend.waitForProvisionalRecovery(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -451,6 +641,13 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 	}
 	approvalRequestID, approvalUID, err := backend.createMissingLeaseApproval(
 		ctx, request, plan, journal.CheckpointRequestID, journal.ManifestSHA256, provisionalLease,
+	)
+	if err != nil {
+		return err
+	}
+	journal, err = backend.armCheckpointFullRelease(
+		plan, journal, provisional.Metadata.UID, provisionalLease.Metadata.UID,
+		approvalRequestID, approvalUID,
 	)
 	if err != nil {
 		return err
@@ -467,17 +664,26 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 	); err != nil {
 		return err
 	}
+	recovered, err := backend.singularPod(ctx, request, controllerSelector, "")
+	if err != nil {
+		return err
+	}
+	if recovered.Metadata.UID != journal.ProvisionalPodUID || !podReady(recovered) {
+		return fmt.Errorf("cleanup checkpoint controller did not recover with its armed identity")
+	}
 	recoveredLease, err := backend.readControllerLease(ctx, request)
 	if err != nil {
 		return err
 	}
-	if recoveredLease.Metadata.UID != provisionalLease.Metadata.UID ||
-		recoveredLease.Metadata.Annotations["approvalConsumptionSecretUID"] != approvalUID ||
-		recoveredLease.Metadata.Annotations["approvalConsumptionRequestID"] != approvalRequestID {
+	if recoveredLease.Metadata.UID != journal.ProvisionalLeaseUID ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionSecretUID"] != journal.ApprovalSecretUID ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionRequestID"] != journal.ApprovalRequestID ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionMode"] != "missing-lease-recovery" ||
+		recoveredLease.Metadata.Annotations["approvalConsumptionPodUID"] != journal.ProvisionalPodUID {
 		return fmt.Errorf("cleanup checkpoint replay lacks exact approval consumption")
 	}
 	if _, err := backend.kubectl(ctx, request, nil, "-n", request.DriverNamespace,
-		"delete", "secret/sfs-subdir-controller-approval", "--wait=true", "--timeout=5m",
+		"delete", "secret/sfs-subdir-controller-approval", "--ignore-not-found", "--wait=true", "--timeout=5m",
 	); err != nil {
 		return err
 	}
@@ -494,6 +700,17 @@ func (backend *scalewayBackend) replayCheckpointForCleanup(
 		return err
 	}
 	return backend.removeCheckpointRecoveryJournal(plan)
+}
+
+func checkpointReplayPhaseAfterNamespaceDeletion(phase string) (string, bool, error) {
+	switch phase {
+	case checkpointPhasePrepared:
+		return checkpointPhaseNamespaceDeleted, true, nil
+	case checkpointPhaseNamespaceDeleted:
+		return checkpointPhaseNamespaceDeleted, false, nil
+	default:
+		return "", false, fmt.Errorf("checkpoint replay is outside the exact namespace-deleted phase")
+	}
 }
 
 func (backend *scalewayBackend) cleanupCheckpointNamespace(
@@ -551,13 +768,21 @@ func (backend *scalewayBackend) exactRunNamespacePresent(
 	if err != nil {
 		return false, err
 	}
+	return validateExactRunNamespaceObservation(encoded, request, plan, namespace)
+}
+
+func validateExactRunNamespaceObservation(
+	encoded []byte,
+	request e2erunner.Request,
+	plan e2eplan.Plan,
+	namespace string,
+) (bool, error) {
 	if len(encoded) == 0 {
 		return false, nil
 	}
 	var observed struct {
 		Metadata struct {
-			Labels            map[string]string `json:"labels"`
-			DeletionTimestamp *string           `json:"deletionTimestamp"`
+			Labels map[string]string `json:"labels"`
 		} `json:"metadata"`
 	}
 	if err := json.Unmarshal(encoded, &observed); err != nil {
@@ -567,9 +792,9 @@ func (backend *scalewayBackend) exactRunNamespacePresent(
 		observed.Metadata.Labels["app.kubernetes.io/instance"] != request.HelmRelease {
 		return false, fmt.Errorf("namespace %q is not owned by the exact run", namespace)
 	}
-	if observed.Metadata.DeletionTimestamp != nil {
-		return false, nil
-	}
+	// A terminating namespace is still present: its Pods and their mount
+	// namespaces may still exist. Only a conclusive NotFound/empty read can
+	// authorize replay cleanup that depends on namespace destruction.
 	return true, nil
 }
 

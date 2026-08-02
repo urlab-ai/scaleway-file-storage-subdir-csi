@@ -74,6 +74,17 @@ func validateControllerNodeServerIdentity(
 	plan e2eplan.Plan,
 	journal controllerRecoveryJournal,
 ) (string, error) {
+	if err := validateControllerNodeServerScope(server, plan, journal); err != nil {
+		return "", err
+	}
+	return validateControllerNodeAttachedRoot(server, journal)
+}
+
+func validateControllerNodeServerScope(
+	server *instanceapi.Server,
+	plan e2eplan.Plan,
+	journal controllerRecoveryJournal,
+) error {
 	if server == nil || server.ID != journal.OldServerID ||
 		server.Project != plan.ProjectID || server.Zone.String() != journal.OldZone ||
 		server.CommercialType != plan.NodePool.CommercialType ||
@@ -81,8 +92,15 @@ func validateControllerNodeServerIdentity(
 		!slices.Contains(server.Tags, "kapsule="+journal.ClusterID) ||
 		!slices.Contains(server.Tags, "pool="+journal.PoolID) ||
 		!slices.Contains(server.Tags, "node="+journal.OldKapsuleNodeID) {
-		return "", fmt.Errorf("controller Kapsule Instance differs from the exact run-owned node")
+		return fmt.Errorf("controller Kapsule Instance differs from the exact run-owned node")
 	}
+	return nil
+}
+
+func validateControllerNodeAttachedRoot(
+	server *instanceapi.Server,
+	journal controllerRecoveryJournal,
+) (string, error) {
 	if len(server.Volumes) != 1 {
 		return "", fmt.Errorf("controller Kapsule Instance has %d volumes; exactly one root is required", len(server.Volumes))
 	}
@@ -96,6 +114,31 @@ func validateControllerNodeServerIdentity(
 		return "", fmt.Errorf("controller Kapsule Instance root volume changed after journaling")
 	}
 	return root.ID, nil
+}
+
+// validateControllerNodeRetirementIdentity permits an already-empty Instance
+// volume topology only after the exact root ID has been durably journaled. A
+// managed Kapsule retirement can detach its root before the Instance object
+// disappears. Any topology that is still populated must remain the exact sole
+// root; a foreign or additional volume therefore always fails closed. The
+// journaled Block volume is independently verified and removed only after the
+// exact Instance has been proven absent.
+func validateControllerNodeRetirementIdentity(
+	server *instanceapi.Server,
+	plan e2eplan.Plan,
+	journal controllerRecoveryJournal,
+) error {
+	if err := validateControllerNodeServerScope(server, plan, journal); err != nil {
+		return err
+	}
+	if journal.OldRootVolumeID == "" {
+		return fmt.Errorf("controller Kapsule retirement lacks its journaled root volume")
+	}
+	if len(server.Volumes) == 0 {
+		return nil
+	}
+	_, err := validateControllerNodeAttachedRoot(server, journal)
+	return err
 }
 
 type controllerRetirementInstanceAPI interface {
@@ -121,7 +164,7 @@ func prepareControllerInstanceForDeletion(
 	if api == nil {
 		return false, fmt.Errorf("controller Kapsule Instance API is unavailable")
 	}
-	if _, err := validateControllerNodeServerIdentity(server, plan, journal); err != nil {
+	if err := validateControllerNodeRetirementIdentity(server, plan, journal); err != nil {
 		return false, err
 	}
 	switch server.State {
@@ -152,7 +195,7 @@ func prepareControllerInstanceForDeletion(
 	if response == nil || response.Server == nil {
 		return false, errors.Join(actionErr, fmt.Errorf("revalidate powered-off controller Kapsule Instance: provider returned an empty response"))
 	}
-	if _, err := validateControllerNodeServerIdentity(response.Server, plan, journal); err != nil {
+	if err := validateControllerNodeRetirementIdentity(response.Server, plan, journal); err != nil {
 		return false, errors.Join(actionErr, err)
 	}
 	if response.Server.State != instanceapi.ServerStateStopped &&

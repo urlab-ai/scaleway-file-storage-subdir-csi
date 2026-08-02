@@ -243,6 +243,39 @@ func TestStopCheckpointKapsuleInstanceUsesExactStopInPlaceFence(t *testing.T) {
 	}
 }
 
+func TestStopCheckpointKapsuleInstanceAcceptsRootDetachOnlyAfterStop(t *testing.T) {
+	plan, journal, server, _ := controllerRetirementFixture()
+	server.State = instanceapi.ServerStateRunning
+	stopped := *server
+	stopped.State = instanceapi.ServerStateStoppedInPlace
+	stopped.Volumes = nil
+	api := &fakeCheckpointRetirementInstanceAPI{
+		responses: []*instanceapi.GetServerResponse{
+			{Server: server},
+			{Server: &stopped},
+		},
+	}
+	if absent, err := stopCheckpointKapsuleInstance(
+		context.Background(), api, plan, journal,
+	); err != nil || absent {
+		t.Fatalf("post-stop root detach = absent:%t error:%v", absent, err)
+	}
+
+	runningWithoutRoot := *server
+	runningWithoutRoot.Volumes = nil
+	api = &fakeCheckpointRetirementInstanceAPI{
+		responses: []*instanceapi.GetServerResponse{{Server: &runningWithoutRoot}},
+	}
+	if _, err := stopCheckpointKapsuleInstance(
+		context.Background(), api, plan, journal,
+	); err == nil {
+		t.Fatal("running Instance without its exact attached root was accepted")
+	}
+	if api.action != nil {
+		t.Fatal("unsafe running Instance received a stop request")
+	}
+}
+
 func TestStopCheckpointKapsuleInstanceFailsClosedOnAmbiguousState(t *testing.T) {
 	plan, journal, server, _ := controllerRetirementFixture()
 	server.State = instanceapi.ServerStateRunning
@@ -283,6 +316,19 @@ func TestStopCheckpointKapsuleInstanceIsIdempotent(t *testing.T) {
 			absent, err := stopCheckpointKapsuleInstance(context.Background(), api, plan, journal)
 			if err != nil || absent || api.action != nil {
 				t.Fatalf("idempotent checkpoint stop state %q = absent:%t action:%#v error:%v",
+					state, absent, api.action, err)
+			}
+		})
+		t.Run(state.String()+"-root-already-detached", func(t *testing.T) {
+			observed := *server
+			observed.State = state
+			observed.Volumes = nil
+			api := &fakeCheckpointRetirementInstanceAPI{
+				responses: []*instanceapi.GetServerResponse{{Server: &observed}},
+			}
+			absent, err := stopCheckpointKapsuleInstance(context.Background(), api, plan, journal)
+			if err != nil || absent || api.action != nil {
+				t.Fatalf("idempotent detached-root state %q = absent:%t action:%#v error:%v",
 					state, absent, api.action, err)
 			}
 		})
