@@ -452,13 +452,33 @@ values, checksums, provenance, and qualification authority. This publication
 identity constraint does not invalidate RC36's functional qualification, but it
 must be resolved without weakening the exact-byte release rule in section 12.8.
 
+Stable `v1.0.0`, exact commit
+`631c81ba0ca62513cc703a656e88a35afac90eff`, resolved that identity boundary by
+constructing coherent stable binaries, image, chart, values, checksums, SBOM,
+provenance, and candidate authority before qualification. Its one continuous
+release-candidate Kapsule run completed all fourteen ordered scenarios on
+2026-08-03. The 1,204-second RWX soak used 20 writers and 20 readers, completed
+10,447 writes and 9,878 cross-peer reads across controller and node-plugin
+restarts, and reported zero checksum failures. The final cleanup audit proved
+the run-created Private Network, Kapsule cluster, node pool, two parents,
+disposable Instance, and root SBS volume conclusively absent. The canonical
+candidate-manifest digest is
+`sha256:5d2014e83dd3b4ead922dfe3203b9263a635c4d2d6f4e63303a9542e921c57de`;
+the retained qualification-manifest SHA-256 is
+`17e5b8a92f6d8aea15cb5dbaf6606942638bb0bb99d0639cbbbed066e0d2a51f`.
+The public driver image is the exact qualified index at
+`sha256:30d7c49fdc5951f50c6b92d782c25dd5ab338ceebc0d515ea36d680b3adf65c3`,
+and the public chart version `1.0.0` reproduces the qualified package SHA-256
+`fa6d77a06a5c88155f52b8407b41344b7ea3b35ce88f523b2c7947e938b5ee9b`.
+
 No candidate is a production support claim until every Linux, kind, CSI, Helm,
 real Kapsule, and final-cleanup qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
-retained in that qualification evidence. `POP2-HM-2C-16G` is the sole qualified
-commercial type for RC36 because it is the lowest-priced documented type in the
-tested matrix with two File Storage slots. No other commercial type enters the
-supported allowlist without its own exact real-provider qualification evidence.
+retained in the V1 qualification evidence. `POP2-HM-2C-16G` is the sole
+qualified commercial type for `v1.0.0` because it is the lowest-priced
+documented type in the tested matrix with two File Storage slots. No other
+commercial type enters the supported allowlist without its own exact
+real-provider qualification evidence.
 
 The v1 controller and node images support Linux `amd64` only. Release CI must
 compile that architecture, and the real-provider support matrix must retain

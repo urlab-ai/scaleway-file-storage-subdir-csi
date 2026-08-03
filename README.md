@@ -154,7 +154,7 @@ steps with stable request IDs.
 
 ## Production qualification
 
-The exact RC36 source, chart, release values, five immutable images, AMD64
+The exact V1 source, chart, release values, five immutable images, AMD64
 binaries, Linux results, kind results, real Kapsule result, and final cleanup
 inventory are bound by one canonical qualification manifest. The final real
 cloud run completed all 14 scenarios continuously and removed every run-owned
@@ -163,7 +163,7 @@ billable resource.
 | # | Qualifying scenario | What it proved |
 | ---: | --- | --- |
 | 1 | Artifact and install preflight | Exact commit, chart, values, image digests, security contexts, RBAC, CSI identity, and eligible nodes. |
-| 2 | N-1 upgrade | RC14 to RC36 upgrade, interrupted rollout rollback, mixed-generation fail-closed behavior, data and identity preservation. |
+| 2 | N-1 upgrade | RC14 to V1 upgrade, interrupted rollout rollback, mixed-generation fail-closed behavior, data and identity preservation. |
 | 3 | Real `virtiofs` | Parent mount, `statfs`, logical volume, controller replacement, and persisted data. |
 | 4 | Single-node-writer conflict | Second-node conflict rejection followed by clean handoff and read/write recovery. |
 | 5 | 100-PVC scale and RWX soak | 100 Bound PVCs, multiplexing beyond the physical attachment limit, concurrent cross-node integrity, and restarts. |
@@ -182,8 +182,8 @@ billable resource.
 The scale scenario used 10 active PVC pairs across two nodes for 1,204 seconds:
 
 - 20 concurrent writers and 20 concurrent readers;
-- 9,780 completed writes;
-- 9,063 distinct cross-peer reads;
+- 10,447 completed writes;
+- 9,878 distinct cross-peer reads;
 - zero checksum failures;
 - successful new read/write operations after a controller restart;
 - successful new read/write operations after node-plugin restarts;
@@ -216,6 +216,7 @@ architecture, or Scaleway Instance type is supported.
 | --- | --- |
 | Cloud | Scaleway Kapsule with the GA File Storage product |
 | Region | `fr-par` |
+| Qualified Kubernetes version | `v1.35.3` |
 | Node architecture | Linux `amd64` only |
 | Qualified Instance type | `POP2-HM-2C-16G` |
 | CSI driver name | `file-storage-subdir.csi.urlab.ai` — immutable after first use |
@@ -422,24 +423,38 @@ not through a public issue.
 
 ## Release status
 
-RC36 passed the complete production qualification matrix on 2026-08-02. Its
-canonical candidate manifest digest is:
+[`v1.0.0`](https://github.com/urlab-ai/scaleway-file-storage-subdir-csi/releases/tag/v1.0.0)
+is the stable production-qualified release. It was built from exact commit
+`631c81ba0ca62513cc703a656e88a35afac90eff`, qualified on 2026-08-03, and
+published without rebuilding or transforming the tested artifacts.
+
+Its immutable driver image digest is:
 
 ```text
-sha256:83e34e492fa59431cef275c46d449f3f6fbe47d2436ee320be5385cf638bf44e
+sha256:30d7c49fdc5951f50c6b92d782c25dd5ab338ceebc0d515ea36d680b3adf65c3
 ```
 
-Its canonical qualification manifest has SHA-256:
+Its chart package SHA-256 is:
 
 ```text
-cc2635d81950e81ff4202d32633be71d9d8a294e5c28b2a298d88c343c754363
+fa6d77a06a5c88155f52b8407b41344b7ea3b35ce88f523b2c7947e938b5ee9b
 ```
 
-The stable release is publishable only when the public Git tag, binary
-`vendor_version`, image tag and digest, chart version, release values,
-checksums, SBOM, provenance, and qualification authority all identify one
-coherent SemVer release. Re-labeling RC36 as a different version without that
-proof is deliberately rejected.
+Its canonical candidate-manifest digest is:
+
+```text
+sha256:5d2014e83dd3b4ead922dfe3203b9263a635c4d2d6f4e63303a9542e921c57de
+```
+
+Its retained qualification manifest has SHA-256:
+
+```text
+17e5b8a92f6d8aea15cb5dbaf6606942638bb0bb99d0639cbbbed066e0d2a51f
+```
+
+The public Git tag, binary `vendor_version`, image tag and digest, chart
+version, release values, checksums, SBOM, provenance, and qualification
+authority all identify this one coherent SemVer release.
 
 ## Development
 

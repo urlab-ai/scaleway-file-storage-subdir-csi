@@ -103,6 +103,20 @@ values, checksums, or qualification manifest. Stable publication is allowed
 only after the exact-byte release identity rule in the specification is
 satisfied; never bypass that rule by retagging the RC36 bytes as `v1.0.0`.
 
+The stable `v1.0.0` release, exact commit
+`631c81ba0ca62513cc703a656e88a35afac90eff`, was independently constructed with
+the coherent stable identity and passed the complete Linux, CSI, Helm, kind,
+fourteen-scenario Kapsule, and exact-cleanup qualification on 2026-08-03. Its
+1,204-second RWX soak used 20 writers and 20 readers, completed 10,447 writes
+and 9,878 cross-peer reads, and reported zero checksum failures across
+controller and node-plugin restarts. The final inventory proved all seven
+run-created cloud resources absent. The public image digest is
+`sha256:30d7c49fdc5951f50c6b92d782c25dd5ab338ceebc0d515ea36d680b3adf65c3`;
+the chart package SHA-256 is
+`fa6d77a06a5c88155f52b8407b41344b7ea3b35ce88f523b2c7947e938b5ee9b`.
+Use only the matching `v1.0.0` GitHub Release, chart version `1.0.0`, release
+values, checksums, and `csi-admin` binary for V1 operations.
+
 ## Safety rules
 
 - Never change a real Scaleway resource without a current approved plan naming
