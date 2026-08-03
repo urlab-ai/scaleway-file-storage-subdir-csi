@@ -771,23 +771,92 @@ func (backend *scalewayBackend) applyNamespacedPVC(ctx context.Context, request 
 }
 
 func (backend *scalewayBackend) requirePVCUnbound(ctx context.Context, request e2erunner.Request, namespace, name string, duration time.Duration) error {
-	waitCtx, cancel := context.WithTimeout(ctx, duration)
-	defer cancel()
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
+	return requirePVCUnboundFor(
+		ctx,
+		name,
+		duration,
+		3*time.Second,
+		15*time.Second,
+		time.Now,
+		waitForPVCObservation,
+		func(readCtx context.Context) (string, error) {
+			encoded, err := backend.kubectl(readCtx, request, nil, "-n", namespace, "get", "pvc/"+name, "-o", "jsonpath={.status.phase}")
+			return string(encoded), err
+		},
+	)
+}
+
+type pvcPhaseReader func(context.Context) (string, error)
+
+type pvcObservationWaiter func(context.Context, time.Duration) error
+
+// requirePVCUnboundFor proves that the controller remains non-serving for the
+// entire observation window. The window and each Kubernetes read deliberately
+// use independent deadlines: expiring the proof window must never cancel its
+// final read and turn a healthy Pending PVC into a false-negative test result.
+// Conversely, an unavailable or timed-out Kubernetes read is never accepted as
+// proof that the PVC is unbound.
+func requirePVCUnboundFor(
+	ctx context.Context,
+	name string,
+	duration time.Duration,
+	pollInterval time.Duration,
+	readTimeout time.Duration,
+	now func() time.Time,
+	wait pvcObservationWaiter,
+	readPhase pvcPhaseReader,
+) error {
+	if duration <= 0 || pollInterval <= 0 || readTimeout <= 0 {
+		return fmt.Errorf("PVC unbound observation durations must be positive")
+	}
+	if now == nil || wait == nil || readPhase == nil {
+		return fmt.Errorf("PVC unbound observation dependencies must be configured")
+	}
+
+	deadline := now().Add(duration)
 	for {
-		encoded, err := backend.kubectl(waitCtx, request, nil, "-n", namespace, "get", "pvc/"+name, "-o", "jsonpath={.status.phase}")
-		if err != nil {
-			return err
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("prove PVC %s remains unbound: %w", name, err)
 		}
-		if strings.TrimSpace(string(encoded)) == "Bound" {
+
+		// A read timeout bounds a stuck API call without coupling that call to
+		// the observation-window deadline. Success is returned only after a
+		// conclusive read made at or beyond the window boundary.
+		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
+		phase, err := readPhase(readCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("read PVC %s phase while proving it remains unbound: %w", name, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("prove PVC %s remains unbound: %w", name, err)
+		}
+		if strings.TrimSpace(phase) == "Bound" {
 			return fmt.Errorf("controller provisioned PVC %s before missing-Lease approval", name)
 		}
-		select {
-		case <-waitCtx.Done():
+
+		observedAt := now()
+		if !observedAt.Before(deadline) {
 			return nil
-		case <-ticker.C:
 		}
+		pause := pollInterval
+		if remaining := deadline.Sub(observedAt); remaining < pause {
+			pause = remaining
+		}
+		if err := wait(ctx, pause); err != nil {
+			return fmt.Errorf("wait while proving PVC %s remains unbound: %w", name, err)
+		}
+	}
+}
+
+func waitForPVCObservation(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
