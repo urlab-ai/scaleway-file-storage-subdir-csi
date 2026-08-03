@@ -1,175 +1,449 @@
 # Scaleway File Storage Subdirectory CSI Driver
 
-This project is building a Kubernetes CSI driver that exposes isolated logical
-RWX volumes as subdirectories of a small, explicit pool of existing Scaleway
-File Storage filesystems.
+[![CI](https://github.com/urlab-ai/scaleway-file-storage-subdir-csi/actions/workflows/ci.yaml/badge.svg)](https://github.com/urlab-ai/scaleway-file-storage-subdir-csi/actions/workflows/ci.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Kubernetes%20%7C%20Linux%20amd64-326ce5)](#supported-production-envelope)
 
-This is a community project and is not an official Scaleway product. Created by
-URLab and released under the MIT license.
+A production-grade community Kubernetes CSI driver that provisions many
+isolated ReadWriteMany (RWX) PersistentVolumes as subdirectories inside a small,
+explicit pool of existing Scaleway File Storage filesystems.
 
-## Development status
+This project is created and maintained by [URLab](https://github.com/urlab-ai),
+released under the MIT license, and is not an official Scaleway product.
 
-The repository is under active development and is not yet a qualified public
-production release. Its controller, node, provider, mount, recovery, and
-operator implementations are wired for code review and controlled local or
-staging qualification. The normative behavior and safety contract are defined in
-[`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
+> [!IMPORTANT]
+> V1 has completed its full production qualification against real Scaleway
+> Kapsule and File Storage. The qualified subject is the immutable
+> `v0.1.0-rc.36` candidate. Stable SemVer publication must preserve the exact
+> qualification binding; see [Release status](#release-status).
 
-Supporting review and operations material:
+## Why this driver exists
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
-- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
-- [`docs/ALERTS.md`](docs/ALERTS.md)
+Scaleway File Storage provides shared filesystems that can be mounted from
+multiple Kubernetes nodes, but every physical filesystem consumes one of the
+limited File Storage attachment slots available on an Instance. Mapping one PVC
+to one physical filesystem therefore does not scale when a platform needs tens
+or hundreds of independent shared volumes.
 
-The public source, module, CSI, and artifact identities are frozen as:
+This driver moves that abstraction into CSI:
 
-- `github.com/urlab-ai/scaleway-file-storage-subdir-csi`;
-- `file-storage-subdir.csi.urlab.ai`;
-- `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`;
-- `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`.
+- administrators create and control a small pool of physical File Storage
+  parents;
+- every Kubernetes PVC receives its own durable, isolated subdirectory;
+- many logical PVCs share one physical parent attachment on a node;
+- applications use ordinary Kubernetes PVCs and never need to know the parent
+  filesystem ID or directory path.
 
-The frozen candidates `v0.1.0-rc.1` through `v0.1.0-rc.10` are superseded and
-must not be promoted. The seventh candidate reached real Kapsule provisioning,
-installed the chart, and created its first logical volume, then proved that
-Scaleway File Storage `virtiofs` rejects directory
-`renameat2(RENAME_NOREPLACE)` and exposed an incorrect PVC-count expression in
-the smoke harness. The eighth candidate then proved that the narrowly scoped
-descriptor-relative compatibility path safely resumes a prepared `Deleting`
-allocation and completes the real archive, but review before the ten-PVC
-scenario found a second copy of the same incorrect count expression. Both
-count sites and the regression test are now corrected. The public rc.10 through
-rc.13 artifacts were not production-qualified and must not be promoted. The
-RC13 qualification attempt installed RC12 as its N-1 predecessor and exposed a
-missing bounded same-process retry during fresh parent bootstrap, plus
-client-side Secret apply retaining credential bytes in an annotation. Both
-defects are corrected with focused regression tests. RC14 is a bridge
-candidate. RC15 used RC14 as its exact public predecessor and reached the
-100-PVC scale scenario, where it exposed a stale lifecycle-snapshot race that
-temporarily degraded controller maintenance while normal creation advanced to
-`Ready`. The run stopped and cleaned every run-owned cloud resource. The race
-is corrected with focused regression coverage. RC16 through RC19 then proved
-the 100-PVC and 20-minute read/write soak behavior without corruption while
-iterating on a Kapsule bootstrap fault injector; RC19 captured the intended
-crash window, but its next node-drain harness selector failed closed. RC20 and
-RC21 exposed and corrected incomplete accounting of the disposable Instance
-root SBS volume and live Instance API topology differences before CSI
-qualification began. RC22 passed artifact/install, real `virtiofs`,
-single-node-writer conflict, and a 100-PVC/20-minute soak with 5,714 writes,
-5,640 reads, and zero checksum failures. Its external signal race observed the
-valid parent claim only after Scaleway had already completed the attachment, so
-it correctly admitted no crash-window evidence and removed all seven run-owned
-cloud resources. RC24 later passed artifact/install, real `virtiofs`,
-single-node-writer conflict, the 100-PVC multiplex proof, a 20-minute soak with
-5,651 writes, 5,573 reads and zero checksum failures, plugin restarts, and the
-normal drain path. It was not promoted: Scaleway `poweroff` alone let the
-controller perform a graceful Lease handoff, so the harness correctly rejected
-the intended abrupt-failure proof. Cleanup removed all seven exact run-owned
-resources and independent reads confirmed their absence. RC25 corrected the
-hard-failure injection but stopped before Helm installation because the
-qualification harness passed the unsupported `--labels` flag to
-`kubectl create secret generic`. Automatic cleanup removed the exact run-owned
-Private Network, cluster, node pool, two parents, disposable Instance, and root
-SBS volume; independent Project inventories confirmed no surviving run
-resource. The harness now adds both ownership labels to each streamed Secret
-manifest through `kubectl label --local` before its single API create, without
-persisting credential data or creating an unlabeled Secret. RC26 later passed
-the complete N/N-1 path but exposed an out-of-order proof dependency. RC27
-passed artifact/install, N/N-1, real `virtiofs`, `SINGLE_NODE_WRITER`, the
-100-PVC scale test, and a 20-minute soak with zero checksum failures. It was not
-promoted because provider `poweroff` allowed a normal Lease handoff instead of
-proving the intended abrupt controller failure. Exact cleanup and independent
-reads confirmed all seven run-owned cloud resources absent. RC28 then used
-`stop_in_place` after the exact-process freeze and passed the same core gates
-plus fresh-parent bootstrap, provider attachment/detach, parent growth, and
-normal drain. Its deliberately abrupt controller-node test found that guest
-shutdown could resume the frozen process long enough to write a graceful Lease
-release, while Kapsule left the stopped node in `deleting`. This was a
-fail-closed qualification-harness defect, not an admitted CSI runtime failure.
-The corrected path isolates only the exact old controller Pod from Kubernetes
-API egress before `SIGSTOP`, proves its Lease has stopped renewing, and
-journals/deletes only the exact stopped Kapsule Instance root volume when
-managed deletion remains stuck. RC29 then passed artifact/install, N/N-1,
-real `virtiofs`, `SINGLE_NODE_WRITER`, the 100-PVC multiplex test, and a
-20-minute checksum soak with 4,862 writes, 5,249 reads, and zero checksum
-failures. It also produced valid provider attach/detach, parent-growth, normal
-node drain, abrupt controller-failure, and replacement-node data-read proofs.
-It was not promoted: the offline decommission scenario exposed a CSI startup
-defect in which the lifecycle crash reconciler treated a valid detailed
-historical `Deleted` tombstone as an active deletion repair and attempted to
-remount its deliberately removed parent. The controller failed closed before
-reattaching or mutating that parent. RC29 is superseded. Its run-owned resources
-remain retained for exact audited cleanup; no cleanup-absence claim is made.
-The corrected lifecycle boundary revalidates the tombstone's non-authorizing
-Kubernetes projection and performs no ownership, provider, mount, or filesystem
-operation for an unconfigured historical parent, while every reserving,
-fenced, non-terminal, or otherwise invalid reference still fails closed. The
-exact after-attach/before-claim state remains a deterministic recovery gate.
-Promotion remains blocked until the next exact candidate has concrete Linux,
-kind, CSI, Helm, Kapsule, and final-cleanup evidence.
-`POP2-HM-2C-16G` is the sole proposed commercial type for the first controlled
-run because it is the lowest-priced currently documented type with two File
-Storage slots. It is not supported or advertised until retained real-provider
-evidence is complete.
+The production qualification mounted 100 PVCs, including 10 simultaneously
+mounted logical volumes on one node through a single physical attachment, while
+the qualified Instance type exposes only two File Storage slots.
 
-`TEST-TYPE-1` in the development values is a synthetic validation fixture, not
-a supported Scaleway Instance type. A release must replace it with the sorted
-real-E2E-qualified list embedded in both binaries and recorded in their checked
-identity sidecars. Runtime startup rejects any production Helm list that differs
-from that binary identity, even if the live API reports a positive attachment
-limit.
+## Architecture
 
-The Helm chart now renders the intended controller, node plugin, CSI sidecars,
-RBAC, CSIDriver, StorageClasses, probes, metrics endpoint, and exact mount
-hostPaths for policy review. Its default values are deliberately synthetic and
-the source chart rejects `release.mode=production`. Release preparation promotes
-an exact copy with the frozen CSI identity and immutable driver/sidecar digests;
-rendering the source development chart is not an installation procedure.
+```mermaid
+flowchart LR
+    A["Application Pods"] -->|"RWX PVCs"| K["Kubernetes CSI API"]
+    K --> C["Controller plugin"]
+    K --> N1["Node plugin A"]
+    K --> N2["Node plugin B"]
+    C -->|"allocation records, Lease, recovery state"| API["Kubernetes API"]
+    C -->|"metadata and attach/detach"| SCW["Scaleway API"]
+    C -->|"ownership records and lifecycle"| P1["File Storage parent A"]
+    C -->|"ownership records and lifecycle"| P2["File Storage parent B"]
+    N1 -->|"one virtiofs mount per parent"| P1
+    N2 -->|"one virtiofs mount per parent"| P1
+    P1 --> V1["PVC subdirectory 1"]
+    P1 --> V2["PVC subdirectory 2"]
+    P1 --> VN["PVC subdirectory N"]
+```
 
-The driver executable validates the closed controller/node flag set, loads the
-exact Helm-rendered runtime projection, and assembles the production CSI,
-Kubernetes, Scaleway, mount, leadership, recovery, metrics, and admin runtime
-adapters. The versioned `csi-admin` surface includes checkpoint export/restore,
-manual GC, upgrade preflight, audited target-parent decommission, and safe
-uninstall. The repository also contains a disposable, development-only `kind`
-endpoint and chart-install harness that exercises real kubelet bind mounts,
-sidecar registration, PVC lifecycle, controller/node restarts, and cleanup
-without contacting Scaleway. This functional completeness does not replace the
-privileged Linux, Kapsule, real `virtiofs`, supported-version, cost-cleanup, and
-exact release-artifact evidence required for the eventual release candidate.
+The controller owns provisioning, pool accounting, parent attachment,
+filesystem lifecycle, recovery, and operator workflows. The privileged node
+DaemonSet mounts already-attached parents with `virtiofs`, then publishes only
+the validated logical subdirectory requested by kubelet. Scaleway credentials
+are available only to the controller; node plugins are credential-free.
 
-## Safety model
+Durable safety state deliberately uses a small set of standard components:
 
-The driver is designed to fail closed when parent ownership, immutable volume
-mapping, provider attachment state, mount identity, or destructive path safety
-cannot be proven. PVC sizes are logical reservations used for pool accounting;
-they are not hard filesystem quotas in v1.
+- Kubernetes ConfigMaps for allocation, reservation, operation, and recovery
+  records;
+- a Kubernetes Lease for controller ownership and fencing;
+- a driver-owned logical-volume ownership record on the parent filesystem;
+- one parent-global claim binding the parent to the installation and cluster;
+- permanent tombstones preventing silent logical-volume name reuse.
+
+V1 intentionally has one controller replica, no CRD, no external database, and
+no automatic parent-filesystem manager.
+
+## V1 capabilities
+
+### Storage and Kubernetes
+
+- Dynamic provisioning of isolated RWX subdirectory volumes.
+- `ReadWriteMany` and `SINGLE_NODE_WRITER`, with cross-node conflict fencing
+  for the single-writer mode and read-only Pod publication when requested.
+- Multiple logical volumes per physical File Storage attachment.
+- Multiple explicit parents per pool with least-allocated selection.
+- Logical capacity reservations, free-space thresholds, and bounded
+  overcommit configuration.
+- Live refresh after an operator grows a parent filesystem.
+- Non-default StorageClasses and a Helm deployment whose driver and CSI
+  sidecars are pinned by immutable digest.
+- Coexistence with the official Scaleway File Storage CSI driver using distinct
+  driver and StorageClass identities.
+
+### Data safety and lifecycle
+
+- Fail-closed ownership checks: directory names alone never prove ownership.
+- Descriptor-relative path operations that reject symlink swaps, foreign mount
+  generations, stacked mounts, and mount-boundary crossings.
+- Crash-safe dual records and filesystem durability barriers.
+- Persistent published-node fences that block unsafe delete, archive, retain,
+  and garbage collection.
+- Idempotent CSI operations with explicit retry, cancellation, timeout, and
+  ambiguous-provider handling.
+- Permanent terminal tombstones and no logical-volume name reuse in V1.
+- Three explicit delete behaviors:
+
+| Kubernetes reclaim policy | CSI `onDelete` | Result |
+| --- | --- | --- |
+| `Delete` | `archive` | PV is deleted; data is moved to a protected archive path. |
+| `Delete` | `delete` | PV and validated data directory are deleted. |
+| `Delete` | `retain` | PV is deleted; data remains in a protected retained path. |
+
+`archive` is the production default. Archived and retained volumes continue to
+reserve logical capacity until audited garbage collection completes.
+
+The allocation lifecycle is forward-only:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Reserved
+    Reserved --> CreatingDirectory
+    CreatingDirectory --> Ready
+    Ready --> Deleting
+    Deleting --> Archived
+    Deleting --> Retained
+    Deleting --> Deleted
+    Archived --> Deleted: audited GC
+    Retained --> Deleted: audited GC
+```
+
+### Recovery and operations
+
+- Normal controller replacement while preserving Lease identity.
+- Fail-closed abnormal takeover requiring conclusive provider fencing and an
+  explicit, one-use approval.
+- Durable first-install parent bootstrap and exact same-Pod crash recovery.
+- Namespace checkpoint export and same-cluster restore with digest-verified
+  archives and complete pre-recovery Instance fencing.
+- N/N-1 upgrade preflight, mixed-generation blocking, rollback, and convergence
+  checks.
+- Audited parent draining and decommissioning.
+- Audited archive/retain garbage collection.
+- Safe uninstall that removes workloads, mounts, attachments, driver Pods, and
+  Helm objects in the required order without deleting external Secrets,
+  tombstones, or user data.
+- Prometheus metrics, health endpoints, bounded labels, and maintained sample
+  alerts.
+
+The matching, checksum-verifiable `csi-admin` binary implements checkpoint,
+restore, upgrade preflight, garbage collection, parent decommission, and safe
+uninstall workflows. Destructive operations use separate dry-run and execute
+steps with stable request IDs.
+
+## Production qualification
+
+The exact RC36 source, chart, release values, five immutable images, AMD64
+binaries, Linux results, kind results, real Kapsule result, and final cleanup
+inventory are bound by one canonical qualification manifest. The final real
+cloud run completed all 14 scenarios continuously and removed every run-owned
+billable resource.
+
+| # | Qualifying scenario | What it proved |
+| ---: | --- | --- |
+| 1 | Artifact and install preflight | Exact commit, chart, values, image digests, security contexts, RBAC, CSI identity, and eligible nodes. |
+| 2 | N-1 upgrade | RC14 to RC36 upgrade, interrupted rollout rollback, mixed-generation fail-closed behavior, data and identity preservation. |
+| 3 | Real `virtiofs` | Parent mount, `statfs`, logical volume, controller replacement, and persisted data. |
+| 4 | Single-node-writer conflict | Second-node conflict rejection followed by clean handoff and read/write recovery. |
+| 5 | 100-PVC scale and RWX soak | 100 Bound PVCs, multiplexing beyond the physical attachment limit, concurrent cross-node integrity, and restarts. |
+| 6 | Provider attach/detach | Foreign attachment blocking, exact detach, retry, and durable bootstrap recovery. |
+| 7 | Parent growth | Real parent resize from 100 GB to 200 GB, refreshed capacity, and new allocation. |
+| 8 | Node drain and replacement | Normal drain, new Instance/node/plugin readiness, and persisted-data access. |
+| 9 | Hard controller failure | Frozen and API-fenced controller, blocked successor, provider fencing, approved recovery, and continued data availability. |
+| 10 | Parent decommission | Dry-run and execute audit, exact detach, configuration removal, preserved tombstones, and healthy remaining pool. |
+| 11 | Checkpoint and restore | Quiesced export, namespace deletion, complete old-worker fencing, exact restore, old-data read, and new provisioning. |
+| 12 | Missing-Lease recovery | Non-serving provisional controller, complete fencing scope, one-use approval, and stale/cross-cluster rejection. |
+| 13 | Official CSI coexistence | Distinct drivers and StorageClasses, no release-object collision, and both official CSI node Pods ready. |
+| 14 | Safe uninstall and cleanup | Workload/PV removal, fence clearing, exact unmount/detach, Helm/namespace removal, and seven cloud resources conclusively absent. |
+
+### RWX stress evidence
+
+The scale scenario used 10 active PVC pairs across two nodes for 1,204 seconds:
+
+- 20 concurrent writers and 20 concurrent readers;
+- 9,780 completed writes;
+- 9,063 distinct cross-peer reads;
+- zero checksum failures;
+- successful new read/write operations after a controller restart;
+- successful new read/write operations after node-plugin restarts;
+- read-only enforcement verified;
+- node containers verified free of Scaleway credentials.
+
+### Verification stack
+
+The release gates additionally include:
+
+- unit, fake Kubernetes, fake Scaleway, fake clock, and fake mounter tests;
+- `go test -race ./...`, `go vet`, `gofmt`, and `golangci-lint`;
+- the pinned upstream Kubernetes CSI sanity suite;
+- privileged Linux mount-namespace, mount-generation, symlink-race, exact
+  unmount, and filesystem durability tests;
+- Helm lint, schema, render, immutable-image, RBAC, and security-context tests;
+- a disposable kind installation covering chart wiring, PVC lifecycle,
+  controller/node restarts, deletion, and Kubernetes persistence adapters;
+- deterministic AMD64 binary builds, SHA-256 manifests, SPDX SBOM, and SLSA
+  provenance subjects;
+- exact-ID cloud cleanup and an independent final Project inventory.
+
+Qualification is intentionally bounded. It proves the supported production
+envelope below; it does not claim that every Kubernetes version, region,
+architecture, or Scaleway Instance type is supported.
+
+## Supported production envelope
+
+| Dimension | V1 support |
+| --- | --- |
+| Cloud | Scaleway Kapsule with the GA File Storage product |
+| Region | `fr-par` |
+| Node architecture | Linux `amd64` only |
+| Qualified Instance type | `POP2-HM-2C-16G` |
+| CSI driver name | `file-storage-subdir.csi.urlab.ai` — immutable after first use |
+| Parent filesystems | Existing, empty, dedicated File Storage filesystems owned exclusively by one installation |
+| Controller | One replica with Lease-based coordination and `Recreate` rollout |
+| Scheduling | At least two Ready, homogeneous eligible Linux nodes; all schedulable Linux nodes are eligible |
+| Parent management | Operator-created and operator-resized; the driver never creates, resizes, or deletes parents |
+| Volume expansion | PVC expansion is disabled in V1; parent upward growth is supported |
+| Quotas | Logical reservations and free-space gates, not hard per-directory filesystem quotas |
+
+V1 does not advertise CSI reader-only capability modes such as
+`MULTI_NODE_READER_ONLY`; it supports read-only publication of an otherwise
+supported mount capability.
+
+Every eligible node must support the Linux mount and identity primitives checked
+by startup, including `STATX_MNT_ID_UNIQUE`, `open_tree`, `move_mount`,
+`mount_setattr`, `fsopen`, `fsconfig`, and `fsmount`. Unsupported nodes make the
+driver fail closed before provisioning.
+
+The official Scaleway CSI may coexist in the cluster, but it must not actively
+manage File Storage volumes on this driver's workload nodes in the V1 support
+contract.
+
+## Public artifacts
+
+- Source and issues: <https://github.com/urlab-ai/scaleway-file-storage-subdir-csi>
+- Driver image: `ghcr.io/urlab-ai/scaleway-file-storage-subdir-csi`
+- Helm chart: `oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi`
+- Operator binary, checksums, SBOM, and provenance: matching GitHub Release
+- CSI identity: `file-storage-subdir.csi.urlab.ai`
+
+Production manifests render the driver and all CSI sidecars as
+`repository@sha256:<digest>`. Never replace a digest with `latest` or a mutable
+tag.
+
+## Installation overview
+
+The complete procedure and safety checks are in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md). The following is an overview, not a
+replacement for the preflight and release-specific values.
+
+### 1. Create dedicated parent filesystems
+
+Create at least two empty parents in `fr-par`. Size them for the expected
+physical data footprint; PVC requests are logical reservations rather than hard
+directory quotas.
+
+```bash
+scw file filesystem create \
+  region=fr-par \
+  name=sfs-subdir-pool-standard-01 \
+  size=100GB
+
+scw file filesystem create \
+  region=fr-par \
+  name=sfs-subdir-pool-standard-02 \
+  size=100GB
+```
+
+Record both filesystem IDs. A parent must be empty, dedicated to one driver
+installation, and must never be shared between installations or manually
+edited after it has been claimed.
+
+### 2. Configure least-privilege cloud access
+
+Use a Scaleway IAM application scoped to the target Project with:
+
+- `FileStorageReadOnly` for existing parent metadata;
+- `InstancesFullAccess` for Instance inventory and File Storage attach/detach.
+
+`InstancesFullAccess` is broader than ideal because Scaleway does not currently
+provide a narrower attachment-only permission set covered by this release. The
+driver does not require `FileStorageFullAccess`: it never creates, resizes, or
+deletes parent filesystems.
+
+The target Kapsule cluster must carry the `scw-filestorage-csi` tag at cluster
+level, and every eligible node must use the qualified commercial type.
+
+### 3. Create the privileged namespace and external Secrets
+
+```bash
+kubectl create namespace scaleway-sfs-subdir-csi
+kubectl label namespace scaleway-sfs-subdir-csi \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/enforce-version=latest
+
+kubectl -n scaleway-sfs-subdir-csi create secret generic \
+  scaleway-sfs-subdir-csi-credentials \
+  --from-literal=SCW_ACCESS_KEY="$SCW_ACCESS_KEY" \
+  --from-literal=SCW_SECRET_KEY="$SCW_SECRET_KEY"
+
+INSTALLATION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+kubectl -n scaleway-sfs-subdir-csi create secret generic \
+  scaleway-sfs-subdir-csi-identity \
+  --from-literal=installationID="$INSTALLATION_ID"
+```
+
+Back up the installation identity with the driver namespace and keep it stable
+for the lifetime of every PV and tombstone. Do not pass raw credentials through
+Helm values. The chart requires an existing credential Secret and mounts it
+only in the controller.
+
+### 4. Run the non-mutating installation preflight
+
+Download the preflight script and exact release values from the matching GitHub
+Release, then run:
+
+```bash
+./hack/install-preflight.sh \
+  --namespace=scaleway-sfs-subdir-csi \
+  --credentials-secret=scaleway-sfs-subdir-csi-credentials \
+  --credentials-access-key=SCW_ACCESS_KEY \
+  --credentials-secret-key=SCW_SECRET_KEY \
+  --identity-secret=scaleway-sfs-subdir-csi-identity \
+  --identity-key=installationID \
+  --cluster-id=<kapsule-cluster-uuid> \
+  --project-id=<scaleway-project-uuid> \
+  --region=fr-par
+```
+
+The preflight checks namespace admission, Secret key names, Project and region,
+Kapsule type, cluster tag, and the effective privileged Pod policy. It does not
+print Secret values, persist an object, install Helm resources, or mutate a
+Scaleway resource.
+
+### 5. Install the immutable release chart
+
+Use the release-specific values file. It carries the exact qualified driver,
+sidecar digests, and commercial-type allowlist.
+
+```bash
+helm upgrade --install scaleway-sfs-subdir-csi \
+  oci://ghcr.io/urlab-ai/charts/scaleway-sfs-subdir-csi \
+  --version <release-version> \
+  --namespace scaleway-sfs-subdir-csi \
+  --values /absolute/path/values_<release-tag>.yaml \
+  --set scaleway.region=fr-par \
+  --set scaleway.defaultZone=fr-par-1 \
+  --set scaleway.projectId=<scaleway-project-uuid> \
+  --set scaleway.credentials.existingSecretName=scaleway-sfs-subdir-csi-credentials \
+  --set installation.existingSecretName=scaleway-sfs-subdir-csi-identity \
+  --set 'pools.standard.filesystems[0].id=<filesystem-id-1>' \
+  --set 'pools.standard.filesystems[1].id=<filesystem-id-2>'
+```
+
+Do not install directly from the development chart in this repository: its safe
+defaults intentionally reject production mode.
+
+### 6. Provision an ordinary RWX PVC
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: sfs-subdir-rwx
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+Kubernetes dynamically provisions a logical volume. Multiple Pods may mount the
+same PVC from different eligible nodes and read or write the same data.
+
+## Operating the driver
+
+- [Operations guide](docs/OPERATIONS.md): installation, upgrades, recovery,
+  checkpoint/restore, decommission, GC, and safe uninstall.
+- [Architecture and trust boundaries](docs/ARCHITECTURE.md): data path,
+  coordination, durable state, and security boundaries.
+- [Troubleshooting](docs/TROUBLESHOOTING.md): fail-closed states and supported
+  recovery procedures.
+- [Prometheus alerts](docs/ALERTS.md): capacity, attachment, lifecycle,
+  readiness, and fencing alerts.
+- [Normative specification](docs/SPECIFICATION.md): authoritative behavior and
+  safety invariants.
+
+Never manually delete allocation, ownership, parent-claim, approval, progress,
+or tombstone state. Never run `helm uninstall` before the matching
+checksum-verified `csi-admin uninstall prepare` workflow has completed and its
+audit has been retained.
+
+## Security model
+
+- All CSI requests, Kubernetes objects, provider responses, restored metadata,
+  paths, and filesystem entries are treated as untrusted input.
+- The driver never mutates or removes a path from its name alone.
+- Destructive traversal never follows symlinks or crosses mount boundaries.
+- Foreign, aliased, replaced, or stacked mounts are never unmounted.
+- Unavailable, forbidden, stale, timed-out, or ambiguous reads are never treated
+  as absence.
+- Existing healthy mounts remain available during temporary controller or
+  Scaleway API outages.
+- Node Pods are privileged only for their mount responsibilities and receive no
+  Scaleway credentials or Kubernetes API permissions.
+- CSI images, sidecars, chart, operator binary, checksums, SBOM, and provenance
+  are versioned together.
+
+Please report vulnerabilities through the process in [`SECURITY.md`](SECURITY.md),
+not through a public issue.
+
+## Release status
+
+RC36 passed the complete production qualification matrix on 2026-08-02. Its
+canonical candidate manifest digest is:
+
+```text
+sha256:83e34e492fa59431cef275c46d449f3f6fbe47d2436ee320be5385cf638bf44e
+```
+
+Its canonical qualification manifest has SHA-256:
+
+```text
+cc2635d81950e81ff4202d32633be71d9d8a294e5c28b2a298d88c343c754363
+```
+
+The stable release is publishable only when the public Git tag, binary
+`vendor_version`, image tag and digest, chart version, release values,
+checksums, SBOM, provenance, and qualification authority all identify one
+coherent SemVer release. Re-labeling RC36 as a different version without that
+proof is deliberately rejected.
 
 ## Development
 
-Prerequisites currently include Go 1.26, Helm 3.18, and `jq` for validating the
-closed runtime JSON rendered by Helm.
-
-The in-cluster v1 binaries target Linux `amd64` only. Release CI cross-compiles
-that target; destructive filesystem behavior still requires the privileged
-Linux and real `virtiofs` release suites defined by the specification. Other
-architectures, including Linux `arm64`, remain unsupported until an explicit
-release-matrix change qualifies their kernel, image, Instance type, and real
-Kapsule behavior through the same gates.
-Nodes must expose `statx(STATX_MNT_ID_UNIQUE)` (normally Linux 6.8 or a kernel
-with that primitive backported), `open_tree`, `move_mount`, `mount_setattr`,
-`fsopen`, `fsconfig`, and `fsmount`.
-The runtime security profile must allow those syscalls plus procfs mount-FD
-identity reads. Startup exercises the complete protocol inside the chart's
-private, non-propagated mount-quarantine `emptyDir`; it does not wait until the
-first cleanup to discover an incompatible kernel. The driver deliberately
-refuses reusable mountinfo IDs or pathname-only checks as authority to unmount
-or roll back a target.
-
-The v1 mount-safety threat model covers kubelet, CSI concurrency, process
-crashes, retries, and cooperating driver generations. An unrelated process
-with node-root mount privileges is outside that model: root already has direct
-authority to replace or unmount every workload mount on the node.
+The normal local verification subset is:
 
 ```bash
 make fmt-check
@@ -177,107 +451,20 @@ make test
 make test-race
 make test-csi-sanity
 make vet
-make test-linux-cross-compile
-make test-release-binaries
-make test-release-manifest
-make test-install-preflight
+make lint
 make helm-lint
 make helm-test
-make docker-build
-make test-kind
+make test-install-preflight
 ```
 
-`make helm-test` renders the chart, checks its security and ownership policy,
-and proves that unsafe cross-field values are rejected. It does not contact a
-Kubernetes cluster.
+`make test-kind` creates and removes a local disposable kind cluster and never
+calls Scaleway. `make test-linux-privileged` requires Linux root in a private
+mount namespace. Real Scaleway tests require a dedicated Project, an explicitly
+approved exact plan, tagged disposable resources, retained evidence, and exact
+cleanup; they are never run by GitHub Actions.
 
-A future release installation must run
-[`hack/install-preflight.sh`](hack/install-preflight.sh) before Helm. The
-operator-side command verifies effective privileged Pod admission with a
-non-persistent server-side dry-run, checks the required external Secret key
-names selected by the Helm values without printing values, and reads the exact Kapsule cluster to require
-the cluster-level `scw-filestorage-csi` tag, matching Project, and region. A tag
-applied only to the node pool is not sufficient. See the
-[operations guide](docs/OPERATIONS.md#release-installation-prerequisites) for
-the complete invocation.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a change.
 
-`make test-kind` downloads the checksum-pinned kind v0.32.0 binary when needed,
-creates one disposable Kubernetes 1.35 cluster, builds the separate
-`Dockerfile.kind` image, and always removes the cluster. It performs no
-Scaleway API call. `make test-linux-privileged` is a separate Linux-root gate
-for a private mount namespace and is not runnable on macOS.
+## License
 
-Release tooling keeps the human tag separate from CSI identity. For example,
-`RELEASE_TAG=v1.2.3 VERSION=1.2.3` names artifacts with `v1.2.3` while both
-binaries report strict unprefixed SemVer `1.2.3`. A complete Git object ID and
-canonical UTC build timestamp are also mandatory; development placeholders
-cannot produce release artifacts. The same deterministic build emits SHA-256
-checksums, an SPDX 2.3 SBOM, and unsigned SLSA provenance subjects for all four
-binaries and their identity/module sidecars. Repository coordinates are an
-explicit required input; the tool never invents a public URL, and local output
-identifies the local evidence generator rather than claiming a CI builder.
-The repository intentionally contains only one GitHub Actions workflow:
-[`ci.yaml`](.github/workflows/ci.yaml). It runs local source, CSI, Linux, Helm,
-container-build, and disposable `kind` checks. It has no Scaleway credentials,
-does not call a Scaleway API, and does not publish release artifacts. Release
-preparation and publication remain explicit operator actions in v1; this keeps
-the automation small and prevents a repository workflow from provisioning or
-deleting billable cloud resources.
-`make test-release-manifest` independently proves that a release-candidate chart
-can render only the closed driver/sidecar set by immutable digest. The public
-coordinates above are fixed; the tool still never publishes artifacts by
-itself.
-
-Before using a published operator binary, download its matching release
-checksum manifest and every file listed by that manifest into an otherwise
-empty directory, verify the whole manifest, and only then inspect the binary's
-embedded version. For example:
-
-```bash
-sha256sum --check checksums_v1.2.3.txt
-./csi-admin_v1.2.3_linux_amd64 version
-```
-
-On macOS, use `shasum -a 256 --check checksums_v1.2.3.txt`. The manifest also
-covers the generated SBOM and unsigned provenance statement. Checksums and
-unsigned subjects do not replace signed attestation or verification that the
-Git commit, chart, driver image, sidecar digests, and `csi-admin` version all
-belong to the same qualified release.
-
-No real Scaleway resource may be created, changed, detached, resized, stopped,
-or deleted without an explicit approved E2E plan immediately before the action.
-No GitHub Actions workflow invokes the live runner. Real qualification is an
-operator-controlled command run only from a dedicated test environment after
-the immediate approval described below.
-The development-only `scaleway-e2e-plan` and `scaleway-e2e-cleanup --dry-run`
-commands remain non-authorizing review tools. The separate
-`scaleway-e2e-run` command is dry-run by default, requires the complete run ID
-for live execution or cleanup, journals exact IDs, and fails closed on any
-ownership or cleanup ambiguity. Its existence is not cloud evidence; see [the
-operations guide](docs/OPERATIONS.md#real-e2e-planning-execution-and-cleanup).
-Cleanup refuses a missing retained ledger and accepts Kubernetes/Helm cleanup
-preconditions only from a completed structured `csi-admin` safe-uninstall
-audit. It never converts an unavailable API or absent local file into success.
-The `base` profile can execute the fixed, explicitly non-qualifying first smoke
-matrix: two nodes, two product-minimum 25 GB parents, ten logical PVCs,
-cross-node RWX, isolation and archive, controller replacement, provider
-attachment inventory bounded to the two parents and two nodes, safe uninstall,
-and exact cleanup. Its evidence contains
-`releaseQualified=false` and is rejected by release promotion. The
-`release-candidate` profile executes only after every scenario in the bounded
-production matrix has structured proof validation; any remaining blocker makes
-it refuse before credentials or provider mutation. That implementation
-interlock is currently clear; this authorizes a controlled qualification run,
-not release promotion. The run includes the exact 100-PVC multiplex check and
-a 20-minute checksum correctness soak across controller and node-plugin
-restarts. It always creates a dedicated ephemeral cluster and Private Network;
-cluster reuse is deliberately unsupported so destructive qualification cannot
-select a foreign node. The exact public N-1 manifest, chart, values,
-compatibility identity, and immutable image are cross-checked before provider
-mutation. Credential-free recovery journals make interrupted controller-stop
-and checkpoint transitions resumable by `--cleanup-only` without broadening
-cleanup authority. The live artifact proof also binds the five images observed
-in controller/node workloads to the five candidate digests. Interrupted
-disposable-Instance attachments and N/N-1 mixed-generation transitions are
-recovered before safe uninstall. `--cleanup-only` remains available for an
-already approved retained run.
+[MIT](LICENSE)

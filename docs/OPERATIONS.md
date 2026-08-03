@@ -77,20 +77,31 @@ cleanup; they are not claimed absent. Startup and periodic reconciliation now
 validate that tombstone only through its non-authorizing Kubernetes projection
 and never dispatch it to delete or GC recovery. A configured-parent tombstone
 still completes its exact forward crash window, while every active, reserving,
-fenced, or invalid unconfigured-parent record remains fail-closed. None is a
-qualified production release until that exact candidate passes every gate. The
+fenced, or invalid unconfigured-parent record remains fail-closed. None of the
+superseded candidates above is a qualified production release. The
 source chart rejects `release.mode=production`; only an exact promoted chart
-copy with immutable image metadata may enable it. Supported versions and
-real-provider evidence still require approval. The CSI runtime and checkpoint
-export/restore, parent decommission,
-GC, upgrade preflight, and safe-uninstall operator workflows are implemented
-and locally testable. The automated disposable kind chart-install/PVC/restart
-suite is implemented and runs without Scaleway access. Privileged Linux, exact
-packaged-artifact, and real Kapsule qualification still have to pass for the
-exact release candidate, and the kind result must be repeated against those
-exact artifacts. The procedures below define that review boundary; do not
-treat a development chart render as a supported release until it passes every gate in
-[`SPECIFICATION.md`](SPECIFICATION.md).
+copy with immutable image metadata may enable it. The CSI runtime and
+checkpoint export/restore, parent decommission, GC, upgrade preflight, and
+safe-uninstall operator workflows are implemented. The automated disposable
+kind chart-install/PVC/restart suite runs without Scaleway access. The
+procedures below define the production review boundary; never treat a
+development chart render as a supported release.
+
+RC33 through RC35 are superseded intermediate candidates. RC36, exact commit
+`477d6b5b20aa056638ce07b68f4ae7934cb5de69`, subsequently passed the complete
+Linux, CSI, Helm, kind, fourteen-scenario Kapsule, and exact-cleanup
+qualification described by the specification. Its 1,204-second RWX soak used
+20 writers and 20 readers, completed 9,780 writes and 9,063 distinct cross-peer
+reads, and reported zero checksum failures across controller and node-plugin
+restarts. Exact cleanup and an independent Project inventory proved all seven
+run-created cloud resources absent. RC36 is therefore a production-qualified
+candidate for `POP2-HM-2C-16G` in `fr-par` on Linux `amd64`.
+
+Its artifact version remains the SemVer prerelease `0.1.0-rc.36`. Do not create
+a stable tag whose name disagrees with the embedded binary, image, chart,
+values, checksums, or qualification manifest. Stable publication is allowed
+only after the exact-byte release identity rule in the specification is
+satisfied; never bypass that rule by retagging the RC36 bytes as `v1.0.0`.
 
 ## Safety rules
 

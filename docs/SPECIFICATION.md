@@ -425,13 +425,40 @@ be promoted. The closed all-parent Lease plan specified in sections 6.3 and
 and gives the run-owned cleanup path enough strict evidence to remove a failed
 disposable installation without adopting or deleting logical data.
 
+RC33 through RC35 are superseded intermediate candidates. RC36, exact commit
+`477d6b5b20aa056638ce07b68f4ae7934cb5de69`, completed the full local, Linux,
+CSI sanity, Helm, kind, and real Kapsule qualification on 2026-08-02. Its one
+continuous release-candidate run completed all fourteen ordered scenarios,
+including N/N-1 upgrade, real `virtiofs`, `SINGLE_NODE_WRITER`, exactly 100
+Bound PVCs, parent attachment/detachment and growth, normal node replacement,
+abrupt controller failure, parent decommission, checkpoint/restore,
+missing-Lease recovery, official-CSI coexistence, and safe uninstall. The
+1,204-second RWX soak used 20 writers and 20 readers, completed 9,780 writes and
+9,063 distinct cross-peer reads across controller and node-plugin restarts, and
+reported zero checksum failures. The final cleanup audit and an independent
+Project inventory proved the run-created Private Network, Kapsule cluster, node
+pool, two parents, disposable Instance, and root SBS volume conclusively absent.
+The canonical candidate-manifest digest is
+`sha256:83e34e492fa59431cef275c46d449f3f6fbe47d2436ee320be5385cf638bf44e`;
+the retained qualification-manifest SHA-256 is
+`cc2635d81950e81ff4202d32633be71d9d8a294e5c28b2a298d88c343c754363`.
+RC36 therefore qualifies `POP2-HM-2C-16G` for this exact production candidate.
+
+RC36 remains a SemVer prerelease whose binary, image, chart, and values identity
+is `0.1.0-rc.36`. It must not be relabelled as `v1.0.0`, or as any other stable
+version, while retaining those prerelease bytes. Stable publication requires
+one coherent Git tag, embedded runtime version, image identity, chart version,
+values, checksums, provenance, and qualification authority. This publication
+identity constraint does not invalidate RC36's functional qualification, but it
+must be resolved without weakening the exact-byte release rule in section 12.8.
+
 No candidate is a production support claim until every Linux, kind, CSI, Helm,
 real Kapsule, and final-cleanup qualification gate passes.
 Supported Kubernetes and Kapsule versions remain limited to the exact versions
-retained in that qualification evidence. `POP2-HM-2C-16G` is the sole proposed
-commercial type for the first controlled run because it is the lowest-priced
-currently documented type with two File Storage slots; it does not enter the
-supported allowlist unless that exact run and its cleanup evidence pass.
+retained in that qualification evidence. `POP2-HM-2C-16G` is the sole qualified
+commercial type for RC36 because it is the lowest-priced documented type in the
+tested matrix with two File Storage slots. No other commercial type enters the
+supported allowlist without its own exact real-provider qualification evidence.
 
 The v1 controller and node images support Linux `amd64` only. Release CI must
 compile that architecture, and the real-provider support matrix must retain
